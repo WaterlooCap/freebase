@@ -1,6 +1,7 @@
 (ns metabase.lib.validate
   "Checks and validation for queries."
   (:require
+   [metabase.lib.field :as lib.field]
    [metabase.lib.field.resolution :as lib.field.resolution]
    [metabase.lib.join :as lib.join]
    [metabase.lib.metadata :as lib.metadata]
@@ -9,35 +10,36 @@
    [metabase.lib.schema.validate :as lib.schema.validate]
    [metabase.lib.util :as lib.util]
    [metabase.lib.walk :as lib.walk]
-   [metabase.util.malli :as mu]))
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :as perf]))
 
 (mu/defn missing-column-error :- [:ref ::lib.schema.validate/missing-column-error]
   "Create a missing-column lib validation error"
   [col-name :- :string]
-  {:type :validate/missing-column
+  {:type :missing-column
    :name col-name})
 
 (mu/defn missing-table-alias-error :- [:ref ::lib.schema.validate/missing-table-alias-error]
   "Create a missing-table-alias lib validation error"
   [alias-name :- :string]
-  {:type :validate/missing-table-alias
+  {:type :missing-table-alias
    :name alias-name})
 
 (mu/defn duplicate-column-error :- [:ref ::lib.schema.validate/duplicate-column-error]
   "Create a duplicate-column lib validation error"
   [col-name :- :string]
-  {:type :validate/duplicate-column
+  {:type :duplicate-column
    :name col-name})
 
 (mu/defn syntax-error :- [:ref ::lib.schema.validate/syntax-error]
   "Create a syntax-error lib validation error"
   []
-  {:type :validate/syntax-error})
+  {:type :syntax-error})
 
 (mu/defn validation-exception-error :- [:ref ::lib.schema.validate/validation-exception-error]
   "Create a validation-exception-error lib validation error"
   [message :- :string]
-  {:type :validate/validation-exception-error
+  {:type :validation-exception-error
    :message message})
 
 (defn- extract-source-from-field-ref
@@ -113,10 +115,11 @@
 (mu/defn find-bad-refs-with-source :- [:set ::lib.schema.validate/error-with-source]
   "Like [[find-bad-refs]] but includes source entity information for each error.
    Returns a set of error maps, each containing:
-   - `:type` - the error type (e.g., `:validate/missing-column`)
+   - `:type` - the error type (e.g., `:missing-column`)
    - `:name` - the column name (for missing-column errors)
    - `:source-entity-type` - optional, `:table` or `:card` if source could be determined
-   - `:source-entity-id` - optional, the ID of the source entity"
+   - `:source-entity-id` - optional, the ID of the source entity
+   - `:soft?` - optional, true when the ref could be dropped (eg. from a `:fields` list) without breaking the query"
   [query :- ::lib.schema/query]
   (let [bad-fields (volatile! #{})]
     (lib.walk/walk-clauses
@@ -126,14 +129,18 @@
                   (vector? clause)
                   (= (first clause) :field))
          (let [{:keys [query stage-number]} (lib.walk/query-for-path query path)
-               column (lib.field.resolution/resolve-field-ref query stage-number clause)]
+               column (lib.field.resolution/resolve-field-ref query stage-number clause)
+               fields (lib.field/fields query stage-number)]
            (when (or (not column)
                      (::lib.field.resolution/fallback-metadata? column)
                      (not (:active column true)))
              (let [col-name (lib.metadata.calculation/column-name query stage-number column)
                    source   (extract-source-from-field-ref query stage-number clause)
                    error    (cond-> (missing-column-error col-name)
-                              source (merge source))]
+                              source                                          (merge source)
+                              (and (not (:active column true))
+                                   (seq fields)
+                                   (perf/some #(identical? clause %) fields)) (assoc :soft? true))]
                (vswap! bad-fields conj error)))))
        nil))
     @bad-fields))

@@ -35,6 +35,7 @@
           content
           ["FieldValues"
            "Metabot"
+           "PythonLibrary"
            "Setting"
            "Transform"
            "TransformJob"
@@ -96,7 +97,7 @@
    "PermissionsGroupMembership"
    "PermissionsRevision"
    "PersistedInfo"
-   "PythonLibrary"
+   "PremiumFeaturesCache"
    "Pulse"
    "PulseCard"
    "PulseChannel"
@@ -108,6 +109,7 @@
    "QueryField"
    "QueryTable"
    "RecentViews"
+   "ReplacementRun"
    "RemoteSyncObject"
    "RemoteSyncTask"
    "Revision"
@@ -118,6 +120,7 @@
    "Session"
    "SupportAccessGrantLog"
    "TaskHistory"
+   "TaskRun"
    "Tenant"
    "TransformJobRun"
    "TransformRun"
@@ -126,4 +129,17 @@
    "User"
    "UserKeyValue"
    "UserParameterValue"
-   "ViewLog"])
+   "ViewLog"
+   "Workspace"
+   ;; TODO (lbrdnk 2025-12-17) -- I've added rest of the workspace models. I believe some of those will be available for
+   ;; serialization, hence we should revisit this later in the project.
+   "WorkspaceInput"
+   "WorkspaceInputExternal"
+   "WorkspaceInputTransform"
+   "WorkspaceLog"
+   "WorkspaceMerge"
+   "WorkspaceMergeTransform"
+   "WorkspaceGraph"
+   "WorkspaceOutput"
+   "WorkspaceOutputExternal"
+   "WorkspaceTransform"])

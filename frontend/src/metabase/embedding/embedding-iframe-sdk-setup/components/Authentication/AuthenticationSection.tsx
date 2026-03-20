@@ -1,7 +1,6 @@
-import type { ReactNode } from "react";
-import { Link } from "react-router";
-import { c, t } from "ttag";
+import { t } from "ttag";
 
+import { SdkIframeStepEnableEmbeddingSection } from "metabase/embedding/embedding-iframe-sdk-setup/components/SdkIframeStepEnableEmbeddingSection";
 import { useSdkIframeEmbedSetupContext } from "metabase/embedding/embedding-iframe-sdk-setup/context";
 import {
   DEFAULT_EXPERIENCE,
@@ -10,10 +9,11 @@ import {
 import { getAuthTypeForSettings } from "metabase/embedding/embedding-iframe-sdk-setup/utils/get-auth-type-for-settings";
 import { isQuestionOrDashboardExperience } from "metabase/embedding/embedding-iframe-sdk-setup/utils/is-question-or-dashboard-experience";
 import { isStepWithResource } from "metabase/embedding/embedding-iframe-sdk-setup/utils/is-step-with-resource";
-import { useDispatch } from "metabase/lib/redux";
-import { isEEBuild } from "metabase/lib/utils";
-import { closeModal } from "metabase/redux/ui";
-import { Card, Flex, HoverCard, Icon, Radio, Stack, Text } from "metabase/ui";
+import { Card, Radio, Stack, Text } from "metabase/ui";
+
+import { getResourceTypeFromExperience } from "../../utils/get-resource-type-from-experience";
+
+import { DatabaseRoutingWarning } from "./DatabaseRoutingWarning";
 
 export const AuthenticationSection = () => {
   const {
@@ -23,8 +23,11 @@ export const AuthenticationSection = () => {
     currentStep,
     settings,
     updateSettings,
+    resource,
   } = useSdkIframeEmbedSetupContext();
   const handleEmbedExperienceChange = useHandleExperienceChange();
+
+  const resourceType = getResourceTypeFromExperience(experience);
 
   if (!isFirstStep) {
     return null;
@@ -61,75 +64,28 @@ export const AuthenticationSection = () => {
 
         <Radio.Group value={authType} onChange={handleAuthTypeChange}>
           <Stack gap="sm">
-            <WithGuestEmbedsDisabledWarning>
-              {({ disabled }) => (
-                <Radio
-                  disabled={disabled}
-                  value="guest-embed"
-                  label={t`Guest`}
-                />
-              )}
-            </WithGuestEmbedsDisabledWarning>
+            <Radio value="guest-embed" label={t`Guest`} />
 
             <Radio
               value="sso"
               label={
-                // eslint-disable-next-line no-literal-metabase-strings -- Public Facing string
+                // eslint-disable-next-line metabase/no-literal-metabase-strings -- Public Facing string
                 t`Metabase account (SSO)`
               }
               disabled={!isSimpleEmbedFeatureAvailable}
             />
           </Stack>
         </Radio.Group>
-      </Stack>
-    </Card>
-  );
-};
 
-const WithGuestEmbedsDisabledWarning = ({
-  children,
-}: {
-  children: (data: { disabled: boolean }) => ReactNode;
-}) => {
-  const dispatch = useDispatch();
-
-  const { isGuestEmbedsEnabled } = useSdkIframeEmbedSetupContext();
-
-  // We show the icon only in the EE build. For the OSS build we show the EnableEmbeddingCard
-  const showIcon = isEEBuild();
-
-  return (
-    <Flex align="center" gap="xs">
-      {children({ disabled: !isGuestEmbedsEnabled })}
-
-      <HoverCard>
-        {showIcon && !isGuestEmbedsEnabled && (
-          <HoverCard.Target>
-            <Icon
-              data-testid="guest-embeds-disabled-info-icon"
-              name="info"
-              size={14}
-              c="text-secondary"
-            />
-          </HoverCard.Target>
+        {authType === "guest-embed" && resource && resourceType && (
+          <DatabaseRoutingWarning
+            resource={resource}
+            resourceType={resourceType}
+          />
         )}
 
-        <HoverCard.Dropdown p="sm">
-          <Text>{c(
-            "{0} is a link to guest embeds settings page with text 'admin settings'",
-          ).jt`You can enable guest embeds in ${(
-            <Link
-              key="admin-settings-link"
-              to="/admin/embedding/guest"
-              onClick={() => dispatch(closeModal())}
-            >
-              <Text display="inline" c="text-brand" fw="bold">{c(
-                "is a link in a sentence 'You can enable guest embeds in admin settings'",
-              ).t`admin settings`}</Text>
-            </Link>
-          )}`}</Text>
-        </HoverCard.Dropdown>
-      </HoverCard>
-    </Flex>
+        <SdkIframeStepEnableEmbeddingSection />
+      </Stack>
+    </Card>
   );
 };

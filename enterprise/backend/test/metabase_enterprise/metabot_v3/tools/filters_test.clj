@@ -10,7 +10,6 @@
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.options :as lib.options]
    [metabase.lib.test-util :as lib.tu]
    [metabase.test :as mt]
    [metabase.util :as u]))
@@ -53,7 +52,7 @@
                            :group-by []})
                   actual-query (get-in result [:structured-output :query])
                   expected-query (-> (lib/query mp (lib.metadata/table mp (mt/id :orders)))
-                                     (lib/aggregate (lib.options/ensure-uuid [:metric {} metric-id])))]
+                                     (lib/aggregate (lib/ensure-uuid [:metric {} metric-id])))]
               (is (= :query (get-in result [:structured-output :type])))
               (is (string? (get-in result [:structured-output :query-id])))
               (is (tools.tu/query= expected-query actual-query))))
@@ -158,11 +157,73 @@
                                    :operation :not-equals
                                    :values [3 42]}]}))))))
         (testing "Missing metric results in an error."
-          (is (= {:output (str "No metric found with metric_id " Integer/MAX_VALUE)}
+          (is (= {:output "Not found."
+                  :status-code 404}
                  (metabot-v3.tools.filters/query-metric {:metric-id Integer/MAX_VALUE}))))
         (testing "Invalid metric-id results in an error."
-          (is (= {:output (str "Invalid metric_id " metric-id)}
+          (is (= {:output (str "Invalid metric_id " metric-id)
+                  :status-code 400}
                  (metabot-v3.tools.filters/query-metric {:metric-id (str metric-id)}))))))))
+
+(deftest query-metric-temporal-value-validation-test
+  (let [mp (mt/metadata-provider)
+        created-at-meta (lib.metadata/field mp (mt/id :orders :created_at))
+        metric-query (-> (lib/query mp (lib.metadata/table mp (mt/id :orders)))
+                         (lib/aggregate (lib/avg (lib.metadata/field mp (mt/id :orders :subtotal))))
+                         (lib/breakout (lib/with-temporal-bucket created-at-meta :month)))
+        legacy-metric-query (lib.convert/->legacy-MBQL metric-query)]
+    (mt/with-temp [:model/Card {metric-id :id} {:dataset_query legacy-metric-query
+                                                :database_id (mt/id)
+                                                :name "Average Order Value"
+                                                :description "The average subtotal of orders."
+                                                :type :metric}]
+      (mt/with-current-user (mt/user->id :crowberto)
+        (let [metric-details (metabot-v3.tools.entity-details/metric-details metric-id)
+              ->field-id #(u/prog1 (-> metric-details :queryable-dimensions (by-name %) :field_id)
+                            (when-not <>
+                              (throw (ex-info (str "Column " % " not found") {:column %}))))]
+          (testing "Negative value on temporal field without bucket is rejected"
+            (let [result (metabot-v3.tools.filters/query-metric
+                          {:metric-id metric-id
+                           :filters [{:field-id (->field-id "Created At")
+                                      :operation :greater-than-or-equal
+                                      :value -30}]
+                           :group-by []})]
+              (is (= 400 (:status-code result)))
+              (is (str/includes? (:output result) "not valid for a date/datetime field"))))
+          (testing "Small positive integer on temporal field without bucket is rejected"
+            (let [result (metabot-v3.tools.filters/query-metric
+                          {:metric-id metric-id
+                           :filters [{:field-id (->field-id "Created At")
+                                      :operation :greater-than-or-equal
+                                      :value 7}]
+                           :group-by []})]
+              (is (= 400 (:status-code result)))
+              (is (str/includes? (:output result) "not valid for a date/datetime field"))))
+          (testing "Date string on temporal field without bucket passes validation"
+            (is (=? {:structured-output {:type :query}}
+                    (metabot-v3.tools.filters/query-metric
+                     {:metric-id metric-id
+                      :filters [{:field-id (->field-id "Created At")
+                                 :operation :greater-than-or-equal
+                                 :value "2024-01-01"}]
+                      :group-by []}))))
+          (testing "Large integer (year) on temporal field without bucket passes validation"
+            (is (=? {:structured-output {:type :query}}
+                    (metabot-v3.tools.filters/query-metric
+                     {:metric-id metric-id
+                      :filters [{:field-id (->field-id "Created At")
+                                 :operation :greater-than-or-equal
+                                 :value 2024}]
+                      :group-by []}))))
+          (testing "Numeric value on non-temporal field without bucket passes validation"
+            (is (=? {:structured-output {:type :query}}
+                    (metabot-v3.tools.filters/query-metric
+                     {:metric-id metric-id
+                      :filters [{:field-id (->field-id "Discount")
+                                 :operation :greater-than-or-equal
+                                 :value -5}]
+                      :group-by []})))))))))
 
 (deftest ^:parallel query-model-test
   (mt/with-temp [:model/Card {model-id :id} {:dataset_query (mt/mbql-query orders {})
@@ -297,10 +358,12 @@
               (assoc input :fields nil)
               (assoc input :fields [])))))
       (testing "Missing model results in an error."
-        (is (= {:output (str "No model found with model_id " Integer/MAX_VALUE)}
+        (is (= {:output "Not found."
+                :status-code 404}
                (metabot-v3.tools.filters/query-model {:model-id Integer/MAX_VALUE}))))
       (testing "Invalid model-id results in an error."
-        (is (= {:output (str "Invalid model_id " model-id)}
+        (is (= {:output (str "Invalid model_id " model-id)
+                :status-code 400}
                (metabot-v3.tools.filters/query-model {:model-id (str model-id)})))))))
 
 (deftest ^:parallel filter-records-table-test
@@ -676,32 +739,38 @@
 (deftest ^:parallel query-datasource-validation-test
   (mt/with-current-user (mt/user->id :crowberto)
     (testing "Error when neither table-id nor model-id provided"
-      (is (= {:output "Either table_id or model_id must be provided"}
+      (is (= {:output "Either table_id or model_id must be provided"
+              :status-code 400}
              (metabot-v3.tools.filters/query-datasource {}))))
 
     (testing "Error when both table-id and model-id provided"
-      (is (= {:output "Cannot provide both table_id and model_id"}
+      (is (= {:output "Cannot provide both table_id and model_id"
+              :status-code 400}
              (metabot-v3.tools.filters/query-datasource
               {:table-id (mt/id :orders)
                :model-id 123}))))
 
     (testing "Error with invalid table-id"
-      (is (= {:output "Invalid table_id not-a-number"}
+      (is (= {:output "Invalid table_id not-a-number"
+              :status-code 400}
              (metabot-v3.tools.filters/query-datasource
               {:table-id "not-a-number"}))))
 
     (testing "Error with invalid model-id"
-      (is (= {:output "Invalid model_id not-a-number"}
+      (is (= {:output "Invalid model_id not-a-number"
+              :status-code 400}
              (metabot-v3.tools.filters/query-datasource
               {:model-id "not-a-number"}))))
 
     (testing "Error with non-existent table"
-      (is (= {:output (str "No table found with table_id " Integer/MAX_VALUE)}
+      (is (= {:output (str "No table found with table_id " Integer/MAX_VALUE)
+              :status-code 404}
              (metabot-v3.tools.filters/query-datasource
               {:table-id Integer/MAX_VALUE}))))
 
     (testing "Error with non-existent model"
-      (is (= {:output (str "No model found with model_id " Integer/MAX_VALUE)}
+      (is (= {:output (str "No model found with model_id " Integer/MAX_VALUE)
+              :status-code 404}
              (metabot-v3.tools.filters/query-datasource
               {:model-id Integer/MAX_VALUE}))))))
 

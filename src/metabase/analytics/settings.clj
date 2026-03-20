@@ -1,7 +1,6 @@
 (ns metabase.analytics.settings
   (:require
    [java-time.api :as t]
-   [metabase.appearance.core :as appearance]
    [metabase.config.core :as config]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.util.date-2 :as u.date]

@@ -5,8 +5,8 @@ import fetchMock from "fetch-mock";
 import { screen, waitFor, within } from "__support__/ui";
 import { logout } from "metabase/auth/actions";
 import * as domModule from "metabase/lib/dom";
-import { METABOT_ERR_MSG } from "metabase-enterprise/metabot/constants";
 import { useMetabotAgent } from "metabase-enterprise/metabot/hooks";
+import { metabotActions } from "metabase-enterprise/metabot/state";
 import { getMetabotInitialState } from "metabase-enterprise/metabot/state/reducer-utils";
 
 import { Metabot } from "../components/Metabot";
@@ -144,6 +144,56 @@ describe("metabot > ui", () => {
     });
   });
 
+  it("should render single newlines in user input as separate paragraphs", async () => {
+    const { store } = setup();
+
+    store.dispatch(
+      metabotActions.addUserMessage({
+        agentId: "omnibot",
+        id: "user-1",
+        type: "text",
+        message: "first line\nsecond line",
+      }),
+    );
+
+    const messages = await screen.findAllByTestId("metabot-chat-message");
+    const userMessage = messages[0];
+    const firstParagraph = within(userMessage).getByText("first line", {
+      selector: "p",
+    });
+    const secondParagraph = within(userMessage).getByText("second line", {
+      selector: "p",
+    });
+
+    expect(firstParagraph).toBeInTheDocument();
+    expect(secondParagraph).toBeInTheDocument();
+  });
+
+  it("should preserve double newlines from user input", async () => {
+    const { store } = setup();
+
+    store.dispatch(
+      metabotActions.addUserMessage({
+        agentId: "omnibot",
+        id: "user-2",
+        type: "text",
+        message: "first line\n\nsecond line",
+      }),
+    );
+
+    const messages = await screen.findAllByTestId("metabot-chat-message");
+    const userMessage = messages[0];
+    const firstParagraph = within(userMessage).getByText("first line", {
+      selector: "p",
+    });
+    const secondParagraph = within(userMessage).getByText("second line", {
+      selector: "p",
+    });
+
+    expect(firstParagraph).toBeInTheDocument();
+    expect(secondParagraph).toBeInTheDocument();
+  });
+
   it("should present the user an option to retry a response", async () => {
     setup();
     mockAgentEndpoint({ textChunks: whoIsYourFavoriteResponse });
@@ -188,12 +238,20 @@ describe("metabot > ui", () => {
 
   it("should not show retry option for error messages", async () => {
     setup();
-    fetchMock.post(`path:/api/ee/metabot-v3/agent-streaming`, 500);
+
+    mockAgentEndpoint({
+      textChunks: [
+        `3:"Anthropic API key expired or invalid"`,
+        `d:{"finishReason":"error","usage":{}}`,
+      ],
+    });
 
     await enterChatMessage("Who is your favorite?");
 
     const lastMessage = await lastChatMessage();
-    expect(lastMessage).toHaveTextContent(METABOT_ERR_MSG.agentOffline);
+    expect(lastMessage).toHaveTextContent(
+      /Anthropic API key expired or invalid/,
+    );
     expect(
       within(lastMessage!).queryByTestId("metabot-chat-message-retry"),
     ).not.toBeInTheDocument();

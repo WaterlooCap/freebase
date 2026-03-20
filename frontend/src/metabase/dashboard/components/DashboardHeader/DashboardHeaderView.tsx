@@ -3,8 +3,8 @@ import type { JSX } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isInstanceAnalyticsCollection } from "metabase/collections/utils";
-import EditBar from "metabase/common/components/EditBar";
-import LastEditInfoLabel from "metabase/common/components/LastEditInfoLabel";
+import { EditBar } from "metabase/common/components/EditBar";
+import { LastEditInfoLabel } from "metabase/common/components/LastEditInfoLabel";
 import CS from "metabase/css/core/index.css";
 import {
   applyDraftParameterValues,
@@ -133,6 +133,7 @@ export function DashboardHeaderView({
               {titled && (
                 <Box
                   role="heading"
+                  aria-level={1}
                   className={cx(S.HeaderContent, {
                     [S.showSubHeader]: showSubHeader,
                   })}

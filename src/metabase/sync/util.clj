@@ -10,9 +10,11 @@
    [metabase.driver.util :as driver.u]
    [metabase.events.core :as events]
    [metabase.models.interface :as mi]
+   [metabase.premium-features.core :as premium-features]
    [metabase.query-processor.interface :as qp.i]
    [metabase.sync.interface :as i]
    [metabase.task-history.core :as task-history]
+   [metabase.tracing.core :as tracing]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.log :as log]
@@ -27,6 +29,23 @@
    (java.time.temporal Temporal)))
 
 (set! *warn-on-reflection* true)
+
+(def ^:private transform-temp-table-prefix
+  "Prefix used for temporary tables created during transforms."
+  "mb_transform_temp_table")
+
+(defn- transforms-enabled?
+  "Whether any transforms are enabled."
+  []
+  (or (not (premium-features/is-hosted?))
+      (premium-features/has-feature? :transforms-basic)))
+
+(defn is-temp-transform-table?
+  "Return true when `table` matches the transform temporary table naming pattern and transforms are enabled."
+  [table]
+  (boolean
+   (when (and (transforms-enabled?) (:name table))
+     (str/starts-with? (u/lower-case-en (:name table)) transform-temp-table-prefix))))
 
 (derive ::event :metabase/event)
 
@@ -231,6 +250,14 @@
   [message & body]
   `(do-with-returning-throwable ~message (^:once fn* [] ~@body)))
 
+(def ^:private operation->run-type
+  "Map sync operation keywords to task run types."
+  {:sync              :sync
+   :sync-metadata     :sync
+   :cache-field-values :sync
+   :analyze           :fingerprint
+   :refingerprint     :fingerprint})
+
 (mu/defn do-sync-operation
   "Internal implementation of [[sync-operation]]; use that instead of calling this directly."
   [operation :- :keyword                ; something like `:sync-metadata` or `:refingerprint`
@@ -238,15 +265,20 @@
    message   :- ms/NonBlankString
    f         :- fn?]
   (when (database/should-sync? database)
-    ((with-duplicate-ops-prevented
-      operation database
-      (with-sync-events
-       operation database
-       (with-start-and-finish-logging
-        message
-        (with-db-logging-disabled
-         (sync-in-context database
-                          (partial do-with-error-handling (format "Error in sync step %s" message) f)))))))))
+    (let [run-type (operation->run-type operation)]
+      (task-history/with-task-run (when run-type
+                                    {:run_type    run-type
+                                     :entity_type :database
+                                     :entity_id   (u/the-id database)})
+        ((with-duplicate-ops-prevented
+          operation database
+          (with-sync-events
+           operation database
+           (with-start-and-finish-logging
+            message
+            (with-db-logging-disabled
+             (sync-in-context database
+                              (partial do-with-error-handling (format "Error in sync step %s" message) f)))))))))))
 
 (defmacro sync-operation
   "Perform the operations in `body` as a sync operation, which wraps the code in several special macros that do things
@@ -333,7 +365,7 @@
 
 (def ^:private sync-tables-kv-args
   {:active          true
-   ;; TODO (Ngoc 2025-11-13) replace this with `metabase_table.data_layer = copper` see the docstring of
+   ;; TODO (Ngoc 2025-11-13) replace this with `metabase_table.data_layer = hidden` see the docstring of
    ;; [[metabase.warehouse-schema.models.table/data-layer-types]]
    :visibility_type nil})
 
@@ -517,20 +549,21 @@
   [database :- i/DatabaseInstance
    {:keys [step-name sync-fn log-summary-fn] :as _step} :- StepDefinition]
   (let [start-time (t/zoned-date-time)
-        results    (do-with-start-and-finish-debug-logging
-                    (format "step ''%s'' for %s"
-                            step-name
-                            (name-for-logging database))
-                    (fn [& args]
-                      (with-returning-throwable (format "Error running step ''%s'' for %s" step-name (name-for-logging database))
-                        (task-history/with-task-history
-                          {:task            step-name
-                           :db_id           (u/the-id database)
-                           :on-success-info (fn [update-map result]
-                                              (if (instance? Throwable result)
-                                                (throw result)
-                                                (assoc update-map :task_details (dissoc result :start-time :end-time :log-summary-fn))))}
-                          (apply sync-fn database args)))))
+        results    (tracing/with-span :sync (str "sync.step." step-name) {:db/id (u/the-id database) :sync/step step-name}
+                     (do-with-start-and-finish-debug-logging
+                      (format "step ''%s'' for %s"
+                              step-name
+                              (name-for-logging database))
+                      (fn [& args]
+                        (with-returning-throwable (format "Error running step ''%s'' for %s" step-name (name-for-logging database))
+                          (task-history/with-task-history
+                            {:task            step-name
+                             :db_id           (u/the-id database)
+                             :on-success-info (fn [update-map result]
+                                                (if (instance? Throwable result)
+                                                  (throw result)
+                                                  (assoc update-map :task_details (dissoc result :start-time :end-time :log-summary-fn))))}
+                            (apply sync-fn database args))))))
         end-time   (t/zoned-date-time)]
     [step-name (assoc results
                       :start-time start-time

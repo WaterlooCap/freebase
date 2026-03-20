@@ -18,6 +18,8 @@ import type { SdkStore } from "embedding-sdk-bundle/store/types";
 import type { MetabaseProviderProps } from "embedding-sdk-bundle/types/metabase-provider";
 import { EnsureSingleInstance } from "embedding-sdk-shared/components/EnsureSingleInstance/EnsureSingleInstance";
 import { useInstanceLocale } from "metabase/common/hooks/use-instance-locale";
+import { isEmbeddingEajs } from "metabase/embedding-sdk/config";
+import { isEmbeddingThemeV1 } from "metabase/embedding-sdk/theme";
 import { MetabaseReduxProvider, useSelector } from "metabase/lib/redux";
 import { LocaleProvider } from "metabase/public/LocaleProvider";
 import { setOptions } from "metabase/redux/embed";
@@ -43,7 +45,10 @@ function useInitPlugins() {
   );
 
   useEffect(() => {
-    if (hasInitializedPlugins || !tokenFeatures) {
+    // EAJS already initializes the plugins in its entrypoint, and this
+    // component is used by EAJS we have to make sure we don't re-initialize the
+    // sdk plugins as they could override some of plugins needed by EAJS
+    if (isEmbeddingEajs() || hasInitializedPlugins || !tokenFeatures) {
       return;
     }
 
@@ -70,7 +75,7 @@ export const ComponentProviderInternal = (
   } = useNormalizeComponentProviderProps(props);
 
   const isGuestEmbed = !!authConfig.isGuest;
-  const { fontFamily } = theme ?? {};
+  const fontFamily = isEmbeddingThemeV1(theme) ? theme.fontFamily : undefined;
 
   // The main call of useInitData happens in the MetabaseProvider
   // This call in the ComponentProvider is still needed for:

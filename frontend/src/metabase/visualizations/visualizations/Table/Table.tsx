@@ -4,7 +4,6 @@ import { t } from "ttag";
 import _ from "underscore";
 
 import CS from "metabase/css/core/index.css";
-import * as DataGrid from "metabase/lib/data_grid";
 import { displayNameForColumn } from "metabase/lib/formatting";
 import type { OptionsType } from "metabase/lib/formatting/types";
 import { getSubpathSafeUrl } from "metabase/lib/urls";
@@ -13,6 +12,7 @@ import {
   ChartSettingsTableFormatting,
   isFormattable,
 } from "metabase/visualizations/components/settings/ChartSettingsTableFormatting";
+import * as DataGrid from "metabase/visualizations/lib/data_grid";
 import {
   isPivoted as _isPivoted,
   columnSettings,
@@ -67,7 +67,7 @@ interface TableState {
   question: Question | null;
 }
 
-class Table extends Component<TableProps, TableState> {
+export class Table extends Component<TableProps, TableState> {
   static getUiName = () => t`Table`;
   static identifier = "table";
   static iconName = "table2";
@@ -102,7 +102,7 @@ class Table extends Component<TableProps, TableState> {
       inline: true,
       widget: "toggle",
       dashboard: true,
-      default: false,
+      getDefault: () => false,
     },
     "table.row_index": {
       get section() {
@@ -113,7 +113,7 @@ class Table extends Component<TableProps, TableState> {
       },
       inline: true,
       widget: "toggle",
-      default: false,
+      getDefault: () => false,
     },
     "table.pivot": {
       get section() {
@@ -129,10 +129,17 @@ class Table extends Component<TableProps, TableState> {
         settings: ComputedVisualizationSettings,
       ) => data && data.cols.length !== 3 && !settings["table.pivot"],
       getDefault: ([{ card, data }]: Series) => {
+        let native: boolean;
+        try {
+          native = isNative(card);
+        } catch (error) {
+          // isNative throws when used in the visualizer
+          native = false;
+        }
         if (
           !data ||
           data.cols.length !== 3 ||
-          isNative(card) ||
+          native ||
           data.cols.filter(isMetric).length !== 1 ||
           data.cols.filter(isDimension).length !== 2
         ) {
@@ -208,7 +215,7 @@ class Table extends Component<TableProps, TableState> {
         return t`Conditional Formatting`;
       },
       widget: ChartSettingsTableFormatting,
-      default: [],
+      getDefault: () => [],
       getProps: (series: Series, settings: VisualizationSettings) => ({
         cols: series[0].data.cols.filter(isFormattable),
         isPivoted: settings["table.pivot"],
@@ -261,13 +268,13 @@ class Table extends Component<TableProps, TableState> {
             ? "right"
             : "left";
         },
-        props: {
+        getProps: () => ({
           options: [
             { name: t`Left`, value: "left" },
             { name: t`Right`, value: "right" },
             { name: t`Middle`, value: "middle" },
           ],
-        },
+        }),
       },
     };
 
@@ -285,7 +292,7 @@ class Table extends Component<TableProps, TableState> {
 
       settings["text_wrapping"] = {
         title: t`Wrap text`,
-        default: false,
+        getDefault: () => false,
         widget: "toggle",
         inline: true,
         isValid: (_column, columnSettings) => {
@@ -321,10 +328,10 @@ class Table extends Component<TableProps, TableState> {
       settings["view_as"] = {
         title: t`Display as`,
         widget: options.length === 2 ? "radio" : "select",
-        default: defaultValue,
-        props: {
+        getDefault: () => defaultValue,
+        getProps: () => ({
           options,
-        },
+        }),
       };
     }
 
@@ -334,7 +341,7 @@ class Table extends Component<TableProps, TableState> {
       title: t`Link text`,
       widget: ChartSettingLinkUrlInput,
       hint: linkFieldsHint,
-      default: null,
+      getDefault: () => null,
       getHidden: (_, settings) =>
         settings["view_as"] !== "link" && settings["view_as"] !== "email_link",
       readDependencies: ["view_as"],
@@ -361,7 +368,7 @@ class Table extends Component<TableProps, TableState> {
       title: t`Link URL`,
       widget: ChartSettingLinkUrlInput,
       hint: linkFieldsHint,
-      default: null,
+      getDefault: () => null,
       getHidden: (_, settings) => settings["view_as"] !== "link",
       readDependencies: ["view_as"],
       getProps: (
@@ -557,6 +564,3 @@ class Table extends Component<TableProps, TableState> {
     );
   }
 }
-
-// eslint-disable-next-line import/no-default-export
-export default Table;

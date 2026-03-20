@@ -6,6 +6,7 @@
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.test-util.notebook-helpers :as lib.tu.notebook]
    [metabase.test :as mt]
+   [metabase.transforms.test-util :as transforms.tu]
    [toucan2.core :as t2]))
 
 (deftest ^:parallel upstream-deps-card-test
@@ -126,7 +127,7 @@
              (calculation/upstream-deps:card card))))))
 
 (deftest ^:parallel upstream-deps-transform-implicit-join-fields-test
-  (mt/with-premium-features #{:transforms}
+  (mt/with-premium-features #{:transforms-basic}
     (let [mp (mt/metadata-provider)
           checkins-id (mt/id :checkins)
           venues-id (mt/id :venues)
@@ -149,7 +150,7 @@
                (calculation/upstream-deps:transform transform)))))))
 
 (deftest ^:parallel upstream-deps-transform-implicit-join-breakout-test
-  (mt/with-premium-features #{:transforms}
+  (mt/with-premium-features #{:transforms-basic}
     (let [mp (mt/metadata-provider)
           checkins-id (mt/id :checkins)
           venues-id (mt/id :venues)
@@ -172,7 +173,7 @@
                (calculation/upstream-deps:transform transform)))))))
 
 (deftest ^:parallel upstream-deps-transform-implicit-join-aggregation-test
-  (mt/with-premium-features #{:transforms}
+  (mt/with-premium-features #{:transforms-basic}
     (let [mp (mt/metadata-provider)
           checkins-id (mt/id :checkins)
           venues-id (mt/id :venues)
@@ -191,6 +192,21 @@
                 :measure #{}
                 :segment #{}
                 :table #{checkins-id venues-id}}
+               (calculation/upstream-deps:transform transform)))))))
+
+(deftest ^:parallel upstream-deps-python-transform-test
+  (mt/with-premium-features #{:transforms-basic}
+    (let [products-id (mt/id :products)
+          orders-id (mt/id :orders)]
+      (mt/with-temp [:model/Transform transform {:name "Test Transform"
+                                                 :source {:type :python
+                                                          :source-tables [(transforms.tu/source-table-entry "PRODUCTS" products-id)
+                                                                          (transforms.tu/source-table-entry "ORDERS" orders-id)]
+                                                          :source-database (mt/id)
+                                                          :body "..."}
+                                                 :target {:schema "PUBLIC"
+                                                          :name "test_output"}}]
+        (is (= {:table #{products-id orders-id}}
                (calculation/upstream-deps:transform transform)))))))
 
 (deftest ^:parallel upstream-deps-card-native-with-parameter-source-test

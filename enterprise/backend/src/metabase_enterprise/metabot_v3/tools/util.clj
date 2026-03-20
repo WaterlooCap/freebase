@@ -9,17 +9,20 @@
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.types.isa :as lib.types.isa]
-   [metabase.lib.util :as lib.util]
    [metabase.premium-features.core :as premium-features]
    [metabase.util :as u]
+   [metabase.util.log :as log]
    [toucan2.core :as t2]))
 
 (defn handle-agent-error
-  "Return an agent output for agent errors, re-throw `e` otherwise."
+  "Return an agent output for agent errors, re-throw `e` otherwise.
+   Preserves :status-code from ex-data for proper HTTP status codes in agent API."
   [e]
-  (if (-> e ex-data :agent-error?)
-    {:output (ex-message e)}
-    (throw e)))
+  (let [{:keys [agent-error? status-code]} (ex-data e)]
+    (if agent-error?
+      (cond-> {:output (ex-message e)}
+        status-code (assoc :status-code status-code))
+      (throw e))))
 
 (defn convert-field-type
   "Return tool type for `column`."
@@ -39,8 +42,9 @@
   (cond-> col
     (and (:fk-field-id col)
          (:table-id col))
-    (assoc :table-reference (-> (lib/display-name query (lib.metadata/field query (:fk-field-id col)))
-                                lib.util/strip-id))))
+    (assoc :table-reference (->> (lib.metadata/field query (:fk-field-id col))
+                                 (lib/display-name query)
+                                 lib/display-name-without-id))))
 
 (defn table-field-id-prefix
   "Return the field ID prefix for `table-id`."
@@ -86,19 +90,23 @@
   - model-id is the numeric ID (for tables/cards) or nano-id (for queries)
   - field-index is the index within that model's visible columns
 
-  Returns a map with :model-tag, :model-id, and :field-index keys, or nil if the format is invalid.
+  Returns a map with :model-tag, :model-id, and :field-index keys, or nil if the format is invalid
+  or the input is not a string.
 
   Examples:
     (parse-field-id \"t154-1\") => {:model-tag \"t\", :model-id 154, :field-index 1}
-    (parse-field-id \"qpuL95JSvym3k23W1UUuog-0\") => {:model-tag \"q\", :model-id \"puL95JSvym3k23W1UUuog\", :field-index 0}"
+    (parse-field-id \"qpuL95JSvym3k23W1UUuog-0\") => {:model-tag \"q\", :model-id \"puL95JSvym3k23W1UUuog\", :field-index 0}
+    (parse-field-id nil) => nil
+    (parse-field-id \"invalid\") => nil"
   [field-id]
-  (when-let [[_ model-tag model-id field-index] (re-matches #"^([tcq])(.+)-(\d+)$" field-id)]
-    {:model-tag model-tag
-     ;; For tables and cards, model-id should be numeric; for queries it's a nano-id string
-     :model-id (if (= model-tag "q")
-                 model-id
-                 (parse-long model-id))
-     :field-index (parse-long field-index)}))
+  (when (and field-id (string? field-id))
+    (when-let [[_ model-tag model-id field-index] (re-matches #"^([tcq])(.+)-(\d+)$" field-id)]
+      {:model-tag   model-tag
+       ;; For tables and cards, model-id should be numeric; for queries it's a nano-id string
+       :model-id    (if (= model-tag "q")
+                      model-id
+                      (parse-long model-id))
+       :field-index (parse-long field-index)})))
 
 (defn resolve-column
   "Resolve the reference `field-id` in filter `item` by finding the column in `columns` specified by `field-id`.
@@ -121,22 +129,44 @@
       (when-not (if (string? expected-prefix)
                   (str/starts-with? field-id expected-prefix)
                   (re-matches expected-prefix field-id))
+        (log/warn "Field id prefix mismatch"
+                  {:field-id field-id
+                   :expected-prefix expected-prefix
+                   :model-tag model-tag
+                   :model-id model-id})
         (throw (ex-info (str "field " field-id " does not match expected prefix " expected-prefix)
                         {:agent-error? true
+                         :status-code 400
                          :field-id field-id
                          :expected-prefix expected-prefix})))
       (if-let [column (get columns field-index)]
         (assoc item :column column)
         (throw (ex-info (str "field " field-id " not found - no column at index " field-index)
                         {:agent-error? true
+                         :status-code 404
                          :field-id field-id
                          :model-tag model-tag
                          :model-id model-id
                          :field-index field-index
                          :available-columns-count (count columns)}))))
-    (throw (ex-info (str "invalid field_id format: " field-id)
+    (throw (ex-info (str "Invalid field_id format: " field-id)
                     {:agent-error? true
+                     :status-code 400
                      :field-id field-id}))))
+
+(defn schedule->schedule-map
+  "Convert a tool schedule map to the schedule-map format used by cron and pulse channels.
+  E.g. {:frequency :daily :hour 9} => {:schedule_type \"daily\" :schedule_hour 9 ...}"
+  [{:keys [frequency hour day-of-week day-of-month]}]
+  {:schedule_type  (name frequency)
+   :schedule_hour  hour
+   :schedule_day   (or (some-> day-of-week name (subs 0 3) u/lower-case-en)
+                       (some->> day-of-month
+                                name
+                                u/lower-case-en
+                                (re-find #"^(?:first|last)-(mon|tue|wed|thu|fri|sat|sun)")
+                                second))
+   :schedule_frame (some->> day-of-month name (re-find #"^(?:first|mid|last)"))})
 
 (defn get-database
   "Get the `fields` of the database with ID `id`."
@@ -147,7 +177,9 @@
 (defn get-table
   "Get the `fields` of the table with ID `id`."
   [id & fields]
-  (-> (t2/select-one (into [:model/Table :id] fields) id)
+  (-> (t2/select-one (into [:model/Table :id] fields)
+                     :id id
+                     :active true)
       api/read-check))
 
 (defn get-card
@@ -157,7 +189,7 @@
       api/read-check))
 
 (defn card-query
-  "Return a query based on the model with ID `model-id`."
+  "Return a query based on the card with ID `card-id`."
   [card-id]
   (when-let [card (get-card card-id)]
     (let [mp (lib-be/application-database-metadata-provider (:database_id card))]
@@ -166,7 +198,7 @@
                       (#{:question} (:type card)) (get :dataset-query))))))
 
 (defn metric-query
-  "Return a query based on the model with ID `model-id`."
+  "Return a query based on the metric with ID `metric-id`."
   [metric-id]
   (when-let [card (get-card metric-id)]
     (let [mp (lib-be/application-database-metadata-provider (:database_id card))]

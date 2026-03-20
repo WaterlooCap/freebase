@@ -355,7 +355,7 @@
                             ["CATEGORY" nil      "Category"]                  ; products.category
                             ["TITLE_2"  "Orders" "Product → Title"]           ; product.title, remapped from orders.product_id
                             ["sum"      "Orders" "Orders → Sum of Quantity"]] ; sum(orders.quantity)
-                           (map (juxt :name :metabase.lib.join/join-alias :display_name) (mt/cols results))))))
+                           (map (juxt :name :lib/join-alias :display_name) (mt/cols results))))))
                 (is (= [["Rustic Paper Wallet"       "Gizmo"     "Rustic Paper Wallet"       347]
                         ["Small Marble Shoes"        "Doohickey" "Small Marble Shoes"        352]
                         ["Synergistic Granite Chair" "Doohickey" "Synergistic Granite Chair" 286]]
@@ -398,7 +398,7 @@
                     {:aggregation [[:sum [:field (mt/id :orders :total)]]]
                      :breakout    [[:field
                                     (mt/id :orders :product_id)
-                                    {:base-type    :type/Integer}]]
+                                    {:base-type :type/Integer}]]
                      :limit       3})]
         (is (= [["Aerodynamic Bronze Hat"     144    5753.63]
                 ["Aerodynamic Concrete Bench" 116   10035.81]
@@ -415,7 +415,7 @@
                            {:aggregation [[:sum [:field (mt/id :orders :total)]]]
                             :breakout    [[:field
                                            (mt/id :orders :product_id)
-                                           {:base-type    :type/Integer}]]
+                                           {:base-type :type/Integer}]]
                             :limit       3})
                          {:pivot_rows [0]
                           :pivot_cols []})]
