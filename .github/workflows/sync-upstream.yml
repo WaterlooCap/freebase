@@ -1,0 +1,101 @@
+name: Sync Upstream Metabase
+
+on:
+  schedule:
+    - cron: '0 8 * * 1' # Every Monday at 8am UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/metabase/metabase.git
+
+      - name: Fetch upstream
+        run: git fetch upstream master
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list HEAD..upstream/master --count)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Upstream is $BEHIND commits ahead"
+
+      - name: Create merge branch and PR
+        id: create_pr
+        if: steps.check.outputs.behind > 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEHIND: ${{ steps.check.outputs.behind }}
+        run: |
+          BRANCH="sync-upstream/$(date +%Y-%m-%d)"
+          git checkout -b "$BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git merge upstream/master -X ours -m "Merge upstream metabase master ($BEHIND commits)"; then
+            git push origin "$BRANCH"
+            PR_URL=$(gh pr create \
+              --title "Sync upstream Metabase ($BEHIND new commits)" \
+              --body "## Upstream Sync
+
+          This PR merges **$BEHIND** new commits from [metabase/metabase](https://github.com/metabase/metabase) master.
+
+          Conflicts were auto-resolved favoring our changes (\`-X ours\`). Please review the diff to ensure nothing important was overwritten.
+
+          **After merging**, rebuild and redeploy the Docker image." \
+              --base master \
+              --head "$BRANCH")
+            echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+            echo "pr_created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Merge failed with conflicts that could not be auto-resolved"
+            exit 1
+          fi
+
+      - name: Generate GitHub App Token for Claude
+        if: steps.create_pr.outputs.pr_created == 'true'
+        uses: actions/create-github-app-token@v1
+        id: claude-app-token
+        with:
+          app-id: ${{ secrets.METABASE_BOT_APP_ID }}
+          private-key: ${{ secrets.METABASE_BOT_APP_PRIVATE_KEY }}
+
+      - name: Claude Code Review
+        if: steps.create_pr.outputs.pr_created == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.claude-app-token.outputs.token }}
+          prompt: |
+            You are reviewing an upstream sync PR that merges the latest metabase/metabase master into our fork (WaterlooCap/freebase).
+
+            The merge used `-X ours` to auto-resolve conflicts in favor of our changes.
+
+            Please review this PR and leave a comment summarizing:
+
+            1. **Breaking changes**: Any upstream changes that could break our customizations (check files we've modified like Dockerfile, docker-compose, CLAUDE.md, and any custom code)
+            2. **Migration changes**: Any new database migrations that were added upstream
+            3. **Dependency updates**: Major dependency version bumps
+            4. **Notable features**: Key new features or changes worth knowing about
+            5. **Action items**: Anything that needs manual attention before or after merging
+
+            Focus on what matters for our fork — we mainly care about things that affect our deployment, our customizations, and database compatibility.
+
+            Post your review as a comment on the PR.
+          claude_args: |
+            --allowedTools "Bash(git diff*),Bash(git log*),Bash(gh*),Read,Glob,Grep"
