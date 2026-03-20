@@ -23,8 +23,10 @@ COPY . .
 # version is pulled from git, but git doesn't trust the directory due to different owners
 RUN git config --global --add safe.directory /home/node
 
-# install bun for frontend dependencies
+# install bun for frontend dependencies and uv for Python dependencies
 RUN npm install -g bun
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # install frontend dependencies
 RUN bun install --frozen-lockfile
