@@ -51,6 +51,7 @@
     :model/DataPermissions
     :model/DatabaseRouter
     :model/Dependency
+    :model/DependencyStatus
     :model/DocumentBookmark
     :model/CollectionPermissionGraphRevision
     :model/DashboardCardSeries
@@ -66,6 +67,10 @@
     :model/NotificationSubscription
     :model/NotificationHandler
     :model/NotificationRecipient
+    :model/OAuthAccessToken
+    :model/OAuthAuthorizationCode
+    :model/OAuthClient
+    :model/OAuthRefreshToken
     :model/ParameterCard
     :model/Permissions
     :model/PermissionsGroup

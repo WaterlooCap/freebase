@@ -118,15 +118,6 @@
       t/local-date
       str))
 
-(defenterprise metabot-stats
-  "Stats for Metabot"
-  metabase-enterprise.metabot-v3.core
-  []
-  {:metabot-tokens     0
-   :metabot-queries    0
-   :metabot-users      0
-   :metabot-usage-date (yesterday)})
-
 (defenterprise transform-stats
   "Stats for Transforms"
   metabase-enterprise.transforms.core
@@ -149,7 +140,7 @@
         embedding-question-count  (internal-stats/embedding-question-count)
         stats                     (merge (internal-stats/query-execution-last-utc-day)
                                          (embedding-settings embedding-dashboard-count embedding-question-count)
-                                         (metabot-stats)
+                                         (internal-stats/metabot-stats)
                                          (transform-stats)
                                          {:users                     users
                                           :embedding-dashboard-count embedding-dashboard-count
@@ -172,6 +163,7 @@
    [:valid                          :boolean]
    [:status                         [:string {:min 1}]]
    [:error-details {:optional true} [:maybe [:string {:min 1}]]]
+   [:canonical?    {:optional true} [:maybe :boolean]]
    [:features      {:optional true} [:sequential [:string {:min 1}]]]
    [:plan-alias    {:optional true} :string]
    [:trial         {:optional true} :boolean]
@@ -180,6 +172,7 @@
    [:company       {:optional true} [:string {:min 1}]]
    [:store-users   {:optional true} [:maybe [:sequential [:map
                                                           [:email :string]]]]]
+   [:meters        {:optional true} :map]
    [:quotas        {:optional true} [:sequential [:map]]]])
 
 (defn- http-fetch
@@ -197,15 +190,18 @@
   (log/info "Bypassing token validation. Enterprise features enabled.")
   {:valid true
    :status "active"
-   :features ["sandboxes" "whitelabel" "audit-app" "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "scim"
+   :features ["sandboxes" "whitelabel" "audit-app" "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "sso-oidc" "scim"
               "session-timeout-config" "disable-password-login" "dashboard-subscription-filters"
               "advanced-permissions" "content-verification" "official-collections" "snippet-collections"
-              "serialization" "email-restrict-recipients" "llm-autodescription" "query-reference-validation"
-              "upload-management" "attached-dwh" "etl-connections" "etl-connections-pg" "database-routing"
-              "cloud-custom-smtp" "support-users" "transforms" "transforms-python" "remote-sync"
-              "embedding" "embedding-sdk" "content-translation" "cache-granular-controls" "cache-preemptive"
-              "config-text-file" "collection-cleanup" "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis"
-              "metabot-v3" "semantic-search" "tenants" "hosting"]
+              "serialization" "email-allow-list" "email-restrict-recipients" "llm-autodescription"
+              "query-reference-validation" "upload-management" "attached-dwh" "etl-connections"
+              "etl-connections-pg" "database-auth-providers" "database-routing" "cloud-custom-smtp"
+              "support-users" "transforms" "transforms-basic" "transforms-python" "remote-sync"
+              "embedding" "embedding-sdk" "embedding-simple" "embedding-hub" "content-translation"
+              "cache-granular-controls" "cache-preemptive" "config-text-file" "collection-cleanup"
+              "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis" "metabot-v3" "semantic-search"
+              "tenants" "hosting" "development-mode" "dependencies" "library" "workspaces"
+              "metabase-ai-managed" "offer-metabase-ai-managed" "writable-connection"]
    :plan-alias "enterprise-unlimited"
    :trial false
    :valid-thru "2099-12-31"})
@@ -271,12 +267,13 @@
         (mr/validate [:re AirgapToken] token)
         (do
           (log/infof "Checking airgapped token '%s'..." (u.str/mask token))
-          (decode-airgap-token token))
+          (assoc (decode-airgap-token token) :canonical? true))
 
         :else
         (do
           (log/error (u/format-color 'red "Invalid token format!"))
           {:valid         false
+           :canonical?    true
            :status        "invalid"
            :error-details (trs "Token should be a valid 64 hexadecimal character token or an airgap token.")})))
 
@@ -476,6 +473,7 @@
                (log/infof "Error checking token: %s" (ex-message e))
                (analytics/inc-if-initialized! :metabase-token-check/attempt {:status :failure}))
              {:valid         false
+              :canonical?    false
               :status        (tru "Unable to validate token")
               :error-details (.getMessage e)})))
     (-clear-cache! [_] (-clear-cache! token-checker))))
@@ -552,7 +550,13 @@
                         {:status-code 400, :error-details "Token should be 64 hexadecimal characters."})))
       (let [decoded (check-token new-value)]
         (when-not (:valid decoded)
-          (throw (ex-info "Invalid token" {:token (u.str/mask new-value)}))))
+          (throw (ex-info (:status decoded)
+                          {:error-details (:error-details decoded)
+                           ;; If MetaStore told us the token is invalid, use 400. If some other error occurred, a 503 is
+                           ;; probably more appropriate.
+                           :status-code (if (:canonical? decoded)
+                                          400
+                                          503)}))))
       (log/info "Token is valid."))
     (setting/set-value-of-type! :string :premium-embedding-token new-value)
     (events/publish-event! :event/set-premium-embedding-token {})
@@ -609,6 +613,14 @@
   []
   [])
 
+(mu/defn meters :- [:maybe :map]
+  "Returns a map of current metered usage for the subscription."
+  []
+  (clear-cache!)
+  (some-> (premium-features.settings/premium-embedding-token)
+          (check-token)
+          :meters))
+
 (defn has-any-features?
   "Bypass: always true."
   []
@@ -618,6 +630,16 @@
   "Bypass: always true."
   [_feature]
   true)
+
+(defn canonically-has-feature?
+  "Returns `true` if the token definitively has `feature`, `false` if it definitively does not, or `nil` if the token
+  status is indeterminate (e.g., network failure, timeout). Returns `false` (not `nil`) when no token is configured."
+  [feature]
+  (if-let [token (premium-features.settings/premium-embedding-token)]
+    (let [result (check-token token)]
+      (when (:canonical? result)
+        (boolean (contains? (set (:features result)) (name feature)))))
+    false))
 
 (defn ee-feature-error
   "Returns an error that can be used to throw when an enterprise feature check fails."

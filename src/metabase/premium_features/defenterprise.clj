@@ -98,7 +98,7 @@
                             `(fn ~(symbol (str fn-name)) ~@fn-tail))]
        (register-mapping! ee-fn-name# (merge ~options {~oss-or-ee oss-or-ee-fn#}))
        (def
-         ~(vary-meta fn-name assoc :arglists ''([& args]))
+         ~(vary-meta fn-name merge {:arglists ''([& args])})
          ~docstr
          (dynamic-ee-oss-fn ee-ns# ee-fn-name#)))))
 
