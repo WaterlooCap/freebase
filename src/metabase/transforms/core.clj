@@ -22,6 +22,7 @@
   transform-timeout]
  [metabase.transforms-base.util
   native-query-transform?
+  output-table
   python-transform?
   query-transform?
   transform-source-database
@@ -34,6 +35,7 @@
   check-database-feature
   check-feature-enabled!
   validate-incremental-column-type!
+  validate-target-schema!
   validate-transform-query!
   get-transforms
   get-transform

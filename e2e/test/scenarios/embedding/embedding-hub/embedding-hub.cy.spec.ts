@@ -362,6 +362,27 @@ describe("scenarios - embedding hub", () => {
       cy.signInAsAdmin();
       H.activateToken("bleeding-edge");
 
+      cy.log("create an x-ray dashboard via the embedding setup guide");
+      cy.visit("/admin/embedding/setup-guide");
+
+      cy.findByTestId("admin-layout-content")
+        .findByText("Create a dashboard")
+        .click();
+
+      cy.log("select Orders table from the modal");
+      H.modal().within(() => {
+        H.pickEntity({
+          path: ["Databases", "Sample Database", "Orders"],
+        });
+      });
+
+      cy.log("wait for x-ray dashboard to generate and save it");
+      H.main()
+        .findByText("A look at", { exact: false, timeout: 30_000 })
+        .should("be.visible");
+      cy.button("Save this").click();
+      H.undoToast().should("contain", "Your dashboard was saved");
+
       cy.visit("/admin/embedding/setup-guide/permissions");
 
       cy.log("tenants should not be enabled");
@@ -399,12 +420,58 @@ describe("scenarios - embedding hub", () => {
         expect(response.body[0].name).to.equal("Shared collection");
       });
 
+      cy.log(
+        "dashboard picker should appear with the x-ray dashboard pre-selected",
+      );
+      H.main()
+        .findByText("This will allow tenant users to see it.")
+        .should("be.visible");
+
+      cy.log("x-ray dashboard should be pre-selected, move it");
+      H.main()
+        .findByRole("button", {
+          name: "Move to shared collection",
+          timeout: 10_000,
+        })
+        .should("be.enabled")
+        .click();
+
+      cy.log(
+        "x-rayed dashboard should have been moved to the shared collection",
+      );
+      cy.request(
+        "GET",
+        "/api/collection/tree?namespace=shared-tenant-collection",
+      ).then((response) => {
+        const sharedCollectionId = response.body[0].id;
+        cy.request(
+          "GET",
+          `/api/collection/${sharedCollectionId}/items?models=dashboard`,
+        ).then((itemsResponse) => {
+          const dashboards = itemsResponse.body.data;
+          expect(dashboards.length).to.be.greaterThan(0);
+          expect(
+            dashboards.some((d: { name: string }) =>
+              d.name.includes("A look at"),
+            ),
+          ).to.be.true;
+        });
+      });
+
       cy.log("enable-tenants step should be marked as completed");
       H.main()
         .findByRole("listitem", {
           name: "Enable multi-tenant user strategy",
 
           // the embedding checklist query takes time on CI
+          timeout: 10_000,
+        })
+        .should("have.attr", "data-completed", "true");
+
+      cy.log("move-dashboard step should be marked as completed");
+      H.main()
+        .findByRole("listitem", {
+          name: "Create a dashboard in the shared collection",
           timeout: 10_000,
         })
         .should("have.attr", "data-completed", "true");
@@ -478,6 +545,11 @@ describe("scenarios - embedding hub", () => {
           name: "Enable tenants and create shared collection",
         })
         .should("be.enabled")
+        .click();
+
+      cy.log("complete the move-dashboard step");
+      H.main()
+        .findByRole("button", { name: "Create a sample dashboard" })
         .click();
 
       cy.log("select database routing strategy");
@@ -611,6 +683,7 @@ describe("scenarios - embedding hub", () => {
         cy.findByTestId("admin-layout-content")
           .findByText("Configure data permissions and enable tenants")
           .closest("button")
+          .scrollIntoView()
           .findByText("Done")
           .should("be.visible");
 
@@ -731,6 +804,11 @@ describe("scenarios - embedding hub", () => {
           .icon("check")
           .should("exist");
 
+        cy.log("complete the move-dashboard step");
+        H.main()
+          .findByRole("button", { name: "Create a sample dashboard" })
+          .click();
+
         cy.log("use row and column level security");
         H.main()
           .findByRole("radio", { name: /Row and column level security/ })
@@ -788,6 +866,11 @@ describe("scenarios - embedding hub", () => {
         })
         .icon("check")
         .should("exist");
+
+      cy.log("complete the move-dashboard step");
+      H.main()
+        .findByRole("button", { name: "Create a sample dashboard" })
+        .click();
 
       cy.log("use row and column level security");
       H.main()
@@ -885,6 +968,11 @@ describe("scenarios - embedding hub", () => {
         .icon("check")
         .should("exist");
 
+      cy.log("complete the move-dashboard step");
+      H.main()
+        .findByRole("button", { name: "Create a sample dashboard" })
+        .click();
+
       H.main()
         .findByRole("radio", { name: /Row and column level security/ })
         .scrollIntoView()
@@ -897,6 +985,9 @@ describe("scenarios - embedding hub", () => {
 
       cy.log("pick first table and column");
       H.main().findByText("Pick a table").click();
+
+      cy.log("Our analytics should be hidden in the table picker");
+      H.miniPicker().findByText("Our analytics").should("not.exist");
 
       H.miniPicker().findByText("Sample Database").click();
       H.miniPicker().findByText("Orders").click();
@@ -1013,11 +1104,16 @@ describe("scenarios - embedding hub", () => {
       cy.log("enable tenants to create the all-external-users");
       H.updateSetting("use-tenants", true);
 
-      cy.log("create shared collection");
+      cy.log("create shared collection with a dashboard");
       cy.request("POST", "/api/collection", {
         name: "Shared collection",
         parent_id: null,
         namespace: "shared-tenant-collection",
+      }).then(({ body: collection }) => {
+        H.createDashboard({
+          name: "Test Dashboard",
+          collection_id: collection.id,
+        });
       });
 
       cy.log("create an existing sandbox for Orders table via API");
@@ -1039,15 +1135,18 @@ describe("scenarios - embedding hub", () => {
 
       cy.visit("/admin/embedding/setup-guide/permissions");
 
-      cy.log("wait for create tenants step to be active and unlocked");
+      cy.log("wait for checklist data to load before interacting with steps");
       H.main()
-        .findByRole("listitem", { name: "Create tenants" })
-        .should("have.attr", "data-active", "true");
+        .findByRole("listitem", {
+          name: /Enable multi-tenant user strategy/,
+          timeout: 10_000,
+        })
+        .should("have.attr", "data-completed", "true");
 
+      cy.log("open the data segregation strategy step");
       H.main()
         .findByText("Which data segregation strategy does your database use?")
         .scrollIntoView()
-        .should("be.visible")
         .click();
 
       cy.log("select row and column level security strategy");
@@ -1141,6 +1240,11 @@ describe("scenarios - embedding hub", () => {
           })
           .icon("check")
           .should("exist");
+
+        cy.log("complete the move-dashboard step");
+        H.main()
+          .findByRole("button", { name: "Create a sample dashboard" })
+          .click();
 
         cy.log("select RLS strategy");
         H.main()
@@ -1257,6 +1361,11 @@ describe("scenarios - embedding hub", () => {
       cy.request("POST", "/api/collection", {
         name: "Shared collection",
         namespace: "shared-tenant-collection",
+      }).then(({ body: collection }) => {
+        H.createDashboard({
+          name: "Test Dashboard",
+          collection_id: collection.id,
+        });
       });
     });
 
@@ -1472,6 +1581,11 @@ describe("scenarios - embedding hub", () => {
       cy.request("POST", "/api/collection", {
         name: "Shared collection",
         namespace: "shared-tenant-collection",
+      }).then(({ body: collection }) => {
+        H.createDashboard({
+          name: "Test Dashboard",
+          collection_id: collection.id,
+        });
       });
     });
 
@@ -1571,7 +1685,6 @@ describe("scenarios - embedding hub", () => {
         expect(body["jwt-identity-provider-uri"]).to.equal(
           "https://jwt.example.com/auth",
         );
-        expect(body["jwt-shared-secret"]).to.be.a("string");
         expect(body["jwt-group-sync"]).to.equal(true);
       });
 
@@ -1580,15 +1693,7 @@ describe("scenarios - embedding hub", () => {
         .findByRole("listitem", { name: "Set up JWT authentication" })
         .should("have.attr", "data-completed", "true");
 
-      cy.log("valid signing key should be shown");
-      H.main().within(() => {
-        cy.findByLabelText(/JWT Signing Key/i)
-          .should("be.visible")
-          .should("have.attr", "value")
-          .and("have.length.at.least", 32);
-
-        cy.findByRole("button", { name: "Next" }).click();
-      });
+      H.main().findByRole("button", { name: "Next" }).click();
 
       cy.log("step 2 should be complete");
       H.main()

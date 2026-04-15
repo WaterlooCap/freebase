@@ -7,14 +7,15 @@
    [clojure.string :as str]
    [java-time.api :as t]
    [metabase.driver :as driver]
+   [metabase.driver.sql.normalize :as sql.normalize]
    [metabase.events.core :as events]
    [metabase.lib-be.core :as lib-be]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.util :as lib.util]
-   [metabase.query-processor :as qp]
    [metabase.query-processor.compile :as qp.compile]
+   [metabase.query-processor.core :as qp]
    [metabase.query-processor.middleware.add-remaps :as remap]
    [metabase.query-processor.middleware.catch-exceptions :as qp.catch-exceptions]
    [metabase.query-processor.parameters.dates :as params.dates]
@@ -110,6 +111,16 @@
 
 ;;; ------------------------------------------------- Table Names -------------------------------------------------
 
+(defn- resolve-nil-schema
+  "When a table has nil schema, check if the physical table exists under the driver's
+   default schema. If so, return that schema. Otherwise return nil.
+   This handles the case where transforms create tables without explicit schema
+   but the driver needs a schema to find the table during sync."
+  [driver database table]
+  (when-let [default-schema (try (sql.normalize/default-schema driver) (catch Exception _ nil))]
+    (when (driver/table-exists? driver database {:schema default-schema :name (:name table)})
+      default-schema)))
+
 (defn qualified-table-name
   "Return the name of the target table of a transform as a possibly qualified symbol."
   [_driver {:keys [schema name]}]
@@ -174,14 +185,31 @@
                     lo (assoc :checkpoint_lo_value (encode-checkpoint-value (:value lo)))
                     hi (assoc :checkpoint_hi_value (encode-checkpoint-value (:value hi))))))))
 
+(defn- coerce-to-local-datetime
+  "Coerce a temporal value to LocalDateTime, stripping any timezone information."
+  [t]
+  (condp instance? t
+    OffsetDateTime (t/local-date-time t)
+    ZonedDateTime  (t/local-date-time t)
+    Instant        (t/local-date-time t (t/zone-id "UTC"))
+    t))
+
+(defn- maybe-coerce-temporal
+  [base-type t]
+  (cond-> t
+    (and (isa? base-type :type/DateTime)
+         (not (isa? base-type :type/DateTimeWithTZ)))
+    coerce-to-local-datetime))
+
 (defn- parse-checkpoint-value
-  "Parse a serialized checkpoint value string according to its base-type keyword."
+  "Parse a serialized checkpoint value string according to its base-type keyword.
+  For temporal types, coerces the result to match the column's base-type."
   [base-type s]
   (cond
-    (not (string? s)) s
+    (not (string? s))               (maybe-coerce-temporal base-type s)
     (isa? base-type :type/Float)    (bigdec s)
     (isa? base-type :type/Number)   (biginteger s)
-    (isa? base-type :type/Temporal) (u.date/parse s)
+    (isa? base-type :type/Temporal) (maybe-coerce-temporal base-type (u.date/parse s))
     :else (throw (ex-info (str "Unsupported checkpoint type: " (pr-str base-type))
                           {:base-type base-type}))))
 
@@ -340,8 +368,17 @@
    (when-let [table (or (target-table (:id database) target)
                         (when create?
                           (sync/create-table! database (select-keys target [:schema :name :data_source :data_authority :is_writable]))))]
-     (sync/sync-table! table)
-     table)))
+     ;; If the table has nil schema, check if the physical table actually lives under
+     ;; the driver's default schema. If so, fix the Table record before syncing.
+     (let [table (if (nil? (:schema table))
+                   (if-let [actual-schema (resolve-nil-schema (:engine database) database table)]
+                     (do (t2/update! :model/Table (:id table) {:schema actual-schema})
+                         (-> (t2/select-one :model/Table (:id table))
+                             (t2/hydrate :db)))
+                     table)
+                   table)]
+       (sync/sync-table! table)
+       table))))
 
 (defn activate-table-and-mark-computed!
   "Activate table for `target` in `database` in the app db."
@@ -442,7 +479,6 @@
   "Post-processing steps after a transform has been executed successfully.
 
    Performs:
-   - Save watermark (if source-range-params provided)
    - Sync target table to AppDB
    - Set `transform_id` on the target table
    - Publish Metabase events (unless `:publish-events?` is false)
@@ -453,13 +489,10 @@
    to preserve the correct order of operations."
   [transform opts]
   (let [{:keys [target]} transform
-        {:keys [publish-events? source-range-params]
+        {:keys [publish-events?]
          :or   {publish-events? true}} opts
         db-id (transforms-base.i/target-db-id transform)
         database (t2/select-one :model/Database db-id)]
-    ;; Save watermark if source-range-params available
-    (when source-range-params
-      (save-watermark! (:id transform) source-range-params))
     ;; Sync target table
     (sync-target! target database)
     ;; Mark the table as owned by this transform
@@ -476,6 +509,11 @@
                                        :transform-type (keyword (:type target))
                                        :output-schema  (:schema target)
                                        :output-table   (qualified-table-name (:engine database) target)}}))))
+
+(defn output-table
+  "Return the output table created by a transform, looked up via `transform_id`."
+  [transform]
+  (t2/select-one :model/Table :transform_id (:id transform)))
 
 ;;; ------------------------------------------------- Source Table Schemas -------------------------------------------------
 

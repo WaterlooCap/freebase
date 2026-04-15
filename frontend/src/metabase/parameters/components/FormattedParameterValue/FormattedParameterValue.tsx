@@ -47,7 +47,9 @@ function FormattedParameterValue({
   const formattingSettings = useSetting("custom-formatting");
 
   if (parameterHasNoDisplayValue(value)) {
-    return placeholder;
+    return (
+      <Ellipsified showTooltip={!isPopoverOpen}>{placeholder}</Ellipsified>
+    );
   }
 
   const first = getValue(value);
@@ -88,7 +90,9 @@ function FormattedParameterValue({
     }
 
     return (
-      <span>{formatParameterValue(value, parameter, formattingSettings)}</span>
+      <span>
+        {formatParameterValue(tc(value), parameter, formattingSettings)}
+      </span>
     );
   };
 

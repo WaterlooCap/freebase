@@ -33,13 +33,13 @@
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.metadata-providers.mock :as providers.mock]
    [metabase.notification.payload.temp-storage :as temp-storage]
-   [metabase.query-processor :as qp]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.catch-exceptions :as catch-exceptions]
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.reducible :as qp.reducible]
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.query-processor.test :as qp]
    [metabase.secrets.models.secret :as secret]
    [metabase.sync.core :as sync]
    [metabase.sync.sync-metadata :as sync-metadata]
@@ -528,8 +528,8 @@
                        :type     :query
                        :query    {:source-table "card__123"}})]
           (is (= ["SELECT"
-                  "  \"source\".\"json_alias_test\" AS \"json_alias_test\","
-                  "  \"source\".\"count\" AS \"count\""
+                  "  \"__mb_source\".\"json_alias_test\" AS \"json_alias_test\","
+                  "  \"__mb_source\".\"count\" AS \"count\""
                   "FROM"
                   "  ("
                   "    SELECT"
@@ -541,7 +541,7 @@
                   "      \"json_alias_test\""
                   "    ORDER BY"
                   "      \"json_alias_test\" ASC"
-                  "  ) AS \"source\""
+                  "  ) AS \"__mb_source\""
                   "LIMIT"
                   "  1048575"]
                  (str/split-lines (driver/prettify-native-form :postgres (:query nested))))))))))
@@ -1080,6 +1080,43 @@
                  sql (:query (qp.compile/compile query))]
              (is (re-find #"CAST" sql))
              (is (some? (mt/rows (qp/process-query query)))))))))))
+
+(deftest create-schema-if-needed-nil-guard-test
+  (testing "create-schema-if-needed! is a no-op when schema is nil or blank (GDGT-2144)"
+    (let [executed-queries (atom [])]
+      (with-redefs [driver/execute-raw-queries! (fn [_driver _conn-spec queries]
+                                                  (swap! executed-queries conj queries))]
+        (driver/create-schema-if-needed! :postgres ::fake-conn nil)
+        (driver/create-schema-if-needed! :postgres ::fake-conn "")
+        (driver/create-schema-if-needed! :postgres ::fake-conn "   ")
+        (is (empty? @executed-queries)
+            "nil/blank schema should not issue any SQL")))))
+
+(deftest ^:parallel describe-fields-sql-nil-schema-test
+  (testing "describe-fields-sql for Postgres handles nil schema-names correctly (GDGT-2144)"
+    (let [[nil-schema-sql]   (sql-jdbc.sync/describe-fields-sql
+                              :postgres
+                              {:schema-names [nil]
+                               :table-names  ["my_table"]
+                               :details      {}})
+          [mixed-schema-sql] (sql-jdbc.sync/describe-fields-sql
+                              :postgres
+                              {:schema-names [nil "public"]
+                               :table-names  ["my_table"]
+                               :details      {}})
+          [normal-schema-sql] (sql-jdbc.sync/describe-fields-sql
+                               :postgres
+                               {:schema-names ["public"]
+                                :table-names  ["my_table"]
+                                :details      {}})]
+      (is (not (re-find #"(?i)IN \(NULL\)" nil-schema-sql))
+          "rendered SQL must not contain `IN (NULL)` which never matches anything")
+      (is (re-find #"\"table_schema\" IS NULL" nil-schema-sql)
+          "passing [nil] schemas should produce an IS NULL check on table_schema")
+      (is (re-find #"\"table_schema\" IN .+OR .+\"table_schema\" IS NULL" mixed-schema-sql)
+          "mixed nil + non-nil schemas should include both IN and IS NULL")
+      (is (not (re-find #"\"table_schema\" IS NULL" normal-schema-sql))
+          "non-nil-only schemas should not have IS NULL on table_schema"))))
 
 ;; API tests are in [[metabase.actions-rest.api-test]]
 (deftest ^:parallel actions-maybe-parse-sql-violate-not-null-constraint-test

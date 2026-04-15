@@ -186,7 +186,17 @@
     transforms
     (let [transform-ids (into #{} (map :id) transforms)
           last-runs (m/index-by :transform_id (transform-run/latest-runs transform-ids))]
-      (for [transform transforms] (assoc transform :last_run (get last-runs (:id transform)))))))
+      (for [{transform-id :id :as transform} transforms]
+        (let [{:keys [status checkpoint_hi_value] :as last-run} (get last-runs transform-id)
+              transform (assoc transform :last_run last-run)]
+          (if (and (= status :succeeded) checkpoint_hi_value)
+            ;; ensure consistency of last_checkpoint_value with last_run
+            (if (:last_checkpoint_value transform)
+              (assoc transform :last_checkpoint_value checkpoint_hi_value)
+              ;; latest transform value wins, could be reset
+              (assoc transform :last_checkpoint_value
+                     (t2/select-one-fn :last_checkpoint_value [:model/Transform :last_checkpoint_value] transform-id)))
+            transform))))))
 
 (methodical/defmethod t2/batched-hydrate [:model/Transform :transform_tag_ids]
   "Add tag_ids to a transform, preserving the order defined by position"
@@ -347,24 +357,49 @@
   [_transform]
   [:name :created_at])
 
+(defn- import-maybe-int-database-fk
+  "Import a database reference back to an ID. Tolerates raw numeric IDs from older exports
+  where source-tables database_id values were serialized without conversion."
+  [v]
+  (if (pos-int? v) v (serdes/*import-database-fk* v)))
+
+(defn- import-maybe-int-table-fk
+  "Import a table reference back to an ID. Tolerates raw numeric IDs from older exports
+  where source-tables table_id values were serialized without conversion."
+  [v]
+  (if (pos-int? v) v (serdes/*import-table-fk* v)))
+
 (defmethod serdes/make-spec "Transform"
   [_model-name opts]
   {:copy      [:name :description :entity_id :owner_email]
-   :skip      [:dependency_analysis_version :source_type :target_db_id :last_checkpoint_value]
+   :skip      [:source_type :target_db_id :last_checkpoint_value]
    :transform {:created_at         (serdes/date)
                :creator_id         (serdes/fk :model/User)
                :owner_user_id      (serdes/fk :model/User)
                :collection_id      (serdes/fk :model/Collection)
-               :source_database_id (serdes/fk :model/Database :name)
-               :source             {:export #(update % :query serdes/export-mbql)
+               :source_database_id (serdes/fk :model/Database)
+               :source             {:export (fn [source]
+                                              (-> source
+                                                  (m/update-existing :query serdes/export-mbql)
+                                                  (m/update-existing :source-database serdes/*export-database-fk*)
+                                                  (m/update-existing :source-tables
+                                                                     (fn [entries]
+                                                                       (->> (transforms-base.u/normalize-source-tables entries)
+                                                                            (mapv (fn [entry]
+                                                                                    (-> entry
+                                                                                        (m/update-existing :table_id serdes/*export-table-fk*)
+                                                                                        (m/update-existing :database_id serdes/*export-database-fk*)))))))))
                                     :import (fn [source]
                                               (-> source
+                                                  (m/update-existing :query serdes/import-mbql)
+                                                  (m/update-existing :source-database import-maybe-int-database-fk)
                                                   (m/update-existing :source-tables
-                                                                     (fn [st]
-                                                                       (if (map? st)
-                                                                         (transforms-base.u/source-tables-map->vec st)
-                                                                         st)))
-                                                  (m/update-existing :query serdes/import-mbql)))}
+                                                                     (fn [entries]
+                                                                       (->> (cond-> entries (map? entries) transforms-base.u/source-tables-map->vec)
+                                                                            (mapv (fn [entry]
+                                                                                    (-> entry
+                                                                                        (m/update-existing :table_id import-maybe-int-table-fk)
+                                                                                        (m/update-existing :database_id import-maybe-int-database-fk)))))))))}
                :target             {:export #(serdes/export-mbql (dissoc % :table_id))
                                     :import serdes/import-mbql}
                :tags               (serdes/nested :model/TransformTransformTag :transform_id opts)}})
@@ -379,15 +414,13 @@
       [[{:model "Database" :id source_database_id}]])
     (for [{tag-id :tag_id} tags]
       [{:model "TransformTag" :id tag-id}])
-    (serdes/mbql-deps source))))
+    (serdes/mbql-deps source)
+    (for [{:keys [table_id]} (:source-tables source)
+          :when (vector? table_id)]
+      (serdes/table->path table_id)))))
 
 (defmethod serdes/storage-path "Transform" [transform ctx]
-  ;; Path: ["collections" "<nested ... collections>" "transforms" "<entity_id_name>"]
-  ;; Use default collection path, then restructure similar to NativeQuerySnippet
-  (let [basis (serdes/storage-default-collection-path transform ctx)
-        file  (last basis)
-        colls (->> basis rest (drop-last 2))] ; Drop "collections" at start, and last two elements
-    (concat ["collections"] colls ["transforms" file])))
+  (serdes/storage-default-collection-path transform ctx "transforms"))
 
 (defmethod serdes/required "Transform"
   [_model id]
