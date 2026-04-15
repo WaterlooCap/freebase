@@ -185,26 +185,40 @@
                      :socket-timeout     5000     ;; in milliseconds
                      :connection-timeout 2000})))     ;; in milliseconds
 
-(defn- fetch-token-and-parse-body
-  [_token _base-url _site-uuid]
-  (log/info "Bypassing token validation. Enterprise features enabled.")
+(def ^:private bypass-features
+  "Full set of enterprise features the fork exposes without a real MetaStore token.
+  Single source of truth for the various bypass code paths below (fetch-token-and-parse-body,
+  *token-features*, -token-status). When new premium features are added upstream, extend this set."
+  #{"sandboxes" "whitelabel" "audit-app"
+    "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "sso-oidc" "scim"
+    "session-timeout-config" "disable-password-login" "dashboard-subscription-filters"
+    "advanced-permissions" "content-verification" "official-collections" "snippet-collections"
+    "serialization" "email-allow-list" "email-restrict-recipients" "llm-autodescription"
+    "query-reference-validation" "upload-management" "attached-dwh"
+    "etl-connections" "etl-connections-pg" "database-auth-providers" "database-routing"
+    "cloud-custom-smtp" "support-users"
+    "transforms" "transforms-basic" "transforms-python" "remote-sync"
+    "embedding" "embedding-sdk" "embedding-simple" "embedding-hub" "content-translation"
+    "cache-granular-controls" "cache-preemptive" "config-text-file" "collection-cleanup"
+    "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis" "metabot-v3" "semantic-search"
+    "tenants" "hosting" "dependencies" "library" "workspaces"
+    "metabase-ai-managed" "offer-metabase-ai-managed" "writable-connection"})
+
+(defn- bypass-token-response
+  "The fake MetaStore token-check response returned by the bypass."
+  []
   {:valid true
+   :canonical? true
    :status "active"
-   :features ["sandboxes" "whitelabel" "audit-app" "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "sso-oidc" "scim"
-              "session-timeout-config" "disable-password-login" "dashboard-subscription-filters"
-              "advanced-permissions" "content-verification" "official-collections" "snippet-collections"
-              "serialization" "email-allow-list" "email-restrict-recipients" "llm-autodescription"
-              "query-reference-validation" "upload-management" "attached-dwh" "etl-connections"
-              "etl-connections-pg" "database-auth-providers" "database-routing" "cloud-custom-smtp"
-              "support-users" "transforms" "transforms-basic" "transforms-python" "remote-sync"
-              "embedding" "embedding-sdk" "embedding-simple" "embedding-hub" "content-translation"
-              "cache-granular-controls" "cache-preemptive" "config-text-file" "collection-cleanup"
-              "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis" "metabot-v3" "semantic-search"
-              "tenants" "hosting" "development-mode" "dependencies" "library" "workspaces"
-              "metabase-ai-managed" "offer-metabase-ai-managed" "writable-connection"]
+   :features (vec (sort bypass-features))
    :plan-alias "enterprise-unlimited"
    :trial false
    :valid-thru "2099-12-31"})
+
+(defn- fetch-token-and-parse-body
+  [_token _base-url _site-uuid]
+  (log/info "Bypassing token validation. Enterprise features enabled.")
+  (bypass-token-response))
 
 (defn- metering-url
   [token base-url]
@@ -573,35 +587,19 @@
   (mr/validate AirgapToken (premium-features.settings/premium-embedding-token)))
 
 (mu/defn ^:dynamic *token-features* :- [:set ms/NonBlankString]
-    "Bypass and return all enterprise features."
-    []
-    #{"sandboxes" "whitelabel" "audit-app" "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "scim"
-      "session-timeout-config" "disable-password-login" "dashboard-subscription-filters"
-      "advanced-permissions" "content-verification" "official-collections" "snippet-collections"
-      "serialization" "email-restrict-recipients" "llm-autodescription" "query-reference-validation"
-      "upload-management" "attached-dwh" "etl-connections" "etl-connections-pg" "database-routing"
-      "cloud-custom-smtp" "support-users" "transforms" "transforms-python" "remote-sync"
-      "embedding" "embedding-sdk" "content-translation" "cache-granular-controls" "cache-preemptive"
-      "config-text-file" "collection-cleanup" "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis"
-      "metabot-v3" "semantic-search" "tenants" "hosting"})
+  "Bypass: returns the full set of enterprise features the fork exposes.
+
+  This is the ^:dynamic entry point that upstream feature-check code flows through
+  (has-feature?, has-any-features?, default-premium-feature-getter, etc.). Tests can
+  rebind this via `with-premium-features` to simulate different token states."
+  []
+  bypass-features)
 
 (defn -token-status
-  "Bypass: return valid status."
+  "Bypass: returns the fake MetaStore token-check response so the admin UI
+  shows the instance as an active enterprise license."
   []
-  {:valid true
-   :status "active"
-   :features ["sandboxes" "whitelabel" "audit-app" "sso-jwt" "sso-saml" "sso-ldap" "sso-google" "scim"
-              "session-timeout-config" "disable-password-login" "dashboard-subscription-filters"
-              "advanced-permissions" "content-verification" "official-collections" "snippet-collections"
-              "serialization" "email-restrict-recipients" "llm-autodescription" "query-reference-validation"
-              "upload-management" "attached-dwh" "etl-connections" "etl-connections-pg" "database-routing"
-              "cloud-custom-smtp" "support-users" "transforms" "transforms-python" "remote-sync"
-              "embedding" "embedding-sdk" "content-translation" "cache-granular-controls" "cache-preemptive"
-              "config-text-file" "collection-cleanup" "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis"
-              "metabot-v3" "semantic-search" "tenants" "hosting"]
-   :plan-alias "enterprise-unlimited"
-   :trial false
-   :valid-thru "2099-12-31"})
+  (bypass-token-response))
 
 (mu/defn plan-alias :- [:maybe :string]
   "Bypass: return enterprise unlimited."
@@ -609,9 +607,12 @@
   "enterprise-unlimited")
 
 (mu/defn quotas :- [:maybe [:sequential [:map]]]
-  "Bypass: return no quotas."
+  "Returns a vector of maps for each quota of the subscription."
   []
-  [])
+  (clear-cache!)
+  (some-> (premium-features.settings/premium-embedding-token)
+          (check-token)
+          :quotas))
 
 (mu/defn meters :- [:maybe :map]
   "Returns a map of current metered usage for the subscription."
@@ -622,14 +623,17 @@
           :meters))
 
 (defn has-any-features?
-  "Bypass: always true."
+  "True if we have a valid premium features token with ANY features."
   []
-  true)
+  (boolean (seq (*token-features*))))
 
 (defn has-feature?
-  "Bypass: always true."
-  [_feature]
-  true)
+  "Does this instance's premium token have `feature`?
+
+    (has-feature? :sandboxes)          ; -> true
+    (has-feature? :toucan-management)  ; -> false"
+  [feature]
+  (contains? (*token-features*) (name feature)))
 
 (defn canonically-has-feature?
   "Returns `true` if the token definitively has `feature`, `false` if it definitively does not, or `nil` if the token
