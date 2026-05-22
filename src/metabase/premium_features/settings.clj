@@ -248,7 +248,8 @@
 
 (define-premium-feature ^{:added "0.55.0"} development-mode?
   "Is this a development instance that should have watermarks?"
-  :development-mode)
+  :development-mode
+  :getter (fn [] false))
 
 ; the "-feature" suffix avoids name collision with the setting getter
 (define-premium-feature ^{:added "0.55.0"} enable-embedding-simple-feature?
