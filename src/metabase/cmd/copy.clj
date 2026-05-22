@@ -59,6 +59,7 @@
     :model/Database
     :model/User
     :model/Setting
+    :model/EmbeddingTheme
     :model/Table
     :model/Field
     :model/FieldValues
@@ -133,9 +134,14 @@
     :model/Metabot
     :model/MetabotConversation
     :model/MetabotMessage
+    :model/MetabotFeedback
+    :model/MetabotSourceFeedback
     :model/MetabotPrompt]
    (when config/ee-available?
-     [:model/Sandbox
+     [:model/MetabotPermissions
+      :model/MetabotGroupLimit
+      :model/MetabotInstanceLimit
+      :model/Sandbox
       :model/Tenant
       :model/ConnectionImpersonation])))
 

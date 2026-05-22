@@ -3,7 +3,9 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [metabase.analytics.prometheus :as prometheus]
+   [metabase.analytics-interface.core :as analytics]
+   [metabase.api-scope.core :as api-scope]
+   [metabase.api.common :as api]
    [metabase.config.core :as config]
    [metabase.metabot.agent.links :as links]
    [metabase.metabot.agent.memory :as memory]
@@ -11,6 +13,7 @@
    [metabase.metabot.agent.profiles :as profiles]
    [metabase.metabot.agent.streaming :as streaming]
    [metabase.metabot.provider-util :as provider-util]
+   [metabase.metabot.scope :as scope]
    [metabase.metabot.self :as self]
    [metabase.metabot.tools :as tools]
    [metabase.util :as u]
@@ -267,8 +270,12 @@
          (map #(get-structured-output (:result %)))
          (filter #(and (:chart-id %) (:query-id %))))
    (completing
-    (fn [mem {:keys [chart-id] :as chart}]
-      (memory/store-chart mem chart-id chart)))
+    (fn [mem {:keys [chart-id chart-type query]}]
+      (memory/store-chart mem
+                          chart-id
+                          {:chart_id chart-id
+                           :queries [query]
+                           :visualization_settings {:chart_type chart-type}})))
    memory
    parts))
 
@@ -541,6 +548,27 @@
    :version   1
    :data      debug-log})
 
+(def ^:private profile-id->required-permission
+  "Map from profile-id to the metabot permission that must be `:yes` for a user
+  to use that profile. Profiles not listed here have no profile-level permission gate."
+  {:sql                       :permission/metabot-sql-generation
+   :nlq                       :permission/metabot-nlq
+   :transforms_codegen        :permission/metabot-sql-generation
+   :document-generate-content :permission/metabot-other-tools})
+
+(defn- check-metabot-access!
+  "Throw a 403 if the user's metabot permissions do not grant access to the
+  requested profile. First checks the base metabot on/off permission, then
+  the profile-specific permission."
+  [profile-id perms]
+  ;; Base metabot on/off check — blocks ALL profiles when metabot is disabled
+  (api/check (= :yes (:permission/metabot perms))
+             [403 "You do not have permission to use the AI assistant."])
+  ;; Profile-specific permission check
+  (when-let [required-perm (profile-id->required-permission profile-id)]
+    (api/check (= :yes (get perms required-perm))
+               [403 (format "You do not have permission to use the %s assistant." (name profile-id))])))
+
 (mu/defn run-agent-loop
   "Run agent loop, returning a reducible of parts.
 
@@ -562,15 +590,25 @@
             [:debug? {:optional true} [:maybe :boolean]]]]
   (let [profile-id         (:profile-id opts)
         debug?             (:debug? opts)
-        labels             {:profile-id (name profile-id)}]
+        labels             {:profile-id (name profile-id)}
+        perms              (or scope/*current-user-metabot-permissions*
+                               (if api/*is-superuser?*
+                                 scope/all-yes-permissions
+                                 (scope/resolve-user-permissions api/*current-user-id*)))
+        scopes             (if api/*is-superuser?*
+                             api-scope/unrestricted
+                             (scope/user-metabot-perms->scopes perms))]
+    (check-metabot-access! profile-id perms)
     (reify clojure.lang.IReduceInit
       (reduce [_ rf init]
         (with-span :info {:name       :metabot.agent/run-agent-loop
                           :profile-id profile-id
                           :msg-count  (count (:messages opts))}
-          (prometheus/inc! :metabase-metabot/agent-requests labels)
+          (analytics/inc! :metabase-metabot/agent-requests labels)
           (let [start-ms (u/start-timer)]
-            (binding [*debug-log* (when debug? (atom []))]
+            (binding [*debug-log*                              (when debug? (atom []))
+                      scope/*current-user-scope*               scopes
+                      scope/*current-user-metabot-permissions* perms]
               (try
                 (let [agent              (init-agent opts)
                       {result    :result
@@ -578,13 +616,13 @@
                                                   (iterate loop-step)
                                                   (drop-while #(= :continue (:status %)))
                                                   first)]
-                  (prometheus/observe! :metabase-metabot/agent-iterations labels iteration)
+                  (analytics/observe! :metabase-metabot/agent-iterations labels iteration)
                   ;; Emit debug log as a data part if debug mode was active
                   (if (and debug? (seq @*debug-log*))
                     (rf result (debug-log-part @*debug-log*))
                     result))
                 (catch Exception e
-                  (prometheus/inc! :metabase-metabot/agent-errors labels)
+                  (analytics/inc! :metabase-metabot/agent-errors labels)
                   (if (:api-error (ex-data e))
                     (if (:status (ex-data e))
                       (log/errorf "Agent loop API error: %s status=%s provider=%s body=%s"
@@ -598,4 +636,4 @@
                     (log/error e "Agent loop error"))
                   (rf init (error-part e)))
                 (finally
-                  (prometheus/observe! :metabase-metabot/agent-duration-ms labels (u/since-ms start-ms)))))))))))
+                  (analytics/observe! :metabase-metabot/agent-duration-ms labels (u/since-ms start-ms)))))))))))

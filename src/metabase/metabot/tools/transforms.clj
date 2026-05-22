@@ -3,6 +3,7 @@
   SQL transform tools are implemented directly in OSS.
   Python transform tools use defenterprise (return nil/error in OSS, real impl in EE)."
   (:require
+   [metabase.metabot.scope :as scope]
    [metabase.metabot.tools.dependencies :as deps]
    [metabase.metabot.tools.shared :as shared]
    [metabase.metabot.tools.transforms.write :as transforms-write-tools]
@@ -80,6 +81,7 @@
 ;;; ──────────────────────────────────────────────────────────────────
 
 (mu/defn ^{:tool-name "get_transform_details"
+           :scope     scope/agent-transforms-read
            :capabilities #{:feature-transforms}}
   get-transform-details-tool
   "Get information about a transform."
@@ -95,6 +97,7 @@
 
 (defenterprise ^{:tool-name  "get_transform_python_library_details"
                  :schema     [:=> [:cat python-lib-schema] :map]
+                 :scope      scope/agent-transforms-read
                  :capabilities #{:feature-transforms :feature-transforms-python}}
   get-transform-python-library-details-tool
   "Get Python library details. EE-only; returns an error in OSS."
@@ -148,6 +151,7 @@
     [:maybe :string]]])
 
 (mu/defn ^{:tool-name "write_transform_sql"
+           :scope scope/agent-transforms-write
            :capabilities #{:feature-transforms :permission-write-transforms}}
   write-transform-sql-tool
   "Write new SQL queries or edit existing queries for transforms.
@@ -253,6 +257,7 @@
 
 (defenterprise ^{:tool-name    "write_transform_python"
                  :schema       [:=> [:cat write-transform-python-schema] :map]
+                 :scope        scope/agent-transforms-write
                  :capabilities #{:feature-transforms :feature-transforms-python :permission-write-transforms}}
   write-transform-python-tool
   "Write Python transforms. EE-only; returns an error in OSS."

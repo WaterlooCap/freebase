@@ -2,8 +2,7 @@ import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import type { FormikErrors } from "formik";
 import { P, isMatching } from "ts-pattern";
 
-import { useSelector } from "metabase/lib/redux";
-import { getLocation } from "metabase/selectors/routing";
+import { useAdminSetting } from "metabase/api/utils";
 import type { MetabotProvider } from "metabase-types/api";
 
 type ApiKeylessProviders = "metabase";
@@ -109,12 +108,6 @@ export function parseProviderAndModel(value: string | null | undefined) {
   return { provider, model };
 }
 
-export function useMetabotIdPath() {
-  const location = useSelector(getLocation);
-  const metabotId = Number(location?.pathname?.split("/").pop());
-  return Number.isNaN(metabotId) ? null : metabotId;
-}
-
 // https://redux-toolkit.js.org/rtk-query/usage/error-handling
 // https://redux-toolkit.js.org/rtk-query/usage-with-typescript#type-safe-error-handling
 export const isFetchBaseQueryError = (
@@ -160,3 +153,13 @@ export const handleFieldError = <Values>(
     throw { data: error };
   }
 };
+
+export function useMCPServerURL() {
+  const { value: siteUrl } = useAdminSetting("site-url");
+
+  if (!siteUrl) {
+    return null;
+  }
+
+  return `${siteUrl}/api/mcp`;
+}

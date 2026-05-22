@@ -9,7 +9,7 @@
 
    Primary API: [[effective-details]], [[with-write-connection]], [[default-details]]."
   (:require
-   [metabase.analytics.prometheus :as prometheus]
+   [metabase.analytics-interface.core :as analytics]
    [metabase.driver.connection.workspaces :as driver.w]
    [metabase.driver.util :as driver.u]
    [metabase.premium-features.core :refer [defenterprise]]
@@ -69,7 +69,7 @@
    - `:default` — primary `:details`
    - `:write-data` — `:write-data-details` merged over `:details` (if configured)
 
-   Bind via [[with-write-connection]], not directly."
+   Bind via [[with-write-connection]] or [[with-default-connection]], not directly."
   :default)
 
 (defmacro with-write-connection
@@ -79,6 +79,14 @@
    into account (if configured) instead of only primary `:details`."
   [& body]
   `(binding [*connection-type* :write-data]
+     ~@body))
+
+(defmacro with-default-connection
+  "Establishes a default-connection context for body.
+
+   Use this to compile or execute a read query from inside a broader write-connection context."
+  [& body]
+  `(binding [*connection-type* :default]
      ~@body))
 
 (def ^:dynamic ^:private *suppress-resolution-telemetry*
@@ -119,7 +127,7 @@
       (when (and write-details
                  (not *suppress-resolution-telemetry*)
                  (not (driver.w/has-connection-swap? (:id database))))
-        (try (prometheus/inc! :metabase-db-connection/type-resolved {:connection-type "write-data"})
+        (try (analytics/inc! :metabase-db-connection/type-resolved {:connection-type "write-data"})
              (catch Exception _ nil)))
       (-> (driver.w/maybe-swap-details (:id database) base)
           (assoc ::effective-connection-type (if write-details :write-data :default))
@@ -168,7 +176,7 @@
   (if-let [conn-type (::effective-connection-type connection-details)]
     (do
       (log/debugf "Acquiring %s connection for db %s" conn-type (::database-id connection-details))
-      (try (prometheus/inc! :metabase-db-connection/write-op {:connection-type (name conn-type)})
+      (try (analytics/inc! :metabase-db-connection/write-op {:connection-type (name conn-type)})
            (catch Exception _ nil)))
     (log/warnf "%s was unable to determine connection type" `track-connection-acquisition!)))
 

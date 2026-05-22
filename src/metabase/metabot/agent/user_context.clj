@@ -78,12 +78,12 @@
 
   The frontend sends `type: \"adhoc\"` for *both* notebook (MBQL) and native SQL
   queries. We distinguish them by inspecting the query: a dataset-query with
-  `{:type \"native\"}` (or `:native`) is a native SQL query, as is an MLv2/pMBQL
+  `{:type \"native\"}` (or `:native`) is a native SQL query, as is an MBQL 4 (legacy) or MBQL 5
   query with a single native stage."
   [item]
   (let [query (:query item)]
     (or (= "native" (normalize-context-type (:type query)))
-        ;; MLv2/pMBQL: normalize and use lib to detect native queries
+        ;; MBQL 4/MBQL 5: normalize and use lib to detect native queries
         (when (and (map? query) (:database query))
           (try
             (lib/native-only-query? (lib-be/normalize-query query))
@@ -140,7 +140,8 @@
   [entity]
   (fetch-and-format entity
                     "The user is currently looking at the rows of a table:"
-                    #(entity-details/get-table-details {:table-id (:id entity)
+                    #(entity-details/get-table-details {:entity-type :table
+                                                        :entity-id (:id entity)
                                                         :with-field-values? false
                                                         :with-metrics? false
                                                         :with-measures? true
@@ -151,7 +152,8 @@
   [entity]
   (fetch-and-format entity
                     "The user is currently looking at the rows of a model:"
-                    #(entity-details/get-table-details {:model-id (:id entity)
+                    #(entity-details/get-table-details {:entity-type :model
+                                                        :entity-id (:id entity)
                                                         :with-field-values? false
                                                         :with-metrics? false
                                                         :with-measures? true
@@ -348,9 +350,9 @@
 
   Returns formatted string for template variable {{recent_views}}."
   [context]
-  (if-not (:user_recently_viewed context)
-    ""
-    (let [items (:user_recently_viewed context)]
+  (let [items (:user_recently_viewed context)]
+    (if-not (seq items)
+      ""
       (te/lines "Here are some items the user has recently viewed:"
                 (for [item items]
                   (format-simple-entity (select-keys item [:type :id :name :description])))

@@ -9,10 +9,11 @@ import {
 } from "metabase/admin/components/AdminNav";
 import { UpsellGem } from "metabase/common/components/upsells/components/UpsellGem";
 import { useHasTokenFeature, useSetting } from "metabase/common/hooks";
-import { useSelector } from "metabase/lib/redux";
-import { PLUGIN_REMOTE_SYNC } from "metabase/plugins";
+import { getPlan, isProPlan } from "metabase/common/utils/plan";
+import { PLUGIN_REMOTE_SYNC, PLUGIN_SECURITY_CENTER } from "metabase/plugins";
+import { useSelector } from "metabase/redux";
 import { getLocation } from "metabase/selectors/routing";
-import { Divider, Flex } from "metabase/ui";
+import { Box, Divider, Flex } from "metabase/ui";
 
 import { UpdatesNavItem } from "./UpdatesNavItem";
 
@@ -27,6 +28,10 @@ export function SettingsNav() {
   const hasScim = useHasTokenFeature("scim");
   const hasPythonTransforms = useHasTokenFeature("transforms-python");
   const isHosted = useSetting("is-hosted?");
+  const tokenFeatures = useSetting("token-features");
+  const isPro = isProPlan(getPlan(tokenFeatures));
+  const { isEnabled: isSecurityCenterEnabled, SecurityCenterPromoCard } =
+    PLUGIN_SECURITY_CENTER;
 
   return (
     <AdminNavWrapper>
@@ -50,7 +55,20 @@ export function SettingsNav() {
         {hasJwt && <SettingsNavItem path="authentication/jwt" label="JWT" />}
         {hasOidc && <SettingsNavItem path="authentication/oidc" label="OIDC" />}
       </SettingsNavItem>
-      <PLUGIN_REMOTE_SYNC.LibraryNav />
+      {PLUGIN_REMOTE_SYNC.isEnabled ? (
+        <PLUGIN_REMOTE_SYNC.LibraryNav />
+      ) : !isPro ? (
+        <SettingsNavItem
+          path="remote-sync"
+          label={
+            <Flex gap="sm" align="center">
+              <span>{t`Remote sync`}</span>
+              <UpsellGem />
+            </Flex>
+          }
+          icon="sync"
+        />
+      ) : null}
       <NavDivider />
       <SettingsNavItem path="email" label={t`Email`} icon="mail" />
       <SettingsNavItem path="slack" label={t`Slack`} icon="slack" />
@@ -115,6 +133,17 @@ export function SettingsNav() {
         }
         icon="cloud"
       />
+      {isSecurityCenterEnabled && (
+        <Box
+          pos="sticky"
+          bottom={0}
+          pt="md"
+          bg="background-primary"
+          style={{ marginTop: "auto", zIndex: 1 }}
+        >
+          <SecurityCenterPromoCard />
+        </Box>
+      )}
     </AdminNavWrapper>
   );
 }

@@ -86,7 +86,7 @@
                                           (assoc :constraints constraints)
                                           (assoc :info info))
                                       rff))
-          (qp/process-query (assoc query :info info) rff))))))
+          (qp/process-query (update query :info merge info) rff))))))
 
 (api.macros/defendpoint :post "/"
   :- (server/streaming-response-schema ::qp.schema/query-result)

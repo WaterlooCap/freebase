@@ -15,7 +15,7 @@
    [diehard.core :as dh]
    [environ.core :refer [env]]
    [java-time.api :as t]
-   [metabase.analytics.prometheus :as analytics]
+   [metabase.analytics-interface.core :as analytics]
    [metabase.app-db.core :as app-db]
    [metabase.config.core :as config]
    [metabase.events.core :as events]
@@ -128,6 +128,14 @@
    :transform-rolling-basic-runs           0
    :transform-rolling-advanced-runs        0
    :transform-rolling-usage-date (today)})
+
+(defenterprise transform-metered-as
+  "Return the meter bucket a new transform run of the given source-type counts toward,
+   based on the instance's current premium features. Returns nil when the run is not metered
+   (including all OSS runs, since premium features are never present there)."
+  metabase-enterprise.transforms.core
+  [_source-type]
+  nil)
 
 (defn metering-stats
   "Collect metering statistics for billing purposes. Used by both token check and metering task. "
@@ -390,6 +398,23 @@
   []
   (t2/delete! :model/PremiumFeaturesCache))
 
+(defn- extract-locks
+  "Project a `:meters` map to `{meter-keyword -> boolean}` of `:is-locked` values.
+   Meters without an `:is-locked` field are dropped."
+  [meters]
+  (into {} (keep (fn [[k v]] (when-some [locked (:is-locked v)] [k locked]))) meters))
+
+(defn- update-locked-meters!
+  "Mirror the `:is-locked` flag for each meter in `result` to the local `:locked-meters`
+   setting, when `:meters` is present in a successful token-check response. Best-effort:
+   failures are logged but never propagated to the refresh path."
+  [result]
+  (when (contains? result :meters)
+    (try
+      (premium-features.settings/locked-meters! (extract-locks (:meters result)))
+      (catch Throwable t
+        (log/warn t "Failed to mirror :locked-meters from token-check response")))))
+
 (def ^:dynamic *testing-only-call-after-refresh*
   "When non-nil, a zero-arg function called after async background refresh completes.
    For testing only — do not use in production."
@@ -414,6 +439,7 @@
                     result-hash (hash-token-status result)
                     now         (t/instant)]
                 (write-cache-to-db! token-hash result-hash)
+                (update-locked-meters! result)
                 (swap! local-cache assoc token-hash {:result      result
                                                      :result-hash result-hash
                                                      :updated-at  now})
@@ -485,7 +511,7 @@
            (catch Exception e
              (when-not (-> e ex-data :cause #{:token-check/circuit-breaker :token-check/app-db-not-ready})
                (log/infof "Error checking token: %s" (ex-message e))
-               (analytics/inc-if-initialized! :metabase-token-check/attempt {:status :failure}))
+               (analytics/inc! :metabase-token-check/attempt {:status :failure}))
              {:valid         false
               :canonical?    false
               :status        (tru "Unable to validate token")
@@ -668,6 +694,12 @@
    feature-name :- [:or string? mu/localized-string-schema]]
   (when-not (some has-feature? feature-flag)
     (throw (ee-feature-error feature-name))))
+
+(defn is-trial?
+  "True if the current premium token is a trial subscription.
+   Returns false if there is no token or the status cannot be fetched."
+  []
+  (-> (-token-status) :trial boolean))
 
 (defn log-enabled?
   "Returns true when we should record audit data into the audit log."
