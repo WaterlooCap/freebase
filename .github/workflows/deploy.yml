@@ -51,4 +51,5 @@ jobs:
           docker push "$IMAGE:latest"
 
       - name: Deploy to DigitalOcean App Platform
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: doctl apps create-deployment 015ad677-f565-4ef2-bdc1-fe1a0a35522a --wait
