@@ -209,7 +209,13 @@
     "cache-granular-controls" "cache-preemptive" "config-text-file" "collection-cleanup"
     "ai-sql-fixer" "ai-sql-generation" "ai-entity-analysis" "metabot-v3" "semantic-search"
     "tenants" "hosting" "dependencies" "library" "workspaces"
-    "metabase-ai-managed" "offer-metabase-ai-managed" "writable-connection"})
+    "metabase-ai-managed" "offer-metabase-ai-managed" "writable-connection"
+    ;; Added for v0.62.x to keep the fork fully "enterprise unlimited". custom-viz and
+    ;; schema-viewer are new in 0.62; table-data-editing, ai-controls and data-complexity-score
+    ;; closed pre-existing gaps. All five are plain has-feature? token gates. Deliberately NOT
+    ;; added: development-mode (forced false elsewhere -> no watermarks) and admin-security-center
+    ;; (its getter also requires (not (is-hosted?)), and the fork forces hosting on, so it'd no-op).
+    "custom-viz" "schema-viewer" "table-data-editing" "ai-controls" "data-complexity-score"})
 
 (defn- bypass-token-response
   "The fake MetaStore token-check response returned by the bypass."
