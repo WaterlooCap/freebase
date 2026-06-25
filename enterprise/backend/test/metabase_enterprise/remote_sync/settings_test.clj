@@ -70,7 +70,6 @@
             (is (false? @git-check-called?) "Git validation should not be called for non-git settings")
             (is (false? (settings/remote-sync-transforms)))
             (is (false? (settings/remote-sync-auto-import))))))))
-
   (testing "Partial updates with git-related settings do trigger git validation"
     (let [git-check-called? (atom false)]
       (with-redefs [settings/check-git-settings! (fn [_]
@@ -84,7 +83,6 @@
             (settings/check-and-update-remote-settings! {:remote-sync-type :read-write})
             (is (true? @git-check-called?) "Git validation should be called when updating type")
             (is (= :read-write (settings/remote-sync-type))))
-
           (testing "Updating remote-sync-branch triggers git validation"
             (reset! git-check-called? false)
             (settings/check-and-update-remote-settings! {:remote-sync-branch "develop"})
@@ -137,6 +135,41 @@
     (is (true? (settings/remote-sync-enabled)))))
 
 ;;; ------------------------------------------------- Root Collection Remote Sync -------------------------------------------------
+
+(deftest check-and-update-remote-settings-env-var-aware-test
+  (testing "Settings sourced from env vars are not overwritten by check-and-update-remote-settings!"
+    (with-redefs [settings/check-git-settings! (constantly true)]
+      (mt/with-temp-env-var-value! [mb-remote-sync-url "file://env/url.git"
+                                    mb-remote-sync-token "env-token"
+                                    mb-remote-sync-branch "env-branch"]
+        (testing "Updating URL, token, and branch via API has no effect when sourced from env"
+          (settings/check-and-update-remote-settings!
+           {:remote-sync-url    "file://api/url.git"
+            :remote-sync-token  "api-token"
+            :remote-sync-branch "api-branch"
+            :remote-sync-type   :read-only})
+          (is (= "file://env/url.git" (settings/remote-sync-url)))
+          (is (= "env-token" (settings/remote-sync-token)))
+          (is (= "env-branch" (settings/remote-sync-branch))))
+        (testing "Clearing URL (blank) does not wipe env-backed URL/token/branch"
+          (settings/check-and-update-remote-settings! {:remote-sync-url ""})
+          (is (= "file://env/url.git" (settings/remote-sync-url)))
+          (is (= "env-token" (settings/remote-sync-token)))
+          (is (= "env-branch" (settings/remote-sync-branch)))))))
+  (testing "Non-env-sourced settings are still updated normally"
+    (with-redefs [settings/check-git-settings! (constantly true)]
+      (mt/with-temporary-setting-values [:remote-sync-url nil
+                                         :remote-sync-token nil
+                                         :remote-sync-branch nil
+                                         :remote-sync-type nil]
+        (settings/check-and-update-remote-settings!
+         {:remote-sync-url    "file://api/url.git"
+          :remote-sync-token  "api-token"
+          :remote-sync-branch "api-branch"
+          :remote-sync-type   :read-only})
+        (is (= "file://api/url.git" (settings/remote-sync-url)))
+        (is (= "api-token" (settings/remote-sync-token)))
+        (is (= "api-branch" (settings/remote-sync-branch)))))))
 
 (deftest root-collection-is-not-remote-synced-test
   (testing "Root collection for shared-tenant-collection namespace is never remote-synced (individual children can be toggled)"

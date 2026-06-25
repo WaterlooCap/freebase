@@ -80,6 +80,24 @@ Must be less than 1048575. See also MB_UNAGGREGATED_QUERY_ROW_LIMIT.
 
 Whether AI features are enabled.
 
+### `MB_AI_USAGE_MAX_RETENTION_DAYS`
+
+- Type: integer
+- Default: `null`
+- [Exported as](../installation-and-operation/serialization.md): `ai-usage-max-retention-days`.
+- [Configuration file name](./config-file.md): `ai-usage-max-retention-days`
+
+Number of days to retain rows in the ai_usage_log, metabot_conversation, and metabot_message tables. Minimum value is 30; set to 0 to retain data indefinitely.
+
+Sets the maximum number of days Metabase preserves rows for the following application database tables:
+
+- `ai_usage_log`
+- `metabot_conversation`
+- `metabot_message`
+
+Once a day, Metabase deletes rows older than this threshold. The minimum value is 30 days (Metabase will treat entered values of 1 to 29 the same as 30).
+If set to 0, Metabase will keep all rows.
+
 ### `MB_ALLOWED_IFRAME_HOSTS`
 
 - Type: string
@@ -112,12 +130,14 @@ Allowed iframe hosts.
 
 ### `MB_ANALYTICS_PII_RETENTION_ENABLED`
 
+> Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.
+
 - Type: boolean
 - Default: `false`
 - [Exported as](../installation-and-operation/serialization.md): `analytics-pii-retention-enabled`.
 - [Configuration file name](./config-file.md): `analytics-pii-retention-enabled`
 
-Enable logging of embed path, query parameters, user agent, and IP address of who views your internal data and embeds. This information will be shown in your usage analytics.
+Enable logging of embed path, query parameters, user agent, IP address, and Metabot conversation metadata for users of your internal data and embeds. This information will be shown in your usage analytics.
 
 ### `MB_ANON_TRACKING_ENABLED`
 
@@ -334,6 +354,24 @@ Identify when new versions of Metabase are available.
 Whether to (asynchronously) sync newly created Databases during config-from-file initialization. By default, true,
   but you can disable this behavior if you want to sync it manually or use SerDes to populate its data model.
 
+### `MB_CSP_IMG_ALLOWED_HOSTS`
+
+- Type: string
+- Default: ``
+- [Exported as](../installation-and-operation/serialization.md): `csp-img-allowed-hosts`.
+- [Configuration file name](./config-file.md): `csp-img-allowed-hosts`
+
+Comma-separated list of hosts that images may load from (e.g. in dashboard text, entity descriptions, and custom visualizations) when `csp-img-enabled` is on. Empty by default, which restricts images to this Metabase instance.
+
+### `MB_CSP_IMG_ENABLED`
+
+- Type: boolean
+- Default: `false`
+- [Exported as](../installation-and-operation/serialization.md): `csp-img-enabled`.
+- [Configuration file name](./config-file.md): `csp-img-enabled`
+
+Restrict the browser Content Security Policy so images can only load from this Metabase instance or the hosts listed in `csp-img-allowed-hosts`. Must be on to enable Custom Visualizations.
+
 ### `MB_CSV_FIELD_SEPARATOR`
 
 - Type: string
@@ -388,6 +426,17 @@ Pick one of your dashboards to serve as homepage. Users without dashboard access
 
 ID of dashboard to use as a homepage.
 
+### `MB_CUSTOM_VIZ_ENABLED`
+
+> Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.
+
+- Type: boolean
+- Default: `false`
+- [Exported as](../installation-and-operation/serialization.md): `custom-viz-enabled`.
+- [Configuration file name](./config-file.md): `custom-viz-enabled`
+
+Should custom visualizations be enabled for this instance?
+
 ### `MB_DASHBOARDS_SAVE_LAST_USED_PARAMETERS`
 
 - Type: boolean
@@ -418,8 +467,7 @@ By default, this is 20 minutes.
 Timeout in minutes for the database's query execution, both for the Metabase application database and any data connections.
   If you have long-running queries, you might consider increasing this value. Adjusting the timeout does not impact Metabase’s frontend.
 
-  This setting also applies to individual queries executed within transforms, so make sure the duration is long enough
-  that it doesn't timeout any long-running queries in your transforms.
+  This setting does not apply to queries executed within transforms; those are governed by MB_TRANSFORM_TIMEOUT instead.
 
   Please be aware that other services (like Nginx) may still drop long-running queries.
 
@@ -431,6 +479,13 @@ Timeout in minutes for the database's query execution, both for the Metabase app
 - [Configuration file name](./config-file.md): `default-maps-enabled`
 
 Whether or not the default GeoJSON maps are enabled.
+
+### `MB_DISABLE_AUTO_SYNC`
+
+- Type: boolean
+- Default: `false`
+
+When true, suppresses automatically-triggered syncs: the scheduled sync-and-analyze and update-field-values jobs do not run (and new triggers are not registered), and adding a new database does not kick off an initial sync. Syncs originating from an explicit request — the Sync-now REST endpoints, or a transform finalizing its output table — are unaffected. For deployments that load database metadata from disk at startup and should not have Metabase re-discover it.
 
 ### `MB_DISABLE_CORS_ON_LOCALHOST`
 
@@ -718,6 +773,16 @@ Enable admins to create publicly viewable links (and embeddable iframes) for Que
 
 Allow users to explore data using X-rays.
 
+### `MB_FINGERPRINT_MAX_FIELDS_PER_TABLE`
+
+- Type: integer
+- Default: `10000`
+- [Exported as](../installation-and-operation/serialization.md): `fingerprint-max-fields-per-table`.
+
+Maximum number of fields per table to fingerprint. If a table has more eligible fields than this, the rest are
+  skipped during fingerprinting analysis -- loading that many fields into memory at once can exhaust the heap (this has
+  OOM'd instances syncing document databases like MongoDB with very large or dynamic schemas).
+
 ### `MB_FOLLOW_UP_EMAIL_SENT`
 
 - Type: boolean
@@ -993,7 +1058,7 @@ When set to `true`, users who log in via JWT will automatically get a Metabase a
 - [Exported as](../installation-and-operation/serialization.md): `landing-page`.
 - [Configuration file name](./config-file.md): `landing-page`
 
-Enter a URL of the landing page to show the user. This overrides the custom homepage setting above.
+Enter a relative URL like /dashboard/1 or /collection/2.
 
 ### `MB_LANDING_PAGE_ILLUSTRATION`
 
@@ -1788,6 +1853,16 @@ Determines what happens when a user logs in via SAML and doesn't have a Metabase
 
 When set to `true`, users who log in via SAML will automatically get a Metabase account if they don't have one, or get their existing account reactivated. When set to `false`, only users with active Metabase accounts can log in via SAML.
 
+### `MB_SCAN_MAX_FIELDS_PER_TABLE`
+
+- Type: integer
+- Default: `10000`
+- [Exported as](../installation-and-operation/serialization.md): `scan-max-fields-per-table`.
+
+Maximum number of fields per table to scan for field values. If a table has more active fields than this, the rest
+  are skipped when scanning field values -- scanning that many fields would load them all into memory and, on non-SQL
+  drivers like MongoDB, issue a warehouse request per field.
+
 ### `MB_SCIM_ENABLED`
 
 - Type: boolean
@@ -2135,6 +2210,16 @@ Enable or disable surveys.
 
 Maximum number of leaf fields synced per collection of document database. Currently relevant for Mongo. Not to be confused with total number of synced fields. For every chosen leaf field, all intermediate fields from root to leaf are synced as well.
 
+### `MB_SYNC_MAX_FIELDS_PER_TABLE`
+
+- Type: integer
+- Default: `10000`
+- [Exported as](../installation-and-operation/serialization.md): `sync-max-fields-per-table`.
+
+Maximum number of fields per table to sync as :model/Field rows. If a table's warehouse schema has more fields than
+  this, only the first (by name) are synced and the rest are skipped -- keeps document databases with very large or
+  dynamic schemas (e.g. MongoDB) from creating an unbounded number of Fields.
+
 ### `MB_SYNCHRONOUS_BATCH_UPDATES`
 
 - Type: boolean
@@ -2154,6 +2239,18 @@ By default, this is 0 and the thread interrupt escalation does not run.
 Timeout in milliseconds to wait after query cancellation before escalating to thread interruption.
         This is used to free up threads that are stuck waiting for a DB response after a query has been cancelled.
 
+### `MB_TRANSFORM_RUN_JOB_SQL_CONCURRENCY`
+
+> Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.
+
+- Type: integer
+- Default: `3`
+
+Maximum number of SQL-backed transforms a single transform-job run may execute in parallel.
+
+This setting is only configurable on instances with the transforms add-on; OSS
+  deployments without the add-on always use the default.
+
 ### `MB_TRANSFORM_TIMEOUT`
 
 > Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.
@@ -2163,8 +2260,11 @@ Timeout in milliseconds to wait after query cancellation before escalating to th
 
 The timeout for a transform job, in minutes.
 
-Each query executed by a transform is also subject to the MB_DB_QUERY_TIMEOUT_MINUTES timeout,
-  so make sure that value isn't lower, or it will timeout your transform.
+Controls the timeout for transform runs, including the queries they execute. This takes precedence
+  over MB_DB_QUERY_TIMEOUT_MINUTES for queries executed inside a transform, so transforms can run longer than regular
+  Metabase queries. Enforced per-statement via `Statement.setQueryTimeout`; transforms also use a separate JDBC
+  connection pool whose c3p0 leak-detector tolerates this longer runtime, so non-transform connections continue to
+  use the shorter `MB_DB_QUERY_TIMEOUT_MINUTES` leak-detector.
 
 ### `MB_TRANSFORMS_ENABLED`
 
@@ -2256,6 +2356,26 @@ Use [MB_SESSION_COOKIES](#mb_session_cookies) to also expire sessions, when brow
 
 Also see the [Changing session expiration](../people-and-groups/changing-session-expiration.md) documentation page.
 
+### `MB_APPLICATION_DB_IDLE_CONNECTION_TEST_PERIOD_SECONDS`
+
+Type: integer<br>
+Default: `60`<br>
+Since: v62.0
+
+How often, in seconds, to test idle connections in the application database pool. Set to `0` to disable idle connection testing.
+
+### `MB_APPLICATION_DB_MAX_CONNECTION_AGE_SECONDS`
+
+Type: integer<br>
+Default: `3600`<br>
+Since: v62.0
+
+Maximum lifetime, in seconds, of a connection in the application database pool. After this duration the connection is closed and a new one is opened. Set to `0` to keep connections until the database closes them.
+
+The default of one hour is set primarily to limit memory growth (especially on PostgreSQL).
+
+If you are connecting with a short-lived credential (e.g. an AWS RDS IAM auth token) baked into the URL or password at startup, setting this to `0` is a partial workaround — eventual reconnects from the database or the network will still fail. Prefer [MB_DB_AWS_IAM](#mb_db_aws_iam) (AWS RDS / Aurora) or [MB_DB_AZURE_MANAGED_IDENTITY_CLIENT_ID](#mb_db_azure_managed_identity_client_id) (Azure).
+
 ### `MB_APPLICATION_DB_MAX_CONNECTION_POOL_SIZE`
 
 Type: integer<br>
@@ -2269,6 +2389,30 @@ Change this to a higher value if you notice that regular usage consumes all or c
 To see how many connections are being used, check the Metabase logs and look for lines that contains the following: `… App DB connections: 12/15 …`. In this example, 12 out of 15 available connections are being used.
 
 See [MB_JDBC_DATA_WAREHOUSE_MAX_CONNECTION_POOL_SIZE](#mb_jdbc_data_warehouse_max_connection_pool_size) for setting maximum connections to the databases connected to Metabase.
+
+### `MB_APPLICATION_DB_MAX_IDLE_TIME_EXCESS_CONNECTIONS_SECONDS`
+
+Type: integer<br>
+Default: `600`<br>
+Since: v62.0
+
+How long, in seconds, an idle connection beyond the minimum pool size may stay open before being culled. Set to `0` to never cull excess idle connections.
+
+### `MB_APPLICATION_DB_TEST_CONNECTION_ON_CHECKOUT`
+
+Type: boolean<br>
+Default: `false`<br>
+Since: v62.0
+
+When `true`, each connection is validated when checked out of the pool. Adds latency to every checkout. Useful when credentials may invalidate connections behind the pool's back.
+
+### `MB_APPLICATION_DB_UNRETURNED_CONNECTION_TIMEOUT_SECONDS`
+
+Type: integer<br>
+Default: `3600`<br>
+Since: v62.0
+
+How long, in seconds, before a checked-out but unreturned connection is forcibly reclaimed. The legacy name `MB_APPLICATION_DB_UNRETURNED_CONNECTION_TIMEOUT` continues to work; the suffixed form is preferred.
 
 ### `MB_ASYNC_QUERY_THREAD_POOL_SIZE`
 
@@ -2298,6 +2442,28 @@ Type: boolean<br>
 Default: `true`
 
 When set to `false`, Metabase will print migrations needed to be done in the application database and exit. Those migrations need to be applied manually. When `true`, Metabase will automatically make changes to the application database. This is not related to migrating away from H2.
+
+### `MB_DB_AWS_IAM`
+
+Type: boolean<br>
+Default: `false`<br>
+Since: v0.58.0
+
+When `true`, authenticate to the application database (PostgreSQL or MySQL/MariaDB on AWS RDS or Aurora) using AWS IAM instead of a password. Omit [MB_DB_PASS](#mb_db_pass). Auth tokens are refreshed automatically.
+
+Requires that AWS credentials are available via the standard credential chain (e.g. EKS IRSA, EC2 instance profile, ECS task role, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), that the credentials hold the `rds-db:connect` permission for your database user, and that the DB user is set up for IAM authentication.
+
+For MySQL/MariaDB, also set [MB_DB_SSL_CERT](#mb_db_ssl_cert), or pass the SSL parameters in [MB_DB_CONNECTION_URI](#mb_db_connection_uri).
+
+### `MB_DB_AZURE_MANAGED_IDENTITY_CLIENT_ID`
+
+Type: string<br>
+Default: `null`<br>
+Since: v0.51.0
+
+Authenticate to a PostgreSQL or MySQL application database using an Azure Managed Identity instead of a password. Set this to the client ID of a user-assigned Managed Identity attached to your compute resource. Omit [MB_DB_PASS](#mb_db_pass). Access tokens are refreshed automatically.
+
+Requires the Database authentication providers Pro/Enterprise feature.
 
 ### `MB_DB_CONNECTION_URI`
 
@@ -2361,6 +2527,17 @@ Type: integer<br>
 Default: `null`
 
 The port for [MB_DB_HOST](#mb_db_host).
+
+### `MB_DB_SSL_CERT`
+
+Type: string<br>
+Default: `null`<br>
+Since: v0.58.0
+
+SSL configuration for the application database. Used with [MB_DB_AWS_IAM](#mb_db_aws_iam) on MySQL/MariaDB, where SSL is required.
+
+- `"trust"` — trust the server certificate without validation.
+- A filesystem path to a PEM file — validate against the supplied CA certificate.
 
 ### `MB_DB_TYPE`
 
@@ -2616,7 +2793,7 @@ Comma-separated namespaces to trace. **WARNING:** Could log sensitive informatio
 
 ### `MB_PASSWORD_COMPLEXITY`
 
-Type: string (`"weak"`, `"normal"`, `"strong"`)<br>
+Type: string (`"weak"`, `"normal"`, `"strong"`, `"strong-enough"`)<br>
 Default: `"normal"`
 
 Enforce a password complexity rule to increase security for regular logins. This only applies to new users or users that are changing their password. Related [MB_PASSWORD_LENGTH](#mb_password_length)
@@ -2624,6 +2801,7 @@ Enforce a password complexity rule to increase security for regular logins. This
 - `weak` no character constraints
 - `normal` at least 1 digit
 - `strong` minimum 8 characters w/ 2 lowercase, 2 uppercase, 1 digit, and 1 special character
+- `strong-enough` minimum 15 characters
 
 ### `MB_PASSWORD_LENGTH`
 
@@ -2640,6 +2818,15 @@ Default: `"plugins"`
 Path of the "plugins" directory, which is used to store the Metabase database drivers. The user who is running Metabase should have permission to write to the directory. When running the JAR, the default directory is `plugins`, created in the same location as the JAR file. When running Docker, the default directory is `/plugins`.
 
 The location is where custom third-party drivers should be added. Then Metabase will load the driver on startup, which can be verified in the log.
+
+### `MB_PROMETHEUS_SERVER_PORT`
+
+Type: integer<br>
+Default: `null`
+
+Port to serve Prometheus metrics from. If set, Prometheus collectors are registered and served from `localhost:<port>/metrics`.
+
+See [Observability with Prometheus](../installation-and-operation/observability-with-prometheus.md).
 
 ### `MB_QP_CACHE_BACKEND`
 

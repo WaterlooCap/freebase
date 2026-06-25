@@ -1,4 +1,7 @@
 (ns ^:mb/driver-tests metabase.driver.bigquery-cloud-sdk-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query     {:namespaces [metabase.driver.bigquery-cloud-sdk-test]}
+                                                            metabase.test.data/query          {:namespaces [metabase.driver.bigquery-cloud-sdk-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.driver.bigquery-cloud-sdk-test]}}}}}}
   (:require
    [clojure.core.async :as a]
    [clojure.string :as str]
@@ -8,9 +11,11 @@
    [metabase.driver :as driver]
    [metabase.driver.bigquery-cloud-sdk :as bigquery]
    [metabase.driver.bigquery-cloud-sdk.common :as bigquery.common]
+   [metabase.driver.bigquery-cloud-sdk.workspaces :as bigquery.ws]
    [metabase.driver.common.table-rows-sample :as table-rows-sample]
    [metabase.driver.settings :as driver.settings]
    [metabase.lib.core :as lib]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.pipeline :as qp.pipeline]
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
@@ -28,7 +33,7 @@
    [metabase.warehouse-schema.models.field-values :as field-values]
    [toucan2.core :as t2])
   (:import
-   (com.google.cloud.bigquery BigQuery TableResult)
+   (com.google.cloud.bigquery BigQuery BigQueryException Field FieldValue FieldValue$Attribute FieldValueList TableResult)
    (com.google.cloud.http HttpTransportOptions)))
 
 (set! *warn-on-reflection* true)
@@ -119,6 +124,83 @@
 
             ;; TODO Temporarily disabling due to flakiness (#33140)
             #_(is (= 4 @pages-retrieved))))))))
+
+(def ^:private ^"[Lcom.google.cloud.bigquery.Field;" no-fields
+  (make-array Field 0))
+
+(defn- field-value-list
+  "A `FieldValueList` of `cells` with no backing schema (rows from `tabledata.list` are matched by position)."
+  ^FieldValueList [cells]
+  (FieldValueList/of ^java.util.List (vec cells) no-fields))
+
+(defn- prim-cell
+  "A primitive (scalar) `FieldValue`, as `tabledata.list` returns them (everything comes back as a String)."
+  ^FieldValue [v]
+  (FieldValue/of FieldValue$Attribute/PRIMITIVE v))
+
+(defn- repeated-cell
+  "A REPEATED `FieldValue` wrapping `cells` (a `FieldValueList`), as nested/array columns come back."
+  ^FieldValue [cells]
+  (FieldValue/of FieldValue$Attribute/REPEATED (field-value-list cells)))
+
+(deftest ^:parallel field-value-bytes-test
+  (let [field-value-bytes @#'bigquery/field-value-bytes
+        row-bytes         @#'bigquery/row-bytes]
+    (testing "a cell's measured size grows with its actual string length, not its type"
+      (is (< (field-value-bytes (prim-cell "x"))
+             (field-value-bytes (prim-cell (apply str (repeat 1000 "x")))))))
+    (testing "a null cell falls back to the per-cell overhead (no NPE)"
+      (is (pos? (field-value-bytes (prim-cell nil)))))
+    (testing "a REPEATED/RECORD cell sums its children, so it costs more than a scalar"
+      (is (< (field-value-bytes (prim-cell "abc"))
+             (field-value-bytes (repeated-cell [(prim-cell "abc") (prim-cell "abc") (prim-cell "abc")])))))
+    (testing "row-bytes sums its cells"
+      (is (= (+ (field-value-bytes (prim-cell "aa")) (field-value-bytes (prim-cell "bbb")))
+             (row-bytes (field-value-list [(prim-cell "aa") (prim-cell "bbb")])))))))
+
+(deftest ^:parallel next-page-size-test
+  (let [next-size @#'bigquery/next-page-size]
+    (testing "page size = budget / measured-avg-bytes-per-row"
+      ;; 50 rows totalling 500 bytes -> avg 10 -> 1000/10 = 100
+      (is (= 100 (next-size 1000 500 50 1000000))))
+    (testing "heavier rows sample fewer rows per page"
+      (is (< (next-size 1000 1000 10 1000000)    ; avg 100 -> 10 rows
+             (next-size 1000 100 10 1000000))))  ; avg 10  -> 100 rows
+    (testing "page size is at least 1, even when a single row exceeds the whole budget"
+      (is (= 1 (next-size 100 10000 1 1000000))))
+    (testing "page size never exceeds the remaining row budget"
+      (is (= 5 (next-size 1000000000 10 10 5))))))
+
+(defn- mock-page
+  "A `TableResult` proxy exposing a page token and a fixed set of rows."
+  ^TableResult [token rows]
+  (proxy [TableResult] []
+    (getNextPageToken [] token)
+    (getValues [] rows)))
+
+(deftest ^:parallel reducible-bigquery-results-nil-page-test
+  (testing "a nil initial page reduces to an empty result instead of NPEing (#47339)"
+    (is (= [] (into [] (#'bigquery/reducible-bigquery-results nil nil (constantly nil) (constantly nil)))))))
+
+(deftest ^:synchronized adaptive-sample-next-page-test
+  (let [requested (atom [])
+        next-size  (fn [budget max-rows rows]
+                     (reset! requested [])
+                     (with-redefs [bigquery/list-sample-page (fn [_bq size _token]
+                                                               (swap! requested conj size)
+                                                               (mock-page nil []))]
+                       (binding [bigquery/*page-byte-budget* budget]
+                         ((#'bigquery/adaptive-sample-next-page :table max-rows) (mock-page "tok" rows))
+                         (first @requested))))
+        light      (vec (repeatedly 5 #(field-value-list [(prim-cell "x")])))
+        heavy      (vec (repeatedly 5 #(field-value-list [(prim-cell (apply str (repeat 5000 "x")))])))]
+    (testing "the next page shrinks when the measured page is heavier (sliding window adapts to real data)"
+      (is (< (next-size 100000 1000000 heavy)
+             (next-size 100000 1000000 light))))
+    (testing "the next page is clamped to the remaining row budget"
+      (is (= 3 (next-size 1000000000 8 light))))
+    (testing "no further page is fetched once the page token is blank"
+      (is (nil? ((#'bigquery/adaptive-sample-next-page :table 100) (mock-page "" light)))))))
 
 ;; These look like the macros from metabase.query-processor.expressions-test
 ;; but conform to bigquery naming rules
@@ -381,7 +463,7 @@
     (mt/dataset
       native-dataset
       (let [view-name "category_view"]
-        (is (contains? (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db)))
+        (is (contains? (into #{} (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db))))
                        {:schema (get-test-data-name) :name view-name :database_require_filter false})
             "`describe-database` should see the view")
         (is (= [{:name "id", :database-type "INTEGER" :base-type :type/Integer :database-position 0 :database-partitioned false :table-name view-name :table-schema (get-test-data-name)}
@@ -397,7 +479,6 @@
                    (into #{}
                          (filter (comp #{view-name} :name))
                          (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db))))))))
-
         (testing "We should be able to run queries against the view (#3414)"
           (is (= [[1 "Red Medicine" "Asian"]
                   [2 "Stout Burgers & Beers" "Burger"]
@@ -421,7 +502,6 @@
                    (into #{}
                          (filter (comp #{view-name} :name))
                          (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db))))))))
-
         (testing "We should be able to run queries against the view (#3414)"
           (is (= [[42]]
                  (mt/rows
@@ -460,7 +540,7 @@
     (mt/dataset
       nested-records
       (let [database (driver/describe-database :bigquery-cloud-sdk (mt/db))
-            tables (sort-by :name (:tables database))]
+            tables (sort-by :name (into [] (:tables database)))]
         (is (=? [{:name "records"} {:name "records_o"}] tables))
         (is (=? [{:name "id"}
                  {:name "name"}
@@ -555,12 +635,10 @@
                                              "partition_by_range_not_required"
                                              "partition_by_ingestion_time_not_required"} :name))
                              (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db))))))))
-
             (testing "tables that require a filter are correctly identified"
               (is (= table-name->is-filter-required?
                      (t2/select-fn->fn :name :database_require_filter :model/Table
                                        :name [:in (keys table-name->is-filter-required?)]))))
-
             (testing "partitioned fields are correctly identified"
               (is (= {["not_partitioned"                 "transaction_id"]   false
                       ["partition_by_range_not_required" "customer_id"]      true
@@ -708,7 +786,6 @@
                                                :parameter_mappings [{:parameter_id "_NAME_"
                                                                      :card_id      (:id card-product)
                                                                      :target       [:dimension (mt/$ids $cf_product.name)]}]}]
-
           (testing "chained filter works"
             (is (= {:has_more_values false
                     :values          [["Americano"] ["Cold brew"]]}
@@ -739,6 +816,36 @@
             {:database (mt/id)
              :type     :native
              :native   {:query "SELECT abc FROM 123;"}}))))))
+
+(deftest synchronous-bigquery-exception-is-invalid-query-test
+  (testing (str "BigQueryException thrown synchronously from .create (e.g. 'Too many query "
+                "parameters') is wrapped with :type :invalid-query so the FE renders the "
+                "actual error instead of 'We're experiencing server issues' (#71558)")
+    ;; Simulate BigQuery rejecting the job at submission time (the synchronous .create path),
+    ;; which is what happens when a query exceeds the 10000 parameter limit. Only `.create` is
+    ;; called on the client before the throw, so the reify can stop there.
+    (let [sync-error  (BigQueryException.
+                       400
+                       "Too many query parameters: 13444 exceeds limit of 10000.")
+          mock-client (reify BigQuery
+                        (^com.google.cloud.bigquery.Job create
+                          [_
+                           ^com.google.cloud.bigquery.JobInfo _job-info
+                           ^"[Lcom.google.cloud.bigquery.BigQuery$JobOption;" _opts]
+                          (throw sync-error)))]
+      (with-redefs [bigquery/database-details->client (constantly mock-client)]
+        (let [ex (try
+                   (#'bigquery/execute-bigquery (constantly nil) {} "SELECT 1" [] nil)
+                   nil
+                   (catch Throwable t t))]
+          (is (some? ex)
+              "expected execute-bigquery to throw")
+          (is (instance? clojure.lang.ExceptionInfo ex)
+              "execute-bigquery should wrap the raw BigQueryException in an ex-info")
+          (is (= :invalid-query (some-> ex ex-data :type))
+              "synchronous BigQueryException should be classified as :invalid-query")
+          (is (re-find #"Too many query parameters" (ex-message ex))
+              "the underlying BigQuery error message should be preserved"))))))
 
 (deftest project-id-override-test
   (mt/test-driver :bigquery-cloud-sdk
@@ -800,7 +907,7 @@
            decimal-val
            bignumeric-val
            bigdecimal-val)
-          (is (contains? (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db)))
+          (is (contains? (into #{} (:tables (driver/describe-database :bigquery-cloud-sdk (mt/db))))
                          {:schema (get-test-data-name) :name tbl-nm :database_require_filter false})
               "`describe-database` should see the table")
           (is (= [{:base-type :type/Decimal
@@ -1258,7 +1365,6 @@
          [[12345678901234567890.1234567890M]
           [22345678901234567890.1234567890M]
           [32345678901234567890.1234567890M]]]])
-
       ;; Must sync field values
       (sync/sync-database! (mt/db))
       (is (= "BIGNUMERIC"
@@ -1382,3 +1488,45 @@
              (driver/compile-insert :bigquery-cloud-sdk {:query {:query "SELECT * FROM products"}
                                                          :output-table :PRODUCTS_COPY}))))))
 
+(deftest ^:parallel ws-sa-description-roundtrip-test
+  (testing "ws-sa-description and ws-sa-description->created-at are exact inverses"
+    ;; This is a contract test. The SA description is the only place the
+    ;; created-at marker is stored, so the writer in
+    ;; `ws-create-service-account!` and the reader used by CI cleanup
+    ;; (`metabase.test.data.bigquery-cloud-sdk/delete-old-isolation-service-accounts!`)
+    ;; must agree on format. If this test fails, orphan SA cleanup will
+    ;; silently break -- expired SAs will accumulate because their created-at
+    ;; can no longer be parsed.
+    (doseq [instant [(java.time.Instant/parse "2026-01-15T10:30:45.123456789Z")
+                     (java.time.Instant/parse "2026-12-31T23:59:59Z")
+                     (java.time.Instant/parse "2020-06-15T00:00:00Z")
+                     (java.time.Instant/now)]]
+      (is (= instant
+             (bigquery.ws/ws-sa-description->created-at (bigquery.ws/ws-sa-description instant)))
+          (str "round-trip failed for " instant))))
+  (testing "ws-sa-description->created-at returns nil for non-conforming inputs"
+    (is (nil? (bigquery.ws/ws-sa-description->created-at nil)))
+    (is (nil? (bigquery.ws/ws-sa-description->created-at "")))
+    (is (nil? (bigquery.ws/ws-sa-description->created-at "some other description")))
+    (is (nil? (bigquery.ws/ws-sa-description->created-at "created-at:not-an-instant")))))
+
+(deftest ^:parallel bigquery-field-filter-alias-test
+  (mt/test-driver :bigquery-cloud-sdk
+    (let [mp    (mt/metadata-provider)
+          sql   "SELECT title as title, category AS category
+                 FROM sha_c1baee7db240aa419104c2d925a07a4d4faeeb24_test_data.products p
+                 WHERE 1=1 [[ AND {{category}} ]]
+                 ORDER BY p.title ASC;"
+          product-category (lib/ref (lib.metadata/field mp (mt/id :products :category)))
+          query (-> (lib/native-query mp sql)
+                    (lib/with-template-tags {"category" {:name "category"
+                                                         :alias "p.category"
+                                                         :display-name "Category"
+                                                         :type :dimension
+                                                         :dimension product-category
+                                                         :widget-type :text}})
+                    (assoc :parameters [{:type :text
+                                         :target [:dimension [:template-tag "category"]]
+                                         :value "Gadget"}]))]
+      (is (= ["Aerodynamic Leather Computer" "Gadget"]
+             (mt/first-row (qp/process-query query)))))))

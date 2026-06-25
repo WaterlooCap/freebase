@@ -1,4 +1,6 @@
 (ns ^:mb/driver-tests metabase.driver.sqlserver-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.driver.sqlserver-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.driver.sqlserver-test]}}}}}}
   (:require
    [clojure.string :as str]
    [clojure.test :refer :all]
@@ -34,6 +36,14 @@
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
+
+(deftest ^:parallel hour-bucketing-time-without-database-type-test
+  (testing (str "Hour bucketing on a TIME-typed expression without `:database-type` (as happens for "
+                "fields referenced by name from a source query, #75193) should use TIMEFROMPARTS and "
+                "not produce a DATETIME2FROMPARTS result that requires a date component")
+    (let [expr (h2x/with-type-info :test_col {:effective-type :type/Time})]
+      (is (= ["TIMEFROMPARTS(DATEPART(hour, \"test_col\"), 0, 0, 0, 0)"]
+             (sql.qp/format-honeysql :sqlserver (sql.qp/date :sqlserver :hour expr)))))))
 
 (deftest ^:parallel fix-order-bys-test
   (testing "Remove order-by from joins"
@@ -121,6 +131,37 @@
                                                     :host               "localhost"
                                                     :port               1433
                                                     :additional-options "trustServerCertificate=false"})))))
+
+(deftest ^:parallel reject-details-with-dangerous-additional-options-test
+  (mt/test-driver :sqlserver
+    (let [details (:details (mt/db))]
+      (testing "db details with potentially dangerous additional options are rejected"
+        (are [bad-option] (let [bad-opts-details (assoc details :additional-options bad-option)
+                                bad-host-details (update details :host str ";" bad-option)]
+                            (is (thrown-with-msg? java.lang.Exception
+                                                  #"Potentially dangerous keys in connection details"
+                                                  (driver/can-connect? :sqlserver bad-opts-details)))
+                            (is (thrown-with-msg? java.lang.Exception
+                                                  #"Potentially dangerous keys in connection details"
+                                                  (driver/can-connect? :sqlserver bad-host-details))))
+          "socketFactoryClass=bad.Factory"
+          "socketFactoryConstructorArg=bad"
+          "trustManagerClass=bad.TrustManager"
+          "trustManagerConstructorArg=/etc/passwd"
+          "accessTokenCallbackClass=bad.Callback"
+          "socketfactoryclass=bad.Factory"
+          "SOCKETFACTORYCLASS=bad.Factory"
+          "socketFactoryClass=bad.Factory;socketFactoryConstructorArg=bad"
+          "socketFactoryClass=bad.Factory;trustServerCertificate=false"
+          "trustServerCertificate=false;socketFactoryClass=bad.Factory"))
+      (testing "db details without potentially dangerous options are accepted"
+        (are [options] (let [details (assoc details :additional-options options)]
+                         (is (true? (driver/can-connect? :sqlserver details))))
+          nil
+          ""
+          " "
+          "trustServerCertificate=false"
+          "trustStore=/path/to/store;trustStorePassword=password;trustStoreType=pkcs12")))))
 
 (deftest ^:parallel add-max-results-limit-test
   (mt/test-driver :sqlserver
@@ -796,17 +837,14 @@
       (let [database {:lib/type :metadata/database
                       :details {:user "login_user" :role "db_user"}}]
         (is (= "db_user" (driver.sql/default-database-role :sqlserver database)))))
-
     (testing "returns nil when no role is configured"
       (let [database {:lib/type :metadata/database
                       :details {:user "login_user"}}]
         (is (nil? (driver.sql/default-database-role :sqlserver database)))))
-
     (testing "returns nil even when user is 'sa'"
       (let [database {:lib/type :metadata/database
                       :details {:user "sa"}}]
         (is (nil? (driver.sql/default-database-role :sqlserver database)))))
-
     (testing "ignores user field and only uses role field"
       (let [database {:lib/type :metadata/database
                       :details {:user "login_user" :role "impersonation_user"}}]
@@ -830,7 +868,6 @@
                                          {driver-api/qp.add.source-table  (mt/id :venues)
                                           driver-api/qp.add.source-alias  "name"
                                           driver-api/qp.add.desired-alias "name"}]]}}]
-
         (is (= {:where
                 [:=
                  [::h2x/identifier :field ["JoinedCategories" "LiteralString"]]
@@ -921,3 +958,27 @@
             :sqlserver (mt/id) nil
             (fn [conn]
               (driver.sql-jdbc/set-role-statement :sqlserver conn "role'; SELECT sleep(10); --")))))))
+
+(mt/defdataset ^:private datetime-offset
+  [["datetime-offset"
+    [{:field-name "start", :base-type {:native "DATETIMEOFFSET"}}
+     {:field-name "end", :base-type {:native "DATETIMEOFFSET"}}]
+    [["2025-10-10 09:00:00 +02:00" "2025-10-10 10:00:00 +02:00"]
+     ["2025-10-11 09:15:00 +02:00" "2025-10-11 09:30:00 +02:00"]]]])
+
+(deftest ^:parallel datetime-diff-with-datetime-offset-test
+  (mt/test-driver :sqlserver
+    (mt/dataset datetime-offset
+      (let [mp (mt/metadata-provider)
+            datetime-table (lib.metadata/table mp (mt/id :datetime-offset))
+            start-col (lib.metadata/field mp (mt/id :datetime-offset :start))
+            end-col (lib.metadata/field mp (mt/id :datetime-offset :end))
+            diff-minutes (lib/expression-clause :datetime-diff
+                                                [start-col end-col :minute]
+                                                nil)]
+        (is (= [[1 "2025-10-10T07:00:00Z" "2025-10-10T08:00:00Z" 60]
+                [2 "2025-10-11T07:15:00Z" "2025-10-11T07:30:00Z" 15]]
+               (-> (lib/query mp datetime-table)
+                   (lib/expression "diff-minutes" diff-minutes)
+                   (qp/process-query)
+                   (mt/rows))))))))

@@ -65,8 +65,8 @@
     ;; whether this Connection should NOT be read-only, e.g. for DDL stuff or inserting data or whatever.
     [:write? {:optional true, :default false} [:maybe :boolean]]
     [:download? {:optional true} [:maybe :boolean]]
-    ;; true if called from table-rows-sample-query
-    [:sample? {:optional true} [:maybe :boolean]]
+    ;; true for large results we want to *stream* (a server-side cursor) rather than buffer in memory
+    [:stream? {:optional true} [:maybe :boolean]]
     ;; don't autoclose the connection
     [:keep-open? {:optional true} [:maybe :boolean]]]])
 
@@ -411,17 +411,17 @@
     ;; `f`... we need to check and make sure that won't mess anything up, since some existing code is already doing it
     ;; manually. (metabase#40014)
     (cond (not (or write?
-                   (and (-> options :download?) (= driver :postgres))))
+                   (and (-> options :stream?) (isa? driver/hierarchy driver :postgres))))
           (try
             (log/trace (pr-str '(.setAutoCommit conn true)))
             (.setAutoCommit conn true)
             (catch Throwable e
               (log/debug e "Error enabling connection autoCommit")))
 
-          ;; todo (dan 7/11/25): fixing straightforward postgres oom on downloads in #60733, but seems like write? is
-          ;; not set here. Note this is explicitly silent when `write?`. Lots of tests fail with autocommit false
-          ;; there.
-          (and (or (-> options :download?) (-> options :sample?)) (isa? driver/hierarchy driver :postgres))
+          ;; Postgres/Redshift buffer the *entire* ResultSet unless autoCommit is false (then they use a server-side
+          ;; cursor honoring the statement fetch size). So for streamed reads (`:stream?` -- sync metadata reads,
+          ;; table-rows-sample, downloads) flip autoCommit off, else a huge result OOMs.
+          (and (-> options :stream?) (isa? driver/hierarchy driver :postgres))
           (try
             (log/trace (pr-str '(.setAutoCommit conn false)))
             (.setAutoCommit conn false)
@@ -573,29 +573,47 @@
           (log/debug "Query canceled, calling Statement.cancel()")
           (.cancel stmt))))))
 
+(defn- set-statement-query-timeout!
+  "Set `Statement.setQueryTimeout` to the current `*query-timeout-ms*`. Applied uniformly to every SQL-JDBC statement
+  so each query carries its own server-side timeout, rather than relying on the pool-wide c3p0
+  `unreturnedConnectionTimeout` to kill long queries. Transforms rebind `*query-timeout-ms*` so their statements get
+  the transform timeout instead of the shorter default. Drivers that opt out via the `:jdbc/set-query-timeout`
+  feature flag (e.g. SparkSQL — calling it closes the Hive Thrift transport) skip the call entirely; for the rest,
+  individual implementations that throw fall back to the c3p0 leak-detector via the `catch Throwable`."
+  [driver ^Statement stmt]
+  (when (driver/database-supports? driver :jdbc/set-query-timeout nil)
+    (try
+      (.setQueryTimeout stmt (long (/ driver.settings/*query-timeout-ms* 1000)))
+      (catch Throwable e
+        (log/debug e "Error setting statement query timeout")))))
+
 (defn- prepared-statement*
   ^PreparedStatement [driver conn sql params canceled-chan]
   ;; sometimes preparing the statement fails, usually if the SQL syntax is invalid. Match the
   ;; classification used in [[execute-reducible-query]] below: such errors should surface to the
   ;; user as :invalid-query (HTTP 4xx with the underlying database message), not :driver
   ;; (HTTP 5xx "We're experiencing server issues"). See #71637.
-  (doto (try
-          (prepared-statement driver conn sql params)
-          (catch Throwable e
-            (throw (ex-info (tru "Error preparing statement: {0}" (ex-message e))
-                            {:driver driver
-                             :type   driver-api/qp.error-type.invalid-query
-                             :sql    (str/split-lines (driver/prettify-native-form driver sql))
-                             :params params}
-                            e))))
-    (wire-up-canceled-chan-to-cancel-Statement! canceled-chan)))
+  (let [stmt (try
+               (prepared-statement driver conn sql params)
+               (catch Throwable e
+                 (throw (ex-info (tru "Error preparing statement: {0}" (ex-message e))
+                                 {:driver driver
+                                  :type   driver-api/qp.error-type.invalid-query
+                                  :sql    (str/split-lines (driver/prettify-native-form driver sql))
+                                  :params params}
+                                 e))))]
+    (set-statement-query-timeout! driver stmt)
+    (wire-up-canceled-chan-to-cancel-Statement! stmt canceled-chan)
+    stmt))
 
 (defn- use-statement? [driver params]
   (and (driver/database-supports? driver :jdbc/statements nil) (empty? params)))
 
 (defn- statement* ^Statement [driver conn canceled-chan]
-  (doto (statement driver conn)
-    (wire-up-canceled-chan-to-cancel-Statement! canceled-chan)))
+  (let [stmt (statement driver conn)]
+    (set-statement-query-timeout! driver stmt)
+    (wire-up-canceled-chan-to-cancel-Statement! stmt canceled-chan)
+    stmt))
 
 (defn statement-or-prepared-statement
   "Create a statement or a prepared statement. Should be called from [[with-open]]."
@@ -799,7 +817,8 @@
        (driver-api/database (driver-api/metadata-provider))
        {:session-timezone (driver-api/report-timezone-id-if-supported driver (driver-api/database (driver-api/metadata-provider)))
         :download? (download? (-> outer-query :info :context))
-        :sample?   (= :table-rows-sample (-> outer-query :info :context))}
+        :stream?   (or (download? (-> outer-query :info :context))
+                       (= :table-rows-sample (-> outer-query :info :context)))}
        (fn [^Connection conn]
          (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
                      ^ResultSet rs (try
@@ -816,14 +835,14 @@
            (let [rsmeta           (.getMetaData rs)
                  results-metadata {:cols (column-metadata driver rsmeta)}]
              (try (respond results-metadata (reducible-rows driver rs rsmeta (driver-api/canceled-chan)))
-                ;; Following cancels the statement on the dbms side.
-                ;; It avoids blocking `.close` call, in case we reduced the results subset eg. by means of
-                ;; [[metabase.query-processor.middleware.limit/limit-xform]] middleware, while statement is still
-                ;; in progress. This problem was encountered on Redshift. For details see the issue #39018.
-                ;; It also handles situation where query is canceled through [[driver-api/canceled-chan]] (#41448).
+                  ;; Following cancels the statement on the dbms side.
+                  ;; It avoids blocking `.close` call, in case we reduced the results subset eg. by means of
+                  ;; [[metabase.query-processor.middleware.limit/limit-xform]] middleware, while statement is still
+                  ;; in progress. This problem was encountered on Redshift. For details see the issue #39018.
+                  ;; It also handles situation where query is canceled through [[driver-api/canceled-chan]] (#41448).
                   (finally
-                  ;; TODO: Following `when` is in place just to find out if vertica is flaking because of cancelations.
-                  ;;       It should be removed afterwards!
+                    ;; TODO: Following `when` is in place just to find out if vertica is flaking because of cancelations.
+                    ;;       It should be removed afterwards!
                     (when-not (= :vertica driver)
                       (try (when-not (.isClosed stmt)
                              (.cancel stmt))
@@ -845,7 +864,7 @@
         (do-with-connection-with-options
          driver
          db
-         nil
+         {:stream? true}
          (fn [^Connection conn]
            (with-open [stmt          (statement-or-prepared-statement driver conn sql params nil)
                        ^ResultSet rs (try

@@ -323,6 +323,7 @@ export const getRoutes = (store) => {
           <Route path="explore" component={MetricsViewerPage} />
 
           <Route path="table">
+            <Route path=":slug" component={QueryBuilder} />
             <Route path=":tableId/detail/:rowId" component={TableDetailPage} />
           </Route>
 
@@ -394,6 +395,7 @@ export const getRoutes = (store) => {
             CanAccessDataStudio,
             CanAccessDataModel,
             CanAccessTransforms,
+            IsAdmin,
           )}
         </Route>
       </Route>
@@ -420,6 +422,10 @@ export const getRoutes = (store) => {
         from="/collections/permissions"
         to="/admin/permissions/collections"
       />
+
+      {/* Transforms moved from /admin to /data-studio */}
+      <Redirect from="/admin/transforms" to="/data-studio/transforms" />
+      <Redirect from="/admin/transforms/*" to="/data-studio/transforms/*" />
 
       {/* MISC */}
       <Route path="/unsubscribe" component={UnsubscribePage} />

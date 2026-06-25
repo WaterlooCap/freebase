@@ -36,6 +36,11 @@ export type Transform = {
   created_at: string;
   updated_at: string;
   source_readable: boolean;
+  can_read?: boolean;
+  can_write?: boolean;
+  can_execute?: boolean;
+
+  source_database_id?: DatabaseId | null;
 
   // true when transform was deleted but still referenced by runs
   deleted?: boolean;
@@ -182,6 +187,7 @@ export const TRANSFORM_RUN_SORT_COLUMNS = [
   "status",
   "run-method",
   "transform-tags",
+  "duration",
 ] as const;
 export type TransformRunSortColumn =
   (typeof TRANSFORM_RUN_SORT_COLUMNS)[number];

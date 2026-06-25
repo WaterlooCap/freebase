@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -16,6 +17,10 @@ import {
   verifyDownloadTasks,
 } from "./commands/downloads/downloadUtils";
 import * as dbTasks from "./db_tasks";
+import {
+  startCustomVizDevServer,
+  stopCustomVizDevServer,
+} from "./helpers/e2e-custom-viz-dev-server-tasks";
 import { signJwt } from "./helpers/e2e-jwt-tasks";
 import {
   startMockLlmServer,
@@ -71,6 +76,18 @@ const defaultConfig = {
   setupNodeEvents(cypressOn, config) {
     // `on` is used to hook into various events Cypress emits
     // `config` is the resolved Cypress config
+
+    // Build custom-viz .tgz fixtures from sources
+    execFileSync(
+      "node",
+      [
+        path.resolve(
+          __dirname,
+          "../../enterprise/frontend/src/custom-viz/fixtures/build-example-custom-viz.mjs",
+        ),
+      ],
+      { stdio: "inherit" },
+    );
 
     // Use cypress-on-fix to enable multiple handlers
     const on = cypressOnFix(cypressOn);
@@ -140,6 +157,8 @@ const defaultConfig = {
       signJwt,
       startMockLlmServer,
       stopMockLlmServer,
+      startCustomVizDevServer,
+      stopCustomVizDevServer,
     });
 
     /********************************************************************

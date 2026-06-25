@@ -2,9 +2,9 @@
 import { css } from "@emotion/react";
 
 import GlobalDashboardS from "metabase/css/dashboard.module.css";
+import EmbedFrameS from "metabase/embedding/theme.module.css";
 import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
 import { isStorybookActive } from "metabase/env";
-import EmbedFrameS from "metabase/public/components/EmbedFrame/EmbedFrame.module.css";
 import { utf8_to_b64 } from "metabase/utils/encoding";
 import { openImageBlobOnStorybook } from "metabase/utils/loki-utils";
 
@@ -49,6 +49,38 @@ export const saveDomImageStyles = css`
   }
 `;
 
+const SVG_VAR_PAINT_ATTRIBUTES = [
+  "fill",
+  "stroke",
+  "stop-color",
+  "flood-color",
+  "lighting-color",
+];
+
+// html2canvas serializes <svg> to a standalone image where :root custom props are out of
+// scope, so var() paint (e.g. white pie-slice borders) is lost. Bake in the resolved value.
+export const resolveSvgVarPaint = (root: HTMLElement) => {
+  root.querySelectorAll<SVGElement>("svg, svg *").forEach((el) => {
+    SVG_VAR_PAINT_ATTRIBUTES.forEach((attr) => {
+      const value = el.getAttribute(attr);
+      if (value?.includes("var(")) {
+        const resolved = getComputedStyle(el).getPropertyValue(attr);
+        if (resolved) {
+          el.setAttribute(attr, resolved);
+        }
+      }
+    });
+  });
+};
+
+// html2canvas's clone wipes inline styles off SVG nodes (empty computed cssText in Chrome),
+// dropping overflow:visible so nested label <svg>s clip their text. Restore it for export.
+export const restoreNestedSvgOverflow = (root: HTMLElement) => {
+  root.querySelectorAll<SVGElement>("svg svg").forEach((svg) => {
+    svg.style.overflow = "visible";
+  });
+};
+
 export const getDomToCanvas = async (
   element: HTMLElement,
   options: {
@@ -66,7 +98,11 @@ export const getDomToCanvas = async (
     width: options.width,
     height: options.height,
     scale: options.scale,
-    onclone: options.onclone,
+    onclone: (doc, node) => {
+      options.onclone?.(doc, node);
+      resolveSvgVarPaint(node);
+      restoreNestedSvgOverflow(node);
+    },
   });
 };
 
