@@ -447,6 +447,13 @@
            util}
    :model-imports #{:model/Database}}
 
+  branding
+  {:team "UX West"
+   :api  #{metabase.branding.init}
+   :uses #{appearance
+           settings
+           util}}
+
   cache
   {:team "UX West"
    :api  #{metabase.cache.api
@@ -2112,6 +2119,7 @@
   sso
   {:team "UX West"
    :api     #{metabase.sso.api
+              metabase.sso.api.oidc
               metabase.sso.api.slack-connect
               metabase.sso.core
               metabase.sso.init
