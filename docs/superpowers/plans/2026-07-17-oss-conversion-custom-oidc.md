@@ -38,6 +38,7 @@ Every task's requirements implicitly include this section.
   Without this you get `exec: clojure: not found` or `Unable to locate a Java Runtime`. **If tests cannot run, report BLOCKED — never report success on tests you did not execute.**
 - **Never report a test result you did not observe.** "Expected: PASS" is not a result. If you cannot run a test, say so and report BLOCKED.
 - **Commit after every task.** Never `--no-verify`.
+- **New cross-module namespaces need a kondo modules-config entry.** This fork enforces `metabase.core.modules-test/modules-config-up-to-date-test`. Any NEW namespace referenced from a DIFFERENT module must be declared in `.clj-kondo/config/modules/config.edn` (the referenced ns in the owning module's `:api`, and the owning module's `:uses` listing the modules it depends on). Never silence this with `:clj-kondo/ignore` — add the entry. Already handled: `metabase.sso.api.oidc` (sso `:api`) and the `branding` module (`:api #{metabase.branding.init}`, `:uses #{appearance settings util}`). **Still needed when Task 14 lands:** add `metabase.branding.api` to the `branding` module's `:api` (it's referenced by `metabase.api-routes`). Run `metabase.core.modules-test/modules-config-up-to-date-test` after any task that adds a cross-module ns.
 
 ---
 
