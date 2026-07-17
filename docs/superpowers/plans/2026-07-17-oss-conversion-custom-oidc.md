@@ -1213,7 +1213,9 @@ Create `src/metabase/sso/api/oidc_settings.clj`:
   against the provider before being saved; if the probe fails, nothing is persisted."
   [_route-params
    _query-params
-   settings :- [:map
+   ;; {:closed true} so a caller cannot smuggle non-oidc setting keys into set-many! —
+   ;; the endpoint must write ONLY free-oidc-* settings, not arbitrary registered settings.
+   settings :- [:map {:closed true}
                 [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
                 [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
                 [:free-oidc-client-id     {:optional true} [:maybe :string]]
@@ -2176,7 +2178,10 @@ Create `src/metabase/branding/api.clj`:
   "Update branding settings. You must be a superuser to do this."
   [_route-params
    _query-params
-   settings :- [:map
+   ;; {:closed true} so a caller cannot smuggle non-branding setting keys into set-many! —
+   ;; the endpoint must write ONLY wc-brand-* settings, never Metabase's application-* or
+   ;; any other registered setting. Without this the open :map lets arbitrary keys through.
+   settings :- [:map {:closed true}
                 [:wc-brand-name            {:optional true} [:maybe :string]]
                 [:wc-brand-logo-url        {:optional true} [:maybe :string]]
                 [:wc-brand-favicon-url     {:optional true} [:maybe :string]]
