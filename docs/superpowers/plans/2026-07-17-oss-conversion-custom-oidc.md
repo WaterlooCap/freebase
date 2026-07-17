@@ -1048,29 +1048,22 @@ Expected: FAIL — `sso-enabled?` returns `false`/`nil` because `ee-sso-configur
 
 - [ ] **Step 3: Patch the enablement check**
 
-In `src/metabase/sso/settings.clj`, replace (note the upstream line reads EE's `:oidc-enabled`, which only exists when EE is on the classpath):
+**Leave `ee-sso-configured?` COMPLETELY UNTOUCHED.** Make exactly ONE change — add `(free-oidc-enabled)` to `sso-enabled?`, outside the `ee-available?` guard.
+
+Why not also drop the EE `:oidc-enabled` line from `ee-sso-configured?`: it looks like dead weight (EE's OIDC, which we don't build), but it is NOT ours to remove. In an OSS build it's already inert (the whole body is guarded by `config/ee-available?`), so removing it buys nothing. In an EE-inclusive build — including the default test alias — it is load-bearing: `enable-password-login`'s getter only honors an explicit `false` when `sso-enabled?` is true (`src/metabase/session/settings.clj`), so dropping the line silently re-enables password login for an admin who disabled it in favor of EE's OIDC, and breaks the existing `enable-password-login-honors-oidc-as-sso-test`. Adding our term is sufficient and minimal; removing theirs is a regression.
+
+In `src/metabase/sso/settings.clj`, `ee-sso-configured?` stays exactly as upstream:
 
 ```clojure
 (defn- ee-sso-configured? []
   (when config/ee-available?
     (or (setting/get :other-sso-enabled?)
         (setting/get :oidc-enabled))))
-
-(defn sso-enabled?
-  "Any SSO provider is configured and enabled"
-  []
-  (or (google-auth-enabled)
-      (ldap-enabled)
-      (ee-sso-configured?)))
 ```
 
-with:
+and `sso-enabled?` gets one added line:
 
 ```clojure
-(defn- ee-sso-configured? []
-  (when config/ee-available?
-    (setting/get :other-sso-enabled?)))
-
 (defn sso-enabled?
   "Any SSO provider is configured and enabled"
   []
@@ -1081,13 +1074,19 @@ with:
       (ee-sso-configured?)))
 ```
 
-The EE `:oidc-enabled` reference is dropped from `ee-sso-configured?` (that was enterprise's OIDC, which we no longer build), and our own `(free-oidc-enabled)` is added to `sso-enabled?` outside the `ee-available?` guard. `sso-source-enabled?` was already patched in Task 3 (its `:oidc` case reads `free-oidc-enabled`); do not touch it again here.
+`sso-source-enabled?` was already patched in Task 3 (its `:oidc` case reads `free-oidc-enabled`); do not touch it again here.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./bin/test-agent :only '[metabase.sso.free-oidc-settings-test]'`
 
 Expected: PASS (5 tests).
+
+Also confirm the existing EE test is NOT regressed (it depends on `ee-sso-configured?`):
+
+Run: `./bin/test-agent :only '[metabase-enterprise.sso.settings-test/enable-password-login-honors-oidc-as-sso-test]'`
+
+Expected: PASS (2 assertions). If this fails, you touched `ee-sso-configured?` — revert it to upstream.
 
 - [ ] **Step 5: Commit**
 
