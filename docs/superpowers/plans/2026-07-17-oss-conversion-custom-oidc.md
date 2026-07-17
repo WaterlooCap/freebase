@@ -2066,24 +2066,28 @@ Expected: PASS (4 tests). This test passes because we did the rewrite correctly.
 
 - [ ] **Step 3: Verify the test actually catches the bypass**
 
-Temporarily delete one gate to prove the test bites:
+Temporarily remove one gate to prove the test bites, then restore from git.
+
+**Do NOT use `sed -i` for the removal** — the GNU `0,/re/s///` form silently no-ops on macOS BSD sed (exit 0, no change), which would make you conclude the test "can't catch it" when really the edit never happened. Instead, edit the file directly: open `src/metabase/appearance/settings.clj`, find the `application-name` defsetting, and delete its `:feature :whitelabel` line (or change it to a non-existent feature). Then:
 
 ```bash
-# Temporarily remove ONE gate to prove the guard works.
-sed -i.bak '0,/:feature    :whitelabel/s///' src/metabase/appearance/settings.clj
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21"; export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:$PATH"
+# Confirm the edit actually landed before running the test:
+git diff --stat src/metabase/appearance/settings.clj   # must show 1 file changed
 ./bin/test-agent :only '[metabase.branding.anti-bypass-test]'
 ```
 
-Expected: FAIL — `appearance-settings-still-declare-the-feature-gate-test` catches the missing gate.
+Expected: FAIL — specifically `metabase-whitelabel-gate-is-intact-test` (the load-bearing assertion: with the gate gone, `application-name` returns the stored `"Waterloo"` instead of `"Metabase"`). The count-guard `appearance-settings-still-declare-the-feature-gate-test` also fails.
 
-Now restore:
+Now restore from git (this is why we edit rather than keep a `.bak` — git is the source of truth):
 
 ```bash
-mv src/metabase/appearance/settings.clj.bak src/metabase/appearance/settings.clj
+git checkout -- src/metabase/appearance/settings.clj
+git status --porcelain src/metabase/appearance/settings.clj   # must print NOTHING
 ./bin/test-agent :only '[metabase.branding.anti-bypass-test]'
 ```
 
-Expected: PASS again. **Do not skip this step** — an anti-bypass test that cannot fail is worthless.
+Expected: PASS again, and `appearance/settings.clj` unmodified. **Do not skip this step** — an anti-bypass test that cannot fail is worthless. And do not trust a removal command's exit code: verify with `git diff` that the gate actually came out before concluding anything from the test result.
 
 - [ ] **Step 4: Commit**
 
