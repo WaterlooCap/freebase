@@ -192,6 +192,10 @@ export const createMockSettings = (
   // eslint-disable-next-line metabase/no-literal-metabase-strings -- This is a mock
   "wc-brand-name": "Metabase",
   "free-oidc-enabled": false,
+  "free-oidc-issuer-uri": "",
+  "free-oidc-client-id": "",
+  "free-oidc-client-secret": "",
+  "free-oidc-scopes": "",
   "available-fonts": [],
   "available-locales": [
     // this is a subset of the locales we have in the real app

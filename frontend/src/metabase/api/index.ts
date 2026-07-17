@@ -19,6 +19,7 @@ export * from "./dataset";
 export * from "./document";
 export * from "./entity-id";
 export * from "./field";
+export * from "./free-oidc";
 export * from "./glossary";
 export * from "./google";
 export * from "./group-table-access-policy";

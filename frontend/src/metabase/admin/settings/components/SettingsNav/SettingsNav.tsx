@@ -48,6 +48,7 @@ export function SettingsNav() {
         <SettingsNavItem path="authentication/api-keys" label={t`API keys`} />
         <SettingsNavItem path="authentication/google" label={t`Google auth`} />
         <SettingsNavItem path="authentication/ldap" label="LDAP" />
+        <SettingsNavItem path="authentication/free-oidc" label="OIDC" />
         {hasSaml && <SettingsNavItem path="authentication/saml" label="SAML" />}
         {hasJwt && <SettingsNavItem path="authentication/jwt" label="JWT" />}
         {hasOidc && <SettingsNavItem path="authentication/oidc" label="OIDC" />}
