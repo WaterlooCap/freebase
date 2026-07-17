@@ -15,7 +15,9 @@
 Every task's requirements implicitly include this section.
 
 - **REWRITE, NEVER BYPASS.** Never remove or weaken a Metabase license check to unlock a Metabase feature. Specifically: never delete `:feature :whitelabel` from `src/metabase/appearance/settings.clj`, never re-patch `src/metabase/premium_features/token_check.clj`, never re-gut `+require-premium-feature`. If a task seems to require it, stop and escalate — the task is wrong.
-- **Never import from `metabase-enterprise.*`** in any file under `src/` or `frontend/src/`. No copying EE code.
+  - **Sole exception:** Task 13 Step 3 temporarily removes one `:feature :whitelabel` gate *locally and uncommitted*, solely to prove the anti-bypass test fails when it should, then restores it immediately. This is verification of the guard, not a bypass. It is the only sanctioned removal, it must never be committed, and Step 3 restores the file before Step 4 commits.
+- **Never ADD an import from `metabase-enterprise.*`** to any file under `src/` or `frontend/src/`. No copying EE code.
+  - **Do not remove upstream's existing conditional EE resolution.** `src/metabase/server/auth_wrapper.clj` already contains `(requiring-resolve 'metabase-enterprise.sso.api.routes/routes)` guarded by `config/ee-available?`. That is upstream AGPL code that gracefully degrades in OSS builds — **preserve it verbatim**. Task 6 adds an OSS route beside it; it does not touch that fallback. Deleting it would be an unrelated regression, not a licensing improvement.
 - **Target upstream tag:** `v0.62.3.3`. Reverts go to that tag exactly.
 - **Build edition:** `MB_EDITION=oss`. `enterprise/backend/src` must never be on the classpath.
 - **`enterprise/` directory stays in the tree, untouched,** with `LICENSE.txt` restored to its upstream content.
