@@ -8,11 +8,13 @@
   stored. We are copying data out of rows the operator already owns, not defeating the
   gate — the gate keeps working, and Metabase's settings keep returning their defaults."
   (:require
-   ;; bare require, no symbols used: loading this namespace registers Metabase's
-   ;; `application-*` settings so [[setting/get-value-of-type]] and
-   ;; [[setting/db-stored-value]] can find them below, regardless of what else has
+   ;; bare requires, no symbols used: loading these namespaces registers both the
+   ;; source `application-*` settings and the destination `wc-brand-*` settings, so
+   ;; [[setting/get-value-of-type]], [[setting/db-stored-value]], and
+   ;; [[setting/set-value-of-type!]] can find them below, regardless of what else has
    ;; already booted.
    [metabase.appearance.core]
+   [metabase.branding.settings]
    [metabase.settings.core :as setting]
    [metabase.util.log :as log]))
 
