@@ -186,6 +186,10 @@ export const createMockSettings = (
   // eslint-disable-next-line metabase/no-literal-metabase-strings -- This is a mock
   "application-name": "Metabase",
   "application-favicon-url": "",
+  "wc-brand-colors": {},
+  "wc-brand-logo-url": "",
+  // eslint-disable-next-line metabase/no-literal-metabase-strings -- This is a mock
+  "wc-brand-name": "Metabase",
   "available-fonts": [],
   "available-locales": [
     // this is a subset of the locales we have in the real app
