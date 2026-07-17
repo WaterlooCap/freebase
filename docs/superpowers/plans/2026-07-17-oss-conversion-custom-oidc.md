@@ -1666,6 +1666,10 @@ Create `src/metabase/branding/migration.clj`:
   stored. We are copying data out of rows the operator already owns, not defeating the
   gate — the gate keeps working, and Metabase's settings keep returning their defaults."
   (:require
+   ;; Bare require, registration side-effect only: loading this namespace registers
+   ;; Metabase's application-* settings so setting/get-value-of-type and db-stored-value
+   ;; can resolve them when init! runs standalone (else: "Unknown setting: :application-name").
+   [metabase.appearance.core]
    [metabase.settings.core :as setting]
    [metabase.util.log :as log]))
 
@@ -1685,6 +1689,21 @@ Create `src/metabase/branding/migration.clj`:
       (and (string? v) (empty? v))
       (and (map? v) (empty? v))))
 
+(defn- unset?
+  "True when setting `k` has no meaningful stored value.
+
+  CRITICAL: we must NOT use `(blank-value? (get-value-of-type ... k))` alone to decide a
+  destination is unset. Several `wc-brand-*` settings ship a non-blank compiled-in
+  `:default` (e.g. `wc-brand-name` = \"Metabase\", `wc-help-link` = \"metabase\"), so an
+  unwritten destination reads back NON-blank via its getter — which would make the
+  migration wrongly conclude it is 'already set' and skip copying `application-name`
+  (\"Waterloo\") entirely. `db-stored-value` returns only what is actually persisted in the
+  DB/cache (never the default/env/init value), so it distinguishes 'unwritten' from
+  'written to its default'."
+  [value-type k]
+  (or (nil? (setting/db-stored-value k))
+      (blank-value? (setting/get-value-of-type value-type k))))
+
 (defn migrate-application-settings!
   "Copy any stored `application-*` branding values onto the `wc-brand-*` settings.
 
@@ -1693,10 +1712,9 @@ Create `src/metabase/branding/migration.clj`:
   []
   (let [migrated (atom [])]
     (doseq [[src dest value-type] setting-map]
-      (let [source-value (setting/get-value-of-type value-type src)
-            dest-value   (setting/get-value-of-type value-type dest)]
-        (when (and (not (blank-value? source-value))
-                   (blank-value? dest-value))
+      (when (and (not (unset? value-type src))
+                 (unset? value-type dest))
+        (let [source-value (setting/get-value-of-type value-type src)]
           (setting/set-value-of-type! value-type dest source-value)
           (swap! migrated conj dest)
           (log/infof "Migrated branding setting %s -> %s" src dest))))
@@ -1704,6 +1722,8 @@ Create `src/metabase/branding/migration.clj`:
       (log/infof "Branding migration copied %d setting(s): %s" (count @migrated) (pr-str @migrated)))
     {:migrated @migrated}))
 ```
+
+Note the `unset?` helper and the `[metabase.appearance.core]` require are load-bearing corrections found during implementation: the original brief used `blank-value?` on `get-value-of-type` for the destination, which silently failed to migrate any setting whose `wc-brand-*` default is non-blank (`wc-brand-name`, `wc-help-link`) — i.e. it would NOT have copied "Waterloo" across the cutover.
 
 Create `src/metabase/branding/init.clj`:
 
