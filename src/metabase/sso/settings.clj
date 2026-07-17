@@ -350,7 +350,8 @@
 
 (defn- ee-sso-configured? []
   (when config/ee-available?
-    (setting/get :other-sso-enabled?)))
+    (or (setting/get :other-sso-enabled?)
+        (setting/get :oidc-enabled))))
 
 (defn sso-enabled?
   "Any SSO provider is configured and enabled"
