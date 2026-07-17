@@ -432,6 +432,15 @@
                     :model/Dashboard
                     :model/Document}}
 
+  branding
+  {:team "UX West"
+   :api  #{metabase.branding.api
+           metabase.branding.init}
+   :uses #{api
+           appearance
+           settings
+           util}}
+
   bug-reporting
   {:team "UX West"
    :api  #{metabase.bug-reporting.api
@@ -446,15 +455,6 @@
            settings
            util}
    :model-imports #{:model/Database}}
-
-  branding
-  {:team "UX West"
-   :api  #{metabase.branding.api
-           metabase.branding.init}
-   :uses #{api
-           appearance
-           settings
-           util}}
 
   cache
   {:team "UX West"
