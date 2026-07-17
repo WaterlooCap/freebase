@@ -586,8 +586,13 @@ Create `src/metabase/sso/providers/free_oidc.clj`:
 
 ;;; -------------------------------------------------- Provider Registration --------------------------------------------------
 
+;; Derive ONLY from :provider/oidc. The base :provider/oidc itself already derives from
+;; :metabase.auth-identity.provider/create-user-if-not-exists (see providers/oidc.clj), so
+;; we inherit auto-provisioning transitively — exactly as slack-connect does. Do NOT add an
+;; explicit second derive to create-user-if-not-exists: it is redundant AND it creates a
+;; diamond in Clojure's shared global hierarchy that breaks when unrelated code calls
+;; `underive` (observed: metabase.transforms.models.transform blew up the whole suite).
 (derive :provider/free-oidc :provider/oidc)
-(derive :provider/free-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
 
 (def provider-name
   "Provider name for Waterloo OIDC authentication."
