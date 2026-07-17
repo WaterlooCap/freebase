@@ -191,6 +191,7 @@
    "/glossary"             (+auth 'metabase.glossary.api)
    "/google"               (+auth metabase.sso.api/google-auth-routes)
    "/ldap"                 (+auth metabase.sso.api/ldap-routes)
+   "/oidc"                 (+auth metabase.sso.api/oidc-settings-routes)
    "/llm"                  (+auth metabase.llm.api/routes)
    "/logger"               (+auth 'metabase.logger.api)
    "/login-history"        (+auth 'metabase.login-history.api)
