@@ -37,3 +37,14 @@
                                        free-oidc-client-secret "shh"
                                        free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
       (is (true? (sso.settings/sso-source-enabled? :oidc))))))
+
+(deftest sso-enabled-includes-oidc-in-oss-build-test
+  (testing "sso-enabled? is true when OIDC is on, even without EE on the classpath"
+    (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                       free-oidc-client-id     "abc"
+                                       free-oidc-client-secret "shh"
+                                       free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"
+                                       google-auth-client-id nil
+                                       ldap-enabled          false]
+      (is (true? (boolean (sso.settings/sso-enabled?)))
+          "Without this, the login page renders no SSO button in an OSS build."))))

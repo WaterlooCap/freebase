@@ -350,14 +350,15 @@
 
 (defn- ee-sso-configured? []
   (when config/ee-available?
-    (or (setting/get :other-sso-enabled?)
-        (setting/get :oidc-enabled))))
+    (setting/get :other-sso-enabled?)))
 
 (defn sso-enabled?
   "Any SSO provider is configured and enabled"
   []
   (or (google-auth-enabled)
       (ldap-enabled)
+      ;; Our OIDC connector is OSS, so it must not sit behind the ee-available? guard.
+      (free-oidc-enabled)
       (ee-sso-configured?)))
 
 (defn sso-source-enabled?
