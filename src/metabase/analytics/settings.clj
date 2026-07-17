@@ -17,26 +17,19 @@
   :doc        false)
 
 (defsetting anon-tracking-enabled
-  (deferred-tru "Anonymous usage data collection is disabled.")
+  (deferred-tru "Enable the collection of anonymous usage data in order to help Metabase improve..")
   :type       :boolean
-  :default    false
+  :default    true
   :visibility :public
-  :setter     :none
-  :getter     (fn [] false)
   :audit      :getter)
 
-(defn anon-tracking-enabled!
-  "Bypass: always false."
-  [_new-value]
-  false)
-
 (defsetting snowplow-available
-  (deferred-tru "Snowplow analytics is disabled.")
+  (deferred-tru
+   (str "Boolean indicating whether a Snowplow collector is available to receive analytics events. "
+        "Should be set via environment variable in Cypress tests or during local development."))
   :type       :boolean
   :visibility :public
-  :default    false
-  :getter     (fn [] false)
-  :setter     :none
+  :default    config/is-prod?
   :doc        false
   :audit      :never)
 

@@ -5,9 +5,11 @@
   they are the executable form of this fork's licensing posture."
   (:require
    [clojure.test :refer :all]
+   [metabase.analytics.settings :as analytics.settings]
    [metabase.premium-features.core :as premium-features]
    [metabase.premium-features.token-check :as token-check]
-   [metabase.test :as mt]))
+   [metabase.test :as mt]
+   [metabase.version.settings :as version.settings]))
 
 (deftest no-bypass-features-test
   (testing "with no token configured, no premium features are available"
@@ -27,3 +29,14 @@
     (mt/with-temporary-setting-values [premium-embedding-token nil]
       (is (not= "enterprise-unlimited" (token-check/plan-alias))
           "plan-alias must not be forged. If this fails, the bypass is back."))))
+
+(deftest telemetry-settings-are-upstream-test
+  (testing "telemetry settings are plain upstream settings, not hardcoded getters"
+    (testing "anon-tracking-enabled respects its stored value rather than forcing false"
+      (mt/with-temporary-setting-values [anon-tracking-enabled true]
+        (is (true? (analytics.settings/anon-tracking-enabled))
+            "A hardcoded (fn [] false) getter would make this impossible to set.")))
+    (testing "check-for-updates respects its stored value rather than forcing false"
+      (mt/with-temporary-setting-values [check-for-updates true]
+        (is (true? (version.settings/check-for-updates))
+            "A hardcoded (fn [] false) getter would make this impossible to set.")))))
