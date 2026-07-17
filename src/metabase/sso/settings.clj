@@ -229,6 +229,68 @@
                false)))
 
 ;;;
+;;; OIDC (Authentik)
+;;;
+;;; Our own OIDC connector settings. Deliberately named `oidc-*` because
+;;; `sso-source-enabled?` below already dispatches :oidc -> (setting/get :oidc-enabled),
+;;; so that function needs no change.
+
+(defsetting oidc-issuer-uri
+  (deferred-tru "Issuer URI for your OIDC provider, e.g. https://sso.example.com/application/o/metabase/")
+  :encryption :no
+  :export?    false
+  :audit      :getter)
+
+(defsetting oidc-client-id
+  (deferred-tru "Client ID for your OIDC application")
+  :encryption :no
+  :export?    false
+  :audit      :getter)
+
+(defsetting oidc-client-secret
+  (deferred-tru "Client Secret for your OIDC application")
+  :encryption :when-encryption-key-set
+  :export?    false
+  :audit      :no-value
+  :getter     (fn []
+                (-> (setting/get-value-of-type :string :oidc-client-secret)
+                    (u.str/mask 4))))
+
+(defn unobfuscated-oidc-client-secret
+  "Get the unobfuscated value of [[oidc-client-secret]]."
+  []
+  (setting/get-value-of-type :string :oidc-client-secret))
+
+(defsetting oidc-scopes
+  (deferred-tru "Space-separated OAuth2 scopes to request from the OIDC provider.")
+  :encryption :no
+  :export?    false
+  :default    "openid email profile"
+  :audit      :getter)
+
+(defsetting oidc-configured
+  (deferred-tru "Are the mandatory OIDC settings configured?")
+  :type    :boolean
+  :export? false
+  :default false
+  :setter  :none
+  :getter  (fn [] (boolean
+                   (and (oidc-client-id)
+                        (setting/get-value-of-type :string :oidc-client-secret)
+                        (oidc-issuer-uri)))))
+
+(defsetting oidc-enabled
+  (deferred-tru "Is OIDC authentication configured and enabled?")
+  :type    :boolean
+  :export? false
+  :default false
+  :audit   :getter
+  :getter  (fn []
+             (if (oidc-configured)
+               (setting/get-value-of-type :boolean :oidc-enabled)
+               false)))
+
+;;;
 ;;; Google Auth
 ;;;
 
