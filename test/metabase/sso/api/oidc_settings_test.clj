@@ -42,3 +42,9 @@
                                :free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"})
         (is (true? (sso.settings/free-oidc-enabled))
             "If this is false, the config was not persisted before free-oidc-enabled was set.")))))
+
+(deftest closed-schema-rejects-unknown-keys-test
+  (testing "the endpoint's body schema is closed: unknown keys are rejected, not silently passed to set-many!"
+    (mt/user-http-request :crowberto :put 400 "oidc/settings"
+                          {:free-oidc-enabled false
+                           :bogus-key         "x"})))

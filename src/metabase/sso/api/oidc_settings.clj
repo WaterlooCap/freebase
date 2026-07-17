@@ -11,9 +11,26 @@
    [metabase.sso.core :as sso]
    [metabase.sso.settings :as sso.settings]
    [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli.registry :as mr]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
+
+;; NOTE: this schema must be registered via `mr/def` and referenced by keyword (not inlined
+;; as a literal `[:map {:closed true} ...]` in the `defendpoint` binding). A literal closed
+;; map schema trips a bug in `metabase.api.macros/invalid-params-errors` (the "describe the
+;; failing key" error-formatting helper can't resolve an unregistered inline schema and
+;; throws `:malli.core/invalid-schema`, which surfaces as an uncaught 500 instead of the
+;; intended 400) when the request contains an unrecognized top-level key. Registering the
+;; schema and referencing it by `::settings` avoids that path entirely — see
+;; `metabase.agent-api.api/construct-query-request` for the same pattern.
+(mr/def ::settings
+  [:map {:closed true}
+   [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
+   [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
+   [:free-oidc-client-id     {:optional true} [:maybe :string]]
+   [:free-oidc-client-secret {:optional true} [:maybe :string]]
+   [:free-oidc-scopes        {:optional true} [:maybe :string]]])
 
 (defn- update-secret-if-needed
   "Do not overwrite the stored secret if `new-secret` is just its obfuscated form."
@@ -29,12 +46,7 @@
   against the provider before being saved; if the probe fails, nothing is persisted."
   [_route-params
    _query-params
-   settings :- [:map
-                [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
-                [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
-                [:free-oidc-client-id     {:optional true} [:maybe :string]]
-                [:free-oidc-client-secret {:optional true} [:maybe :string]]
-                [:free-oidc-scopes        {:optional true} [:maybe :string]]]]
+   settings :- ::settings]
   (api/check-superuser)
   (let [secret     (update-secret-if-needed (:free-oidc-client-secret settings))
         issuer     (or (:free-oidc-issuer-uri settings) (sso.settings/free-oidc-issuer-uri))
@@ -45,7 +57,7 @@
     ;; make it impossible to disable a provider that has gone down.
     (when enabling?
       (let [result (sso/check-oidc-configuration issuer client-id secret
-                                                  (vec (remove empty? (str/split (or scopes "") #"\s+"))))]
+                                                 (vec (remove empty? (str/split (or scopes "") #"\s+"))))]
         (when-not (:ok result)
           (throw (ex-info (tru "Could not connect to the OIDC provider")
                           {:status-code 400
