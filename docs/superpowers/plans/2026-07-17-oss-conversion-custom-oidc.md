@@ -1807,6 +1807,21 @@ wc-brand-* value."
 
 ### Task 12: Apply branding on the frontend
 
+> **SCOPE CORRECTION (2026-07-17):** the original brief claimed colors have a "single
+> injection point" (AppThemeProvider). That was wrong. Full frontend branding is FOUR
+> plugin-style interception points; complete Task 12 covers all of them:
+> 1. Colors → Mantine theme: `AppThemeProvider` (seed from `wc-brand-colors`). ✅
+> 2. Colors → CSS variables (`--mb-color-*`, used by 172 CSS-module files): `GlobalStyles.tsx`
+>    reads `useSetting("application-colors")` — change to `useSetting("wc-brand-colors")`.
+> 3. App name (35 consumers via `getApplicationName`): OSS default `PLUGIN_SELECTORS.getApplicationName`
+>    (`plugins/oss/core.ts:92`) returns "Metabase". Override it in a builtin branding plugin to
+>    read `wc-brand-name` from settings state (fall back to "Metabase").
+> 4. Logo → `PLUGIN_LOGO_ICON_COMPONENTS`. ✅
+> 5. Favicon: `common/hooks/use-favicon.ts` reads `useSetting("application-favicon-url")` —
+>    change to `useSetting("wc-brand-favicon-url")` (single hook; covers QueryBuilder + DashboardApp).
+> All read OUR ungated `wc-brand-*` settings; none read `application-*` or consult
+> `tokenFeatures["whitelabel"]`. Rewrite, not bypass, throughout.
+
 **Files:**
 - Modify: `frontend/src/metabase/ui/colors/colors.ts:9-14`
 - Modify: `frontend/src/metabase/AppThemeProvider.tsx:120-122`
