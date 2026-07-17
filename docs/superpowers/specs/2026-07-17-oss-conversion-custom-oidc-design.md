@@ -28,9 +28,83 @@ documented OSS authentication extension points.
 ## Non-goals
 
 - Multi-provider OIDC. One IdP (Authentik). YAGNI.
-- Group-claim → Metabase group sync. Two users; admin is granted manually.
-- Preserving any other enterprise feature. All 57 others are being given up deliberately.
+- Group-claim → Metabase group sync. Four users; admin is granted manually.
 - SAML / JWT / SCIM. Not needed, not built.
+- **Custom branding.** Deferred to a follow-up spec — see "Deferred: branding" below.
+  Confirmed in use, but explicitly lower priority than OIDC and carries a licensing
+  judgment call that should not be smuggled in alongside this work.
+
+## Production audit (2026-07-17)
+
+Audited the live instance at `analytics.waterloocap.com` via the REST API rather than
+assuming. Of the 58 features the bypass unlocks, **exactly two are actually in use.**
+
+| EE feature | Status | Evidence |
+|---|---|---|
+| `sso-oidc` | **In use** | 4 users, all internal `@waterloocap.com` |
+| `whitelabel` | **In use** | `application-name="Waterloo"`, 77KB logo, 20KB favicon, brand palette, custom help link |
+| `sandboxes` | Not in use | `/api/mt/gtap` → 0 policies |
+| `transforms`, `workspaces` | Not in use | `/api/ee/transforms` 404; `workspace-manager` count=0 |
+| `serialization` | Not in use | `/api/ee/serialization` 404 |
+| `audit-app` | Not in use | `/api/ee/audit-app/user` 404 |
+| `scim` | Not in use | `/api/ee/scim/v2/Users` 401 |
+| `content-verification` | Not in use | 0 official collections, 0 verified items |
+| `advanced-permissions` | Permissive only | see below |
+
+**Instance shape:** 46 users total (42 password, 4 OIDC). 20 active users are *external*,
+across five non-Waterloo domains (lhfinancial.net ×13, amgwealthadvisors.com ×2,
+elementconsultants.com ×2, ironclad-wealth.com ×2, wcfos.com ×1).
+
+**Critical: external-user isolation does not depend on EE.** All 80 group/database
+combinations in the permission graph are `view-data=unrestricted` with
+`download={"schemas":"full"}`. There is no `blocked` permission anywhere. Isolation
+between client firms is done entirely with **collection permissions, which are OSS** and
+survive the strip untouched. The only EE permission values present (`data-model`,
+`details`) are permissive *grants*; losing them reverts those to admin-only — strictly
+tighter, never looser. **The strip cannot widen anyone's data access.**
+
+### The four OIDC users
+
+| Email | Admin |
+|---|---|
+| `arose@waterloocap.com` | yes |
+| `abuchanan@waterloocap.com` | yes |
+| `ndyer@waterloocap.com` | yes |
+| `tchatmas@waterloocap.com` | no |
+
+All internal. Three of the five active admins authenticate via OIDC; the remaining
+admin (`lmoulton@waterloocap.com`) uses a password and is a useful independent
+break-glass.
+
+## Deferred: branding
+
+`whitelabel` is genuinely in use — the instance is branded "Waterloo" with a custom
+logo, favicon, palette, and help link, and **20 external client users see that branding**.
+Stripping EE reverts the UI to stock Metabase appearance. This is a visible,
+client-facing change with commercial rather than security consequences.
+
+The settings live in the OSS tree (`src/metabase/appearance/settings.clj`) but each
+carries `:feature :whitelabel`; the getter returns the `"Metabase"` default rather than
+the stored value when the feature is absent. The code that *applies* branding is split:
+`enterprise/frontend/src/metabase-enterprise/whitelabel/` (EE) but also
+`frontend/src/metabase/ui/colors/colors.ts` and `GlobalStyles.tsx` (OSS).
+
+Three routes, recorded now so the reasoning is not lost:
+
+1. **Hardcode into the fork.** Change the logo asset and the built-in defaults in AGPL
+   source. The `:feature :whitelabel` gate stays intact and functioning — we change what
+   our fork's *built-in* appearance is, not unlock runtime configurability. Modifying
+   AGPL source is squarely permitted. Requires a rebuild to change.
+2. **Own settings + own application code.** Ungated `wc-brand-*` settings plus our own
+   frontend read-sites. Most conservative; most work; duplicates machinery.
+3. **Delete `:feature :whitelabel`.** ❌ **Explicitly rejected.** This is the same act as
+   the `token_check.clj` bypass, scoped to one feature: removing Metabase's license check
+   to unlock Metabase's implementation. Adopting it would defeat the entire purpose of
+   this project. Recorded here so it is never quietly reintroduced as a "quick win".
+
+Options 1 and 2 reach the same outcome by different roads, and option 1 arguably defeats
+the gate's *purpose* even though it does not remove it. That is a judgment call worth
+making deliberately, with the OIDC work already shipped and not blocked on it.
 
 ## Licensing rationale
 
@@ -253,33 +327,45 @@ all; Metabase auto-provisions anyone who arrives with a valid token, via the exi
 `::create-user-if-not-exists` mixin the base `:provider/oidc` already derives from.
 
 Access control lives in Authentik only — no duplicated allow-list in Metabase to drift.
-Auto-provisioned users are **non-admin**; admin is granted manually to the two of us.
+Auto-provisioned users are **non-admin**; admin is granted manually to the three admins
+in the OIDC cohort.
+
+Note the 42 password users are untouched by this work. They keep logging in exactly as
+they do today; only the 4 OIDC users change.
 
 ## Cutover plan
 
 Sequencing is not negotiable, because getting it wrong locks us out of our own instance.
 
-1. **Set and verify break-glass passwords** for both accounts *while the current EE
-   build is still running*. Accounts with `sso_source = "oidc"` may have no usable
-   password. Verify by actually logging in with them.
+1. **Set and verify break-glass passwords for all four OIDC accounts** (`arose`,
+   `abuchanan`, `ndyer`, `tchatmas`) *while the current EE build is still running*.
+   Accounts with `sso_source = "oidc"` may have no usable password. Verify by actually
+   logging in with each — not merely by setting them.
+   `lmoulton@waterloocap.com` is an active password-authenticated admin and serves as an
+   independent break-glass if all four are somehow locked out.
 2. Build Phase 1 + Phase 2 together on a branch.
 3. Test locally: `docker-compose` against real `sso.waterloocap.com`.
-4. Clear the two stale OIDC identities — delete `auth_identity` rows bound to EE's
-   `:provider/custom-oidc` and null out `sso_source` on both users, so the new
-   connector re-links cleanly on first login.
+4. Clear the four stale OIDC identities — delete `auth_identity` rows bound to EE's
+   `:provider/custom-oidc` and null out `sso_source` on those users, so the new connector
+   re-links cleanly on first login.
 5. Deploy **one** container that is already OSS *and* has working OIDC. Prod never sits
    in a state with no SSO.
-6. Verify OIDC login for both users; confirm admin rights survived.
+6. Verify OIDC login for all four; confirm the three admins retained superuser.
 
 Password login is the permanent fallback: `disable-password-login` is EE-gated, so an
 OSS build cannot turn it off. That is our standing break-glass.
+
+Expect the UI to revert to stock Metabase branding at step 5. This is visible to the 20
+external client users. See "Deferred: branding".
 
 ## Risks
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **Lockout.** Cutting `ee → oss` kills EE OIDC instantly; accounts with `sso_source=oidc` and no password cannot log in. | High | Step 1 of cutover. Verify passwords *before* touching the build. |
-| Losing an EE feature that is actually in use beyond SSO. | Medium | Audit enabled-vs-used before cutover. Stated need is SSO only; 57 features are being dropped deliberately. |
+| **Lockout.** Cutting `ee → oss` kills EE OIDC instantly; the 4 accounts with `sso_source=oidc` — 3 of them admins — cannot log in without a password. | High | Step 1 of cutover: set and *verify* passwords for all four before touching the build. `lmoulton` is an independent password admin. |
+| **Branding loss visible to 20 external client users.** `whitelabel` is genuinely in use; the strip reverts the UI to stock Metabase. | Medium | Accepted for now — cosmetic, not security. Follow-up spec; see "Deferred: branding". Flag to stakeholders before cutover. |
+| Losing an EE feature that is actually in use beyond SSO. | ~~Medium~~ **Resolved** | Audited live instance 2026-07-17. Only `sso-oidc` and `whitelabel` are in use; the other 56 are dead weight. |
+| External-user data isolation depends on EE. | ~~High~~ **Resolved** | Audited. All 80 group/db combos are `view-data=unrestricted`; isolation is by OSS collection permissions. The strip cannot widen access. |
 | `ee-sso-configured?` patch missed → login button never renders. | Medium | Covered by test; also caught immediately in local docker-compose. |
 | Duplicate `defsetting oidc-enabled` if someone builds EE. | Low | Expected to fail loudly at boot (verify). If it silently overwrites, rename to `wc-oidc-enabled`. |
 | Authentik issuer mismatch (trailing slash) breaks ID token `iss` validation. | Low | Common Authentik gotcha. Assert exact issuer string from the discovery document. |
