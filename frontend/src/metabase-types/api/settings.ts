@@ -607,6 +607,7 @@ interface PublicSettings {
   "ldap-group-membership-filter"?: string;
   "ldap-user-provisioning-enabled?": boolean;
   "oidc-user-provisioning-enabled?": boolean;
+  "free-oidc-enabled": boolean;
   "loading-message": LoadingMessage;
   "mcp-enabled?": boolean;
   "map-tile-server-url": string;
