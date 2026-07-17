@@ -1666,10 +1666,15 @@ Create `src/metabase/branding/migration.clj`:
   stored. We are copying data out of rows the operator already owns, not defeating the
   gate — the gate keeps working, and Metabase's settings keep returning their defaults."
   (:require
-   ;; Bare require, registration side-effect only: loading this namespace registers
-   ;; Metabase's application-* settings so setting/get-value-of-type and db-stored-value
-   ;; can resolve them when init! runs standalone (else: "Unknown setting: :application-name").
+   ;; Bare requires, registration side-effect only: loading these registers both the
+   ;; SOURCE settings (Metabase's application-*, via appearance.core) and the DESTINATION
+   ;; settings (our wc-brand-*, via branding.settings) so setting/get-value-of-type and
+   ;; db-stored-value can resolve them when migrate-application-settings! runs standalone
+   ;; (else: "Unknown setting: :application-name" / "Unknown setting: :wc-brand-name").
+   ;; BOTH are required — the destination side is easy to forget and the crash only
+   ;; surfaces when the public fn is called without branding.settings already loaded.
    [metabase.appearance.core]
+   [metabase.branding.settings]
    [metabase.settings.core :as setting]
    [metabase.util.log :as log]))
 
@@ -1739,17 +1744,44 @@ Create `src/metabase/branding/init.clj`:
   (branding.migration/migrate-application-settings!))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Wire the migration into startup**
+
+The migration mutates the app DB, so it must run at startup AFTER the DB is set up — NOT at namespace-load time. `metabase.core.core/init!*` already runs the same "sync settings once on startup" pattern for other modules (`embed.settings/check-and-sync-settings-on-startup!`, `llm.startup/check-and-sync-settings-on-startup!`). Add our call right beside them, after `(mdb/setup-db! ...)`.
+
+In `src/metabase/core/core.clj`, add to the `:require`:
+
+```clojure
+   [metabase.branding.init :as branding.init]
+```
+
+and in `init!*`, immediately after the `(embed.settings/check-and-sync-settings-on-startup! env/env)` and `(llm.startup/check-and-sync-settings-on-startup!)` lines, add:
+
+```clojure
+    ;; Seed our wc-brand-* settings from any legacy application-* branding on startup.
+    ;; Idempotent: once wc-brand-* is set it is a no-op; on a fresh install it copies nothing.
+    (branding.init/init!)
+```
+
+This is the single change that makes the cutover automatic — without it the migration never runs in production and branding silently reverts to stock Metabase.
+
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `./bin/test-agent :only '[metabase.branding.migration-test]'`
 
-Expected: PASS (3 tests).
+Expected: PASS (3 tests). Also confirm `src/metabase/core/core.clj` still compiles (the namespace loads without error):
 
-- [ ] **Step 5: Commit**
+```bash
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21"; export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:$PATH"
+clojure -M:ee -e "(require 'metabase.core.core) (println :core-loads-ok)"
+```
+
+Expected: prints `:core-loads-ok` (proves the new require + call site compile).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/metabase/branding/migration.clj src/metabase/branding/init.clj \
-        test/metabase/branding/migration_test.clj
+        src/metabase/core/core.clj test/metabase/branding/migration_test.clj
 git commit -m "Migrate existing application-* branding onto wc-brand-*
 
 Prod already holds application-name=Waterloo plus a 77KB logo, 20KB
