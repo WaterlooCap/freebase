@@ -25,7 +25,17 @@ Every task's requirements implicitly include this section.
 - **Setting names:** OIDC uses `oidc-*` (deliberate — `sso-source-enabled?` already dispatches `:oidc → (setting/get :oidc-enabled)`). Branding uses `wc-brand-*` (deliberate — must NOT collide with Metabase's gated `application-*`).
 - **IdP:** Authentik at `https://sso.waterloocap.com`. Issuer form: `https://sso.waterloocap.com/application/o/<slug>/`.
 - **Branding values (verbatim from prod):** `application-name` = `"Waterloo"`; brand color `#3E90C5`.
-- **Backend test command:** `./bin/test-agent :only '[metabase.some-test]'`. Never `clj -X:dev:test`.
+- **Backend test command:** `./bin/test-agent :only '[metabase.some-test]'`. Never `clj -X:dev:test` — its progress-bar output is unparseable.
+- **Toolchain (REQUIRED — tests will not run without it).** Clojure and OpenJDK 21 were installed via brew on 2026-07-17, but `openjdk@21` is **keg-only**, so it is not on the default `PATH`. Every backend test invocation must export these first, in the same shell command (shell state does not persist between tool calls):
+
+  ```bash
+  export JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+  export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:$PATH"
+  ./bin/test-agent :only '[metabase.some-test]'
+  ```
+
+  Without this you get `exec: clojure: not found` or `Unable to locate a Java Runtime`. **If tests cannot run, report BLOCKED — never report success on tests you did not execute.**
+- **Never report a test result you did not observe.** "Expected: PASS" is not a result. If you cannot run a test, say so and report BLOCKED.
 - **Commit after every task.** Never `--no-verify`.
 
 ---
