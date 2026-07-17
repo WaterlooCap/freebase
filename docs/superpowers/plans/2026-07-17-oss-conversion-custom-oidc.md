@@ -21,8 +21,9 @@ Every task's requirements implicitly include this section.
 - **Target upstream tag:** `v0.62.3.3`. Reverts go to that tag exactly.
 - **Build edition:** `MB_EDITION=oss`. `enterprise/backend/src` must never be on the classpath.
 - **`enterprise/` directory stays in the tree, untouched,** with `LICENSE.txt` restored to its upstream content.
-- **Provider key:** `:provider/wc-oidc`. Never `:provider/custom-oidc` (that is EE's).
-- **Setting names:** OIDC uses `oidc-*` (deliberate — `sso-source-enabled?` already dispatches `:oidc → (setting/get :oidc-enabled)`). Branding uses `wc-brand-*` (deliberate — must NOT collide with Metabase's gated `application-*`).
+- **Provider key:** `:provider/free-oidc`. Never `:provider/custom-oidc` (that is EE's).
+- **Setting names:** the OIDC connector uses `free-oidc-*` (env `MB_FREE_OIDC_*`). This prefix is deliberate: enterprise's `metabase_enterprise/sso/settings.clj` defines settings literally named `oidc-enabled`/`oidc-configured`, and `defsetting` **throws** on a duplicate registration, so bare `oidc-*` names make the app unbootable whenever EE is on the classpath (including the default EE-inclusive `./bin/test-agent` alias). `free-oidc-*` avoids the collision. Consequence: `sso-source-enabled?` no longer picks our setting up for free — its `:oidc` case must be patched to read `free-oidc-enabled` (done in Task 3). Branding uses `wc-brand-*` (deliberate — must NOT collide with Metabase's gated `application-*`).
+- **Provider key:** `:provider/free-oidc`. Never `:provider/custom-oidc` (EE's) or `:provider/oidc` (the AGPL base we derive from). The user-facing identity stays `oidc`: the route is `/auth/sso/oidc`, the stamped `sso_source` is `:oidc`, the login-button provider name is `oidc`. Only the internal setting keys and provider key carry `free-`.
 - **IdP:** Authentik at `https://sso.waterloocap.com`. Issuer form: `https://sso.waterloocap.com/application/o/<slug>/`.
 - **Branding values (verbatim from prod):** `application-name` = `"Waterloo"`; brand color `#3E90C5`.
 - **Backend test command:** `./bin/test-agent :only '[metabase.some-test]'`. Never `clj -X:dev:test` — its progress-bar output is unparseable.
@@ -60,8 +61,8 @@ Every task's requirements implicitly include this section.
 | File | Responsibility |
 |---|---|
 | `src/metabase/sso/settings.clj` | MODIFY. Add `oidc-*` settings; relax `ee-sso-configured?`. |
-| `src/metabase/sso/providers/wc_oidc.clj` | NEW. `(derive :provider/wc-oidc :provider/oidc)` + config builder. |
-| `src/metabase/sso/integrations/wc_oidc.clj` | NEW. `sso-initiate` / `sso-callback`. |
+| `src/metabase/sso/providers/free_oidc.clj` | NEW. `(derive :provider/free-oidc :provider/oidc)` + config builder. |
+| `src/metabase/sso/integrations/free_oidc.clj` | NEW. `sso-initiate` / `sso-callback`. |
 | `src/metabase/sso/api/oidc.clj` | NEW. `/auth/sso/oidc` routes. |
 | `src/metabase/sso/api/oidc_settings.clj` | NEW. `PUT /api/oidc/settings` admin API. |
 | `src/metabase/sso/api.clj` | MODIFY. Expose `oidc-settings-routes`. |
@@ -285,10 +286,10 @@ Edit `docker-compose.yml`. Change `MB_EDITION: ee` to `oss` and add the env vars
       MB_SNOWPLOW_AVAILABLE: "false"
       MB_CHECK_FOR_UPDATES: "false"
       # OIDC (Authentik). Set the real values in the deploy environment.
-      MB_OIDC_ENABLED: "true"
-      MB_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
-      MB_OIDC_CLIENT_ID: "${MB_OIDC_CLIENT_ID}"
-      MB_OIDC_CLIENT_SECRET: "${MB_OIDC_CLIENT_SECRET}"
+      MB_FREE_OIDC_ENABLED: "true"
+      MB_FREE_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
+      MB_FREE_OIDC_CLIENT_ID: "${MB_FREE_OIDC_CLIENT_ID}"
+      MB_FREE_OIDC_CLIENT_SECRET: "${MB_FREE_OIDC_CLIENT_SECRET}"
 ```
 
 - [ ] **Step 6: Verify the OSS build excludes enterprise from the classpath**
@@ -319,71 +320,71 @@ classpath."
 ### Task 3: OIDC settings
 
 **Files:**
-- Modify: `src/metabase/sso/settings.clj` (add settings near the slack-connect block, ~line 232)
-- Test: `test/metabase/sso/oidc_settings_test.clj`
+- Modify: `src/metabase/sso/settings.clj` (add settings near the slack-connect block, ~line 232; patch the `:oidc` case of `sso-source-enabled?`)
+- Test: `test/metabase/sso/free_oidc_settings_test.clj`
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces, all in `metabase.sso.settings`:
-  - `(oidc-enabled)` → `boolean`
-  - `(oidc-configured)` → `boolean`
-  - `(oidc-issuer-uri)` → `string?`
-  - `(oidc-client-id)` → `string?`
-  - `(oidc-client-secret)` → masked `string?`
-  - `(unobfuscated-oidc-client-secret)` → raw `string?`
-  - `(oidc-scopes)` → `string` (space-separated)
+  - `(free-oidc-enabled)` → `boolean`
+  - `(free-oidc-configured)` → `boolean`
+  - `(free-oidc-issuer-uri)` → `string?`
+  - `(free-oidc-client-id)` → `string?`
+  - `(free-oidc-client-secret)` → masked `string?`
+  - `(unobfuscated-free-oidc-client-secret)` → raw `string?`
+  - `(free-oidc-scopes)` → `string` (space-separated)
 
-**Why `oidc-*` and not `wc-oidc-*`:** `sso-source-enabled?` (`src/metabase/sso/settings.clj:312`) already contains `:oidc (setting/get :oidc-enabled)`. Using that exact name means that function needs no patch.
+**Why `free-oidc-*` and a `sso-source-enabled?` patch:** enterprise's `sso/settings.clj` already defines `oidc-enabled`/`oidc-configured`, and `defsetting` throws on duplicate registration — so bare `oidc-*` names crash the app under any EE-inclusive build. We use `free-oidc-*` to avoid that. Upstream's `sso-source-enabled?` (`src/metabase/sso/settings.clj:312`) dispatches `:oidc → (setting/get :oidc-enabled)`, which in an OSS build refers to a setting that no longer exists — so this task patches that one case to read our `free-oidc-enabled` instead. The stamped `sso_source` stays `:oidc`, so this is the only line that needs to change.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/metabase/sso/oidc_settings_test.clj`:
+Create `test/metabase/sso/free_oidc_settings_test.clj`:
 
 ```clojure
-(ns metabase.sso.oidc-settings-test
+(ns metabase.sso.free-oidc-settings-test
   (:require
    [clojure.test :refer :all]
    [metabase.settings.core :as setting]
    [metabase.sso.settings :as sso.settings]
    [metabase.test :as mt]))
 
-(deftest oidc-configured-test
-  (testing "oidc-configured is true only when all three mandatory settings are present"
-    (mt/with-temporary-setting-values [oidc-client-id nil, oidc-client-secret nil, oidc-issuer-uri nil]
-      (is (false? (sso.settings/oidc-configured))))
-    (mt/with-temporary-setting-values [oidc-client-id "abc", oidc-client-secret nil, oidc-issuer-uri nil]
-      (is (false? (sso.settings/oidc-configured)) "client-id alone is not enough"))
-    (mt/with-temporary-setting-values [oidc-client-id     "abc"
-                                       oidc-client-secret "shh"
-                                       oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
-      (is (true? (sso.settings/oidc-configured))))))
+(deftest free-oidc-configured-test
+  (testing "free-oidc-configured is true only when all three mandatory settings are present"
+    (mt/with-temporary-setting-values [free-oidc-client-id nil, free-oidc-client-secret nil, free-oidc-issuer-uri nil]
+      (is (false? (sso.settings/free-oidc-configured))))
+    (mt/with-temporary-setting-values [free-oidc-client-id "abc", free-oidc-client-secret nil, free-oidc-issuer-uri nil]
+      (is (false? (sso.settings/free-oidc-configured)) "client-id alone is not enough"))
+    (mt/with-temporary-setting-values [free-oidc-client-id     "abc"
+                                       free-oidc-client-secret "shh"
+                                       free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
+      (is (true? (sso.settings/free-oidc-configured))))))
 
-(deftest oidc-enabled-requires-configured-test
-  (testing "oidc-enabled cannot be true unless OIDC is configured"
-    (mt/with-temporary-setting-values [oidc-enabled true, oidc-client-id nil, oidc-client-secret nil, oidc-issuer-uri nil]
-      (is (false? (sso.settings/oidc-enabled))
+(deftest free-oidc-enabled-requires-configured-test
+  (testing "free-oidc-enabled cannot be true unless OIDC is configured"
+    (mt/with-temporary-setting-values [free-oidc-enabled true, free-oidc-client-id nil, free-oidc-client-secret nil, free-oidc-issuer-uri nil]
+      (is (false? (sso.settings/free-oidc-enabled))
           "enabled must be false when unconfigured, so a half-set config cannot lock anyone out"))))
 
 (deftest client-secret-is-masked-test
   (testing "the client secret getter masks, and the unobfuscated accessor does not"
-    (mt/with-temporary-setting-values [oidc-client-secret "super-secret-value"]
-      (is (not= "super-secret-value" (sso.settings/oidc-client-secret))
+    (mt/with-temporary-setting-values [free-oidc-client-secret "super-secret-value"]
+      (is (not= "super-secret-value" (sso.settings/free-oidc-client-secret))
           "the public getter must mask")
-      (is (= "super-secret-value" (sso.settings/unobfuscated-oidc-client-secret))
+      (is (= "super-secret-value" (sso.settings/unobfuscated-free-oidc-client-secret))
           "the unobfuscated accessor returns the real value"))))
 
 (deftest sso-source-enabled-recognises-oidc-test
-  (testing "sso-source-enabled? :oidc reads our setting with no patch to that function"
-    (mt/with-temporary-setting-values [oidc-enabled       true
-                                       oidc-client-id     "abc"
-                                       oidc-client-secret "shh"
-                                       oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
+  (testing "sso-source-enabled? :oidc reads our free-oidc-enabled setting (patched case)"
+    (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                       free-oidc-client-id     "abc"
+                                       free-oidc-client-secret "shh"
+                                       free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
       (is (true? (sso.settings/sso-source-enabled? :oidc))))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./bin/test-agent :only '[metabase.sso.oidc-settings-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.free-oidc-settings-test]'`
 
 Expected: FAIL — settings don't exist yet.
 
@@ -393,84 +394,103 @@ In `src/metabase/sso/settings.clj`, immediately after the `slack-connect-enabled
 
 ```clojure
 ;;;
-;;; OIDC (Authentik)
+;;; OIDC (Authentik) — the "free-oidc" connector
 ;;;
-;;; Our own OIDC connector settings. Deliberately named `oidc-*` because
-;;; `sso-source-enabled?` below already dispatches :oidc -> (setting/get :oidc-enabled),
-;;; so that function needs no change.
+;;; Our own OIDC connector settings. Named `free-oidc-*` (NOT `oidc-*`) because the
+;;; enterprise SSO module registers settings literally named `oidc-enabled`/`oidc-configured`,
+;;; and defsetting throws on a duplicate registration -- bare `oidc-*` names would make the
+;;; app unbootable under any EE-inclusive build. The stamped sso_source stays :oidc, so the
+;;; `:oidc` case of `sso-source-enabled?` below is patched to read `free-oidc-enabled`.
 
-(defsetting oidc-issuer-uri
+(defsetting free-oidc-issuer-uri
   (deferred-tru "Issuer URI for your OIDC provider, e.g. https://sso.example.com/application/o/metabase/")
   :encryption :no
   :export?    false
   :audit      :getter)
 
-(defsetting oidc-client-id
+(defsetting free-oidc-client-id
   (deferred-tru "Client ID for your OIDC application")
   :encryption :no
   :export?    false
   :audit      :getter)
 
-(defsetting oidc-client-secret
+(defsetting free-oidc-client-secret
   (deferred-tru "Client Secret for your OIDC application")
   :encryption :when-encryption-key-set
   :export?    false
   :audit      :no-value
   :getter     (fn []
-                (-> (setting/get-value-of-type :string :oidc-client-secret)
+                (-> (setting/get-value-of-type :string :free-oidc-client-secret)
                     (u.str/mask 4))))
 
-(defn unobfuscated-oidc-client-secret
-  "Get the unobfuscated value of [[oidc-client-secret]]."
+(defn unobfuscated-free-oidc-client-secret
+  "Get the unobfuscated value of [[free-oidc-client-secret]]."
   []
-  (setting/get-value-of-type :string :oidc-client-secret))
+  (setting/get-value-of-type :string :free-oidc-client-secret))
 
-(defsetting oidc-scopes
+(defsetting free-oidc-scopes
   (deferred-tru "Space-separated OAuth2 scopes to request from the OIDC provider.")
   :encryption :no
   :export?    false
   :default    "openid email profile"
   :audit      :getter)
 
-(defsetting oidc-configured
+(defsetting free-oidc-configured
   (deferred-tru "Are the mandatory OIDC settings configured?")
   :type    :boolean
   :export? false
   :default false
   :setter  :none
   :getter  (fn [] (boolean
-                   (and (oidc-client-id)
-                        (setting/get-value-of-type :string :oidc-client-secret)
-                        (oidc-issuer-uri)))))
+                   (and (free-oidc-client-id)
+                        (setting/get-value-of-type :string :free-oidc-client-secret)
+                        (free-oidc-issuer-uri)))))
 
-(defsetting oidc-enabled
+(defsetting free-oidc-enabled
   (deferred-tru "Is OIDC authentication configured and enabled?")
-  :type    :boolean
-  :export? false
-  :default false
-  :audit   :getter
-  :getter  (fn []
-             (if (oidc-configured)
-               (setting/get-value-of-type :boolean :oidc-enabled)
-               false)))
+  :type       :boolean
+  :export?    false
+  :default    false
+  ;; :public so the unauthenticated login page can decide whether to show the SSO button.
+  ;; The client-id/secret/issuer settings above are intentionally NOT public.
+  :visibility :public
+  :audit      :getter
+  :getter     (fn []
+                (if (free-oidc-configured)
+                  (setting/get-value-of-type :boolean :free-oidc-enabled)
+                  false)))
 ```
 
-Note `oidc-configured` reads the secret via `setting/get-value-of-type` rather than the masked `(oidc-client-secret)` getter — the mask of a nil value could otherwise read as truthy.
+Note `free-oidc-configured` reads the secret via `setting/get-value-of-type` rather than the masked `(free-oidc-client-secret)` getter — the mask of a nil value could otherwise read as truthy.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Patch the `:oidc` case of `sso-source-enabled?`**
 
-Run: `./bin/test-agent :only '[metabase.sso.oidc-settings-test]'`
+Because our setting is `free-oidc-enabled` (not `oidc-enabled`), upstream's `:oidc` case in `sso-source-enabled?` (`src/metabase/sso/settings.clj`, ~line 312) now points at a setting that does not exist in an OSS build. Change that one line so the stamped `sso_source :oidc` resolves to our connector:
 
-Expected: PASS (4 tests).
+```clojure
+     ;; was: :oidc   (setting/get :oidc-enabled)
+     :oidc   (free-oidc-enabled)
+```
 
-- [ ] **Step 5: Commit**
+Leave every other case (`:google`, `:ldap`, `:saml`, `:jwt`, `:slack`, `:scim`) untouched. Do not touch `ee-sso-configured?` — Task 7 handles that.
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `./bin/test-agent :only '[metabase.sso.free-oidc-settings-test]'`
+
+Expected: PASS (4 tests), including `sso-source-enabled-recognises-oidc-test`.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/metabase/sso/settings.clj test/metabase/sso/oidc_settings_test.clj
-git commit -m "Add OIDC connector settings
+git add src/metabase/sso/settings.clj test/metabase/sso/free_oidc_settings_test.clj
+git commit -m "Add free-oidc connector settings
 
-Named oidc-* deliberately: sso-source-enabled? already dispatches
-:oidc -> (setting/get :oidc-enabled), so that function needs no patch.
+Named free-oidc-* to avoid colliding with enterprise's oidc-enabled /
+oidc-configured settings, which would make defsetting throw on duplicate
+registration under any EE-inclusive build. Patches the :oidc case of
+sso-source-enabled? to read free-oidc-enabled, since the stamped
+sso_source stays :oidc.
 
 Mirrors the slack-connect settings shape, including masked-secret
 handling and the configured?/enabled? pair that prevents a half-set
@@ -482,70 +502,70 @@ config from being marked enabled."
 ### Task 4: OIDC provider
 
 **Files:**
-- Create: `src/metabase/sso/providers/wc_oidc.clj`
+- Create: `src/metabase/sso/providers/free_oidc.clj`
 - Modify: `src/metabase/sso/init.clj`
-- Test: `test/metabase/sso/providers/wc_oidc_test.clj`
+- Test: `test/metabase/sso/providers/free_oidc_test.clj`
 
 **Interfaces:**
-- Consumes: `metabase.sso.settings/{oidc-enabled,oidc-configured,oidc-client-id,unobfuscated-oidc-client-secret,oidc-issuer-uri,oidc-scopes}` from Task 3.
+- Consumes: `metabase.sso.settings/{free-oidc-enabled,free-oidc-configured,free-oidc-client-id,unobfuscated-free-oidc-client-secret,free-oidc-issuer-uri,free-oidc-scopes}` from Task 3.
 - Produces:
-  - Provider key `:provider/wc-oidc`, deriving from `:provider/oidc`.
-  - `metabase.sso.providers.wc-oidc/check-sso-redirect` → `(fn [redirect-url] redirect-url)`, throws 400 on open-redirect.
+  - Provider key `:provider/free-oidc`, deriving from `:provider/oidc`.
+  - `metabase.sso.providers.free-oidc/check-sso-redirect` → `(fn [redirect-url] redirect-url)`, throws 400 on open-redirect.
   - `authenticate` returns `{:success? true :user-data {... :sso_source :oidc}}` / `{:success? :redirect :redirect-url ...}` / `{:success? false :error kw :message str}`.
 
 **Why this is tiny:** the OSS base `:provider/oidc` already implements the full authorization-code flow. We build a config map, `assoc` it as `:oidc-config`, and delegate via `next-method`. This mirrors `metabase.sso.providers.slack-connect` exactly.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/metabase/sso/providers/wc_oidc_test.clj`:
+Create `test/metabase/sso/providers/free_oidc_test.clj`:
 
 ```clojure
-(ns metabase.sso.providers.wc-oidc-test
+(ns metabase.sso.providers.free-oidc-test
   (:require
    [clojure.test :refer :all]
    [metabase.auth-identity.core :as auth-identity]
-   [metabase.sso.providers.wc-oidc :as wc-oidc]
+   [metabase.sso.providers.free-oidc :as free-oidc]
    [metabase.test :as mt]))
 
 (deftest provider-derives-from-base-oidc-test
   (testing "our provider inherits the AGPL base OIDC flow"
-    (is (isa? :provider/wc-oidc :provider/oidc)
+    (is (isa? :provider/free-oidc :provider/oidc)
         "must derive from the OSS base provider so we inherit discovery, token exchange, and ID-token validation")
-    (is (isa? :provider/wc-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
+    (is (isa? :provider/free-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
         "must auto-provision: Authentik is the gatekeeper")))
 
 (deftest authenticate-rejects-when-disabled-test
   (testing "authenticate refuses when OIDC is disabled"
-    (mt/with-temporary-setting-values [oidc-enabled false]
-      (let [result (auth-identity/authenticate :provider/wc-oidc {})]
+    (mt/with-temporary-setting-values [free-oidc-enabled false]
+      (let [result (auth-identity/authenticate :provider/free-oidc {})]
         (is (false? (:success? result)))
         (is (= :oidc-not-enabled (:error result)))))))
 
 (deftest authenticate-rejects-when-unconfigured-test
   (testing "authenticate refuses when OIDC is enabled but not configured"
-    (mt/with-temporary-setting-values [oidc-enabled true, oidc-client-id nil, oidc-client-secret nil, oidc-issuer-uri nil]
-      (let [result (auth-identity/authenticate :provider/wc-oidc {})]
+    (mt/with-temporary-setting-values [free-oidc-enabled true, free-oidc-client-id nil, free-oidc-client-secret nil, free-oidc-issuer-uri nil]
+      (let [result (auth-identity/authenticate :provider/free-oidc {})]
         (is (false? (:success? result)))))))
 
 (deftest check-sso-redirect-blocks-open-redirect-test
   (testing "relative redirects are allowed"
-    (is (= "/dashboard/1" (wc-oidc/check-sso-redirect "/dashboard/1"))))
+    (is (= "/dashboard/1" (free-oidc/check-sso-redirect "/dashboard/1"))))
   (testing "external hosts are rejected"
-    (is (thrown? clojure.lang.ExceptionInfo (wc-oidc/check-sso-redirect "https://evil.example.com/steal")))))
+    (is (thrown? clojure.lang.ExceptionInfo (free-oidc/check-sso-redirect "https://evil.example.com/steal")))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./bin/test-agent :only '[metabase.sso.providers.wc-oidc-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.providers.free-oidc-test]'`
 
 Expected: FAIL — namespace does not exist.
 
 - [ ] **Step 3: Write the provider**
 
-Create `src/metabase/sso/providers/wc_oidc.clj`:
+Create `src/metabase/sso/providers/free_oidc.clj`:
 
 ```clojure
-(ns metabase.sso.providers.wc-oidc
+(ns metabase.sso.providers.free-oidc
   "Waterloo OIDC authentication provider (Authentik).
 
   Derives from the base OSS OIDC provider [[metabase.sso.providers.oidc]], which already
@@ -566,8 +586,8 @@ Create `src/metabase/sso/providers/wc_oidc.clj`:
 
 ;;; -------------------------------------------------- Provider Registration --------------------------------------------------
 
-(derive :provider/wc-oidc :provider/oidc)
-(derive :provider/wc-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
+(derive :provider/free-oidc :provider/oidc)
+(derive :provider/free-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
 
 (def provider-name
   "Provider name for Waterloo OIDC authentication."
@@ -581,11 +601,11 @@ Create `src/metabase/sso/providers/wc_oidc.clj`:
   Authentik emits `email`, `given_name` and `family_name`, which match the base
   provider's defaults exactly, so no attribute mapping is needed."
   [request]
-  (when (sso-settings/oidc-configured)
-    {:client-id     (sso-settings/oidc-client-id)
-     :client-secret (sso-settings/unobfuscated-oidc-client-secret)
-     :issuer-uri    (sso-settings/oidc-issuer-uri)
-     :scopes        (vec (remove str/blank? (str/split (or (sso-settings/oidc-scopes) "") #"\s+")))
+  (when (sso-settings/free-oidc-configured)
+    {:client-id     (sso-settings/free-oidc-client-id)
+     :client-secret (sso-settings/unobfuscated-free-oidc-client-secret)
+     :issuer-uri    (sso-settings/free-oidc-issuer-uri)
+     :scopes        (vec (remove str/blank? (str/split (or (sso-settings/free-oidc-scopes) "") #"\s+")))
      :redirect-uri  (get request :redirect-uri)}))
 
 ;;; -------------------------------------------------- Open Redirect Guard --------------------------------------------------
@@ -612,15 +632,15 @@ Create `src/metabase/sso/providers/wc_oidc.clj`:
 
 ;;; -------------------------------------------------- Authentication --------------------------------------------------
 
-(methodical/defmethod auth-identity/authenticate :provider/wc-oidc
+(methodical/defmethod auth-identity/authenticate :provider/free-oidc
   [_provider request]
   (cond
-    (not (sso-settings/oidc-enabled))
+    (not (sso-settings/free-oidc-enabled))
     {:success? false
      :error    :oidc-not-enabled
      :message  (tru "OIDC authentication is not enabled")}
 
-    (not (sso-settings/oidc-configured))
+    (not (sso-settings/free-oidc-configured))
     {:success? false
      :error    :oidc-not-configured
      :message  (tru "OIDC is not configured")}
@@ -649,22 +669,22 @@ Edit `src/metabase/sso/init.clj`:
    [metabase.sso.providers.ldap]
    [metabase.sso.providers.oidc]
    [metabase.sso.providers.slack-connect]
-   [metabase.sso.providers.wc-oidc]
+   [metabase.sso.providers.free-oidc]
    [metabase.sso.settings]))
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `./bin/test-agent :only '[metabase.sso.providers.wc-oidc-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.providers.free-oidc-test]'`
 
 Expected: PASS (4 tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/metabase/sso/providers/wc_oidc.clj src/metabase/sso/init.clj \
-        test/metabase/sso/providers/wc_oidc_test.clj
-git commit -m "Add :provider/wc-oidc deriving from the OSS base OIDC provider
+git add src/metabase/sso/providers/free_oidc.clj src/metabase/sso/init.clj \
+        test/metabase/sso/providers/free_oidc_test.clj
+git commit -m "Add :provider/free-oidc deriving from the OSS base OIDC provider
 
 The AGPL base :provider/oidc already implements the whole
 authorization-code flow -- discovery, JWKS, ID token validation,
@@ -680,60 +700,60 @@ No enterprise code is used or copied."
 ### Task 5: OIDC integration — initiate and callback
 
 **Files:**
-- Create: `src/metabase/sso/integrations/wc_oidc.clj`
-- Test: `test/metabase/sso/integrations/wc_oidc_test.clj`
+- Create: `src/metabase/sso/integrations/free_oidc.clj`
+- Test: `test/metabase/sso/integrations/free_oidc_test.clj`
 
 **Interfaces:**
-- Consumes: `:provider/wc-oidc` and `check-sso-redirect` from Task 4; `oidc-enabled` from Task 3.
+- Consumes: `:provider/free-oidc` and `check-sso-redirect` from Task 4; `free-oidc-enabled` from Task 3.
 - Produces:
-  - `metabase.sso.integrations.wc-oidc/sso-initiate` → `(fn [request] ring-response)`
-  - `metabase.sso.integrations.wc-oidc/sso-callback` → `(fn [request] ring-response)`
+  - `metabase.sso.integrations.free-oidc/sso-initiate` → `(fn [request] ring-response)`
+  - `metabase.sso.integrations.free-oidc/sso-callback` → `(fn [request] ring-response)`
   - Callback URI is `{site-url}/auth/sso/oidc/callback` — **this exact string must be registered in Authentik.**
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/metabase/sso/integrations/wc_oidc_test.clj`:
+Create `test/metabase/sso/integrations/free_oidc_test.clj`:
 
 ```clojure
-(ns metabase.sso.integrations.wc-oidc-test
+(ns metabase.sso.integrations.free-oidc-test
   (:require
    [clojure.test :refer :all]
-   [metabase.sso.integrations.wc-oidc :as wc-oidc.integration]
+   [metabase.sso.integrations.free-oidc :as free-oidc.integration]
    [metabase.test :as mt]))
 
 (deftest initiate-rejects-when-disabled-test
   (testing "initiating SSO when OIDC is disabled throws a 400 rather than redirecting"
-    (mt/with-temporary-setting-values [oidc-enabled false]
+    (mt/with-temporary-setting-values [free-oidc-enabled false]
       (let [e (is (thrown? clojure.lang.ExceptionInfo
-                           (wc-oidc.integration/sso-initiate {:params {}})))]
+                           (free-oidc.integration/sso-initiate {:params {}})))]
         (is (= 400 (:status-code (ex-data e))))))))
 
 (deftest callback-rejects-when-disabled-test
   (testing "the callback refuses when OIDC is disabled"
-    (mt/with-temporary-setting-values [oidc-enabled false]
+    (mt/with-temporary-setting-values [free-oidc-enabled false]
       (is (thrown? clojure.lang.ExceptionInfo
-                   (wc-oidc.integration/sso-callback {:params {:code "x" :state "y"}}))))))
+                   (free-oidc.integration/sso-callback {:params {:code "x" :state "y"}}))))))
 
 (deftest redirect-uri-is-stable-test
   (testing "the callback URI matches what must be registered in Authentik"
     (mt/with-temporary-setting-values [site-url "https://analytics.waterloocap.com"]
       (is (= "https://analytics.waterloocap.com/auth/sso/oidc/callback"
-             (#'wc-oidc.integration/oidc-redirect-uri))
+             (#'free-oidc.integration/oidc-redirect-uri))
           "If this changes, the Authentik application config must change too."))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./bin/test-agent :only '[metabase.sso.integrations.wc-oidc-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.integrations.free-oidc-test]'`
 
 Expected: FAIL — namespace does not exist.
 
 - [ ] **Step 3: Write the integration**
 
-Create `src/metabase/sso/integrations/wc_oidc.clj`:
+Create `src/metabase/sso/integrations/free_oidc.clj`:
 
 ```clojure
-(ns metabase.sso.integrations.wc-oidc
+(ns metabase.sso.integrations.free-oidc
   "Waterloo OIDC (Authentik) SSO backend.
 
   Flow:
@@ -750,7 +770,7 @@ Create `src/metabase/sso/integrations/wc_oidc.clj`:
    [metabase.auth-identity.core :as auth-identity]
    [metabase.request.core :as request]
    [metabase.sso.core :as sso]
-   [metabase.sso.providers.wc-oidc :as wc-oidc.provider]
+   [metabase.sso.providers.free-oidc :as free-oidc.provider]
    [metabase.sso.settings :as sso-settings]
    [metabase.system.core :as system]
    [metabase.util.i18n :refer [tru]]
@@ -767,7 +787,7 @@ Create `src/metabase/sso/integrations/wc_oidc.clj`:
 (defn- check-oidc-prereqs!
   "Check that OIDC is enabled. Throws on failure."
   []
-  (when-not (sso-settings/oidc-enabled)
+  (when-not (sso-settings/free-oidc-enabled)
     (throw (ex-info (tru "OIDC authentication is not enabled")
                     {:status-code 400}))))
 
@@ -777,16 +797,16 @@ Create `src/metabase/sso/integrations/wc_oidc.clj`:
   (check-oidc-prereqs!)
   (let [{:keys [redirect]} (:params request)
         redirect-url (if redirect
-                       (wc-oidc.provider/check-sso-redirect redirect)
+                       (free-oidc.provider/check-sso-redirect redirect)
                        "/")
-        auth-result  (auth-identity/authenticate :provider/wc-oidc
+        auth-result  (auth-identity/authenticate :provider/free-oidc
                                                  (assoc request
                                                         :redirect-uri   (oidc-redirect-uri)
                                                         :final-redirect redirect-url))]
     (if (= :redirect (:success? auth-result))
       (sso/wrap-oidc-redirect auth-result
                               request
-                              :wc-oidc
+                              :free-oidc
                               redirect-url
                               {:browser-id (:browser-id request)})
       (throw (ex-info (or (:message auth-result) (tru "Failed to initiate OIDC authentication"))
@@ -797,11 +817,11 @@ Create `src/metabase/sso/integrations/wc_oidc.clj`:
   [request]
   (check-oidc-prereqs!)
   (let [{:keys [code state]} (:params request)
-        login-result (auth-identity/login! :provider/wc-oidc
+        login-result (auth-identity/login! :provider/free-oidc
                                            (assoc request
                                                   :code          code
                                                   :state         state
-                                                  :oidc-provider :wc-oidc
+                                                  :oidc-provider :free-oidc
                                                   :redirect-uri  (oidc-redirect-uri)
                                                   :device-info   (request/device-info request)))]
     (if (:success? login-result)
@@ -823,14 +843,14 @@ Create `src/metabase/sso/integrations/wc_oidc.clj`:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `./bin/test-agent :only '[metabase.sso.integrations.wc-oidc-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.integrations.free-oidc-test]'`
 
 Expected: PASS (3 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/metabase/sso/integrations/wc_oidc.clj test/metabase/sso/integrations/wc_oidc_test.clj
+git add src/metabase/sso/integrations/free_oidc.clj test/metabase/sso/integrations/free_oidc_test.clj
 git commit -m "Add OIDC initiate/callback handlers
 
 Mirrors the OSS slack-connect integration: wrap-oidc-redirect on
@@ -903,7 +923,7 @@ Create `src/metabase/sso/api/oidc.clj`:
   "API routes for Waterloo OIDC SSO authentication."
   (:require
    [metabase.api.macros :as api.macros]
-   [metabase.sso.integrations.wc-oidc :as wc-oidc.integration]
+   [metabase.sso.integrations.free-oidc :as free-oidc.integration]
    [metabase.util.log :as log]))
 
 ;; GET /auth/sso/oidc
@@ -913,7 +933,7 @@ Create `src/metabase/sso/api/oidc.clj`:
   "Initiate the OIDC SSO flow."
   [_route-params _query-params _body request]
   (try
-    (wc-oidc.integration/sso-initiate request)
+    (free-oidc.integration/sso-initiate request)
     (catch Throwable e
       (log/error e "Error initiating OIDC SSO")
       (throw e))))
@@ -925,7 +945,7 @@ Create `src/metabase/sso/api/oidc.clj`:
   "OIDC callback."
   [_route-params _query-params _body request]
   (try
-    (wc-oidc.integration/sso-callback request)
+    (free-oidc.integration/sso-callback request)
     (catch Throwable e
       (log/error e "Error handling OIDC callback")
       (throw e))))
@@ -988,25 +1008,25 @@ a backdoor for ungating other providers."
 
 **Files:**
 - Modify: `src/metabase/sso/settings.clj` (`ee-sso-configured?`, ~line 284)
-- Test: `test/metabase/sso/oidc_settings_test.clj` (extend)
+- Test: `test/metabase/sso/free_oidc_settings_test.clj` (extend)
 
 **Interfaces:**
-- Consumes: `oidc-enabled` from Task 3.
+- Consumes: `free-oidc-enabled` from Task 3.
 - Produces: `(sso-enabled?)` returns `true` when OIDC is enabled in an OSS build.
 
 **Why:** `ee-sso-configured?` is wrapped in `(when config/ee-available? ...)`, so in an OSS build it returns `nil` and the login page renders no SSO button. This is the one genuine patch the connector needs.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `test/metabase/sso/oidc_settings_test.clj`:
+Append to `test/metabase/sso/free_oidc_settings_test.clj`:
 
 ```clojure
 (deftest sso-enabled-includes-oidc-in-oss-build-test
   (testing "sso-enabled? is true when OIDC is on, even without EE on the classpath"
-    (mt/with-temporary-setting-values [oidc-enabled       true
-                                       oidc-client-id     "abc"
-                                       oidc-client-secret "shh"
-                                       oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"
+    (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                       free-oidc-client-id     "abc"
+                                       free-oidc-client-secret "shh"
+                                       free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"
                                        google-auth-client-id nil
                                        ldap-enabled          false]
       (is (true? (boolean (sso.settings/sso-enabled?)))
@@ -1015,13 +1035,13 @@ Append to `test/metabase/sso/oidc_settings_test.clj`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./bin/test-agent :only '[metabase.sso.oidc-settings-test/sso-enabled-includes-oidc-in-oss-build-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.free-oidc-settings-test/sso-enabled-includes-oidc-in-oss-build-test]'`
 
 Expected: FAIL — `sso-enabled?` returns `false`/`nil` because `ee-sso-configured?` short-circuits on `config/ee-available?`.
 
 - [ ] **Step 3: Patch the enablement check**
 
-In `src/metabase/sso/settings.clj`, replace:
+In `src/metabase/sso/settings.clj`, replace (note the upstream line reads EE's `:oidc-enabled`, which only exists when EE is on the classpath):
 
 ```clojure
 (defn- ee-sso-configured? []
@@ -1050,30 +1070,30 @@ with:
   (or (google-auth-enabled)
       (ldap-enabled)
       ;; Our OIDC connector is OSS, so it must not sit behind the ee-available? guard.
-      (oidc-enabled)
+      (free-oidc-enabled)
       (ee-sso-configured?)))
 ```
 
-`:oidc-enabled` moves out of `ee-sso-configured?` because the setting is now ours and exists in OSS builds. `sso-source-enabled?` is deliberately left untouched — it already reads `:oidc-enabled` directly.
+The EE `:oidc-enabled` reference is dropped from `ee-sso-configured?` (that was enterprise's OIDC, which we no longer build), and our own `(free-oidc-enabled)` is added to `sso-enabled?` outside the `ee-available?` guard. `sso-source-enabled?` was already patched in Task 3 (its `:oidc` case reads `free-oidc-enabled`); do not touch it again here.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `./bin/test-agent :only '[metabase.sso.oidc-settings-test]'`
+Run: `./bin/test-agent :only '[metabase.sso.free-oidc-settings-test]'`
 
 Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/metabase/sso/settings.clj test/metabase/sso/oidc_settings_test.clj
+git add src/metabase/sso/settings.clj test/metabase/sso/free_oidc_settings_test.clj
 git commit -m "Teach sso-enabled? about our OSS OIDC connector
 
 ee-sso-configured? is guarded by config/ee-available?, so in an OSS
 build it returns nil and the login page renders no SSO button. Our
-connector is OSS, so oidc-enabled moves out from behind that guard.
+connector is OSS, so free-oidc-enabled moves out from behind that guard.
 
 sso-source-enabled? needs no change -- it already dispatches
-:oidc -> (setting/get :oidc-enabled)."
+:oidc -> (setting/get :free-oidc-enabled)."
 ```
 
 ---
@@ -1089,7 +1109,7 @@ sso-source-enabled? needs no change -- it already dispatches
 **Interfaces:**
 - Consumes: settings from Task 3.
 - Produces:
-  - `PUT /api/oidc/settings` — superuser only. Body: `{:oidc-enabled bool?, :oidc-issuer-uri str?, :oidc-client-id str?, :oidc-client-secret str?, :oidc-scopes str?}`. Tests the config before saving; `400` with `{:errors {...}}` if the probe fails.
+  - `PUT /api/oidc/settings` — superuser only. Body: `{:free-oidc-enabled bool?, :free-oidc-issuer-uri str?, :free-oidc-client-id str?, :free-oidc-client-secret str?, :free-oidc-scopes str?}`. Tests the config before saving; `400` with `{:errors {...}}` if the probe fails.
   - `metabase.sso.api/oidc-settings-routes`
 
 **Pattern:** modeled on `src/metabase/sso/api/ldap.clj` — superuser check, test connection, save only on success, and the obfuscated-secret round-trip guard.
@@ -1109,14 +1129,14 @@ Create `test/metabase/sso/api/oidc_settings_test.clj`:
   (testing "non-admins cannot change OIDC settings"
     (is (= "You don't have permissions to do that."
            (mt/user-http-request :rasta :put 403 "oidc/settings"
-                                 {:oidc-enabled false})))))
+                                 {:free-oidc-enabled false})))))
 
 (deftest masked-secret-round-trip-does-not-clobber-test
   (testing "submitting the masked secret back leaves the stored secret intact"
-    (mt/with-temporary-setting-values [oidc-client-secret "real-secret-value"
-                                       oidc-client-id     "abc"
-                                       oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
-      (let [masked (sso.settings/oidc-client-secret)]
+    (mt/with-temporary-setting-values [free-oidc-client-secret "real-secret-value"
+                                       free-oidc-client-id     "abc"
+                                       free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"]
+      (let [masked (sso.settings/free-oidc-client-secret)]
         (#'metabase.sso.api.oidc-settings/update-secret-if-needed masked)
         (is (= "real-secret-value"
                (#'metabase.sso.api.oidc-settings/update-secret-if-needed masked))
@@ -1127,21 +1147,21 @@ Create `test/metabase/sso/api/oidc_settings_test.clj`:
 
 (deftest config-is-persisted-before-enabling-test
   (testing "enabling OIDC alongside a fresh config actually results in enabled=true"
-    ;; Regression guard. `oidc-enabled`'s getter consults `oidc-configured`, so if the
-    ;; endpoint writes :oidc-enabled in the same set-many! as the config, enabled
+    ;; Regression guard. `free-oidc-enabled`'s getter consults `free-oidc-configured`, so if the
+    ;; endpoint writes :free-oidc-enabled in the same set-many! as the config, enabled
     ;; evaluates against the OLD (unconfigured) state and silently stays false.
     ;; metabase.sso.api.ldap has the same hazard and solves it the same way.
-    (mt/with-temporary-setting-values [oidc-enabled false, oidc-client-id nil
-                                       oidc-client-secret nil, oidc-issuer-uri nil]
+    (mt/with-temporary-setting-values [free-oidc-enabled false, free-oidc-client-id nil
+                                       free-oidc-client-secret nil, free-oidc-issuer-uri nil]
       (with-redefs [metabase.sso.core/check-oidc-configuration
                     (fn [& _] {:ok true :discovery {:success true} :credentials {:success true}})]
         (mt/user-http-request :crowberto :put 200 "oidc/settings"
-                              {:oidc-enabled       true
-                               :oidc-client-id     "abc"
-                               :oidc-client-secret "shh"
-                               :oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"})
-        (is (true? (sso.settings/oidc-enabled))
-            "If this is false, the config was not persisted before oidc-enabled was set.")))))
+                              {:free-oidc-enabled       true
+                               :free-oidc-client-id     "abc"
+                               :free-oidc-client-secret "shh"
+                               :free-oidc-issuer-uri    "https://sso.waterloocap.com/application/o/metabase/"})
+        (is (true? (sso.settings/free-oidc-enabled))
+            "If this is false, the config was not persisted before free-oidc-enabled was set.")))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1175,8 +1195,8 @@ Create `src/metabase/sso/api/oidc_settings.clj`:
 (defn- update-secret-if-needed
   "Do not overwrite the stored secret if `new-secret` is just its obfuscated form."
   [new-secret]
-  (let [current (sso.settings/unobfuscated-oidc-client-secret)]
-    (if (= (sso.settings/oidc-client-secret) new-secret)
+  (let [current (sso.settings/unobfuscated-free-oidc-client-secret)]
+    (if (= (sso.settings/free-oidc-client-secret) new-secret)
       current
       new-secret)))
 
@@ -1187,17 +1207,17 @@ Create `src/metabase/sso/api/oidc_settings.clj`:
   [_route-params
    _query-params
    settings :- [:map
-                [:oidc-enabled       {:optional true} [:maybe :boolean]]
-                [:oidc-issuer-uri    {:optional true} [:maybe :string]]
-                [:oidc-client-id     {:optional true} [:maybe :string]]
-                [:oidc-client-secret {:optional true} [:maybe :string]]
-                [:oidc-scopes        {:optional true} [:maybe :string]]]]
+                [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
+                [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
+                [:free-oidc-client-id     {:optional true} [:maybe :string]]
+                [:free-oidc-client-secret {:optional true} [:maybe :string]]
+                [:free-oidc-scopes        {:optional true} [:maybe :string]]]]
   (api/check-superuser)
-  (let [secret     (update-secret-if-needed (:oidc-client-secret settings))
-        issuer     (or (:oidc-issuer-uri settings) (sso.settings/oidc-issuer-uri))
-        client-id  (or (:oidc-client-id settings) (sso.settings/oidc-client-id))
-        scopes     (or (:oidc-scopes settings) (sso.settings/oidc-scopes))
-        enabling?  (:oidc-enabled settings)]
+  (let [secret     (update-secret-if-needed (:free-oidc-client-secret settings))
+        issuer     (or (:free-oidc-issuer-uri settings) (sso.settings/free-oidc-issuer-uri))
+        client-id  (or (:free-oidc-client-id settings) (sso.settings/free-oidc-client-id))
+        scopes     (or (:free-oidc-scopes settings) (sso.settings/free-oidc-scopes))
+        enabling?  (:free-oidc-enabled settings)]
     ;; Only probe when we are being asked to turn OIDC on. Probing on every save would
     ;; make it impossible to disable a provider that has gone down.
     (when enabling?
@@ -1207,14 +1227,14 @@ Create `src/metabase/sso/api/oidc_settings.clj`:
           (throw (ex-info (tru "Could not connect to the OIDC provider")
                           {:status-code 400
                            :errors      (select-keys result [:discovery :credentials])})))))
-    ;; IMPORTANT: mirror the ordering in metabase.sso.api.ldap. The `oidc-enabled` getter
-    ;; consults `oidc-configured`, so the config MUST be persisted before we flip enabled
+    ;; IMPORTANT: mirror the ordering in metabase.sso.api.ldap. The `free-oidc-enabled` getter
+    ;; consults `free-oidc-configured`, so the config MUST be persisted before we flip enabled
     ;; — otherwise enabling against a fresh config silently evaluates to false.
     (t2/with-transaction [_conn]
-      (setting/set-many! (cond-> (dissoc settings :oidc-client-secret :oidc-enabled)
-                           secret (assoc :oidc-client-secret secret)))
-      (when (contains? settings :oidc-enabled)
-        (setting/set-value-of-type! :boolean :oidc-enabled (boolean (:oidc-enabled settings)))))
+      (setting/set-many! (cond-> (dissoc settings :free-oidc-client-secret :free-oidc-enabled)
+                           secret (assoc :free-oidc-client-secret secret)))
+      (when (contains? settings :free-oidc-enabled)
+        (setting/set-value-of-type! :boolean :free-oidc-enabled (boolean (:free-oidc-enabled settings)))))
     {:ok true}))
 
 (def ^{:arglists '([request respond raise])} routes
@@ -1291,7 +1311,7 @@ be switched off."
 - Test: `frontend/src/metabase/auth/components/OidcButton/OidcButton.unit.spec.tsx`
 
 **Interfaces:**
-- Consumes: the `oidc-enabled` setting (Task 3) exposed to the frontend; the `/auth/sso/oidc` route (Task 6).
+- Consumes: the `free-oidc-enabled` setting (Task 3) exposed to the frontend; the `/auth/sso/oidc` route (Task 6).
 - Produces: an entry in `PLUGIN_AUTH_PROVIDERS.providers` named `"oidc"`.
 
 **Pattern:** `frontend/src/metabase/plugins/builtin/auth/google.ts` — 19 lines.
@@ -1377,7 +1397,7 @@ PLUGIN_AUTH_PROVIDERS.providers.push((providers) => {
     Button: require("metabase/auth/components/OidcButton").OidcButton,
   };
 
-  return MetabaseSettings.get("oidc-enabled")
+  return MetabaseSettings.get("free-oidc-enabled")
     ? [oidcProvider, ...providers]
     : providers;
 });
@@ -1406,7 +1426,7 @@ git add frontend/src/metabase/auth/components/OidcButton/ \
 git commit -m "Add OIDC login button
 
 Mirrors builtin/auth/google.ts. Registers an 'oidc' provider gated on
-the oidc-enabled setting, and marks OIDC users as non-password users so
+the free-oidc-enabled setting, and marks OIDC users as non-password users so
 the password-reset flow behaves."
 ```
 
@@ -2153,9 +2173,9 @@ settings are never touched."
 
 ```bash
 ./bin/test-agent :only '[metabase.premium-features.oss-build-test
-                        metabase.sso.oidc-settings-test
-                        metabase.sso.providers.wc-oidc-test
-                        metabase.sso.integrations.wc-oidc-test
+                        metabase.sso.free-oidc-settings-test
+                        metabase.sso.providers.free-oidc-test
+                        metabase.sso.integrations.free-oidc-test
                         metabase.sso.api.oidc-settings-test
                         metabase.server.auth-wrapper-test
                         metabase.branding.settings-test
@@ -2185,8 +2205,8 @@ Expected: the only `enterprise/` entry is `LICENSE.txt` **restored** (not emptie
 - [ ] **Step 4: Build and smoke-test locally against real Authentik**
 
 ```bash
-export MB_OIDC_CLIENT_ID='<from Authentik>'
-export MB_OIDC_CLIENT_SECRET='<from Authentik>'
+export MB_FREE_OIDC_CLIENT_ID='<from Authentik>'
+export MB_FREE_OIDC_CLIENT_SECRET='<from Authentik>'
 docker-compose up --build
 ```
 
@@ -2222,7 +2242,7 @@ Create `docs/superpowers/plans/2026-07-17-cutover-runbook.md`:
 
 2. **Register the redirect URI in Authentik:**
    `https://analytics.waterloocap.com/auth/sso/oidc/callback`
-   This string is pinned by a test in `wc_oidc_test.clj`. If it changes, both change.
+   This string is pinned by a test in `free_oidc_test.clj`. If it changes, both change.
 
 3. **Confirm the Authentik issuer URI**, including the trailing slash:
    `https://sso.waterloocap.com/application/o/<slug>/`
@@ -2301,8 +2321,8 @@ gotcha, which is the most common Authentik failure."
 | Revert `token_check.clj`, `premium_features/settings.clj`, EE `routes/common.clj`, restore `LICENSE.txt` | 1 |
 | Telemetry via env vars; zero fork delta on those files | 2 |
 | `MB_EDITION=oss` | 2 |
-| OIDC settings named `oidc-*` so `sso-source-enabled?` needs no patch | 3 |
-| `:provider/wc-oidc` deriving from `:provider/oidc` | 4 |
+| OIDC settings named `free-oidc-*` (avoids EE collision); `sso-source-enabled?` `:oidc` case patched | 3 |
+| `:provider/free-oidc` deriving from `:provider/oidc` | 4 |
 | `sso-initiate` / `sso-callback`; callback URI pinned | 5 |
 | Mount `/auth/sso/oidc` beside `/slack-connect` | 6 |
 | Relax `ee-sso-configured?` so the login button renders | 7 |

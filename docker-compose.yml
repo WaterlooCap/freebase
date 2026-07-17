@@ -35,11 +35,13 @@ services:
       MB_ANON_TRACKING_ENABLED: "false"
       MB_SNOWPLOW_AVAILABLE: "false"
       MB_CHECK_FOR_UPDATES: "false"
-      # OIDC (Authentik). Set the real values in the deploy environment.
-      MB_OIDC_ENABLED: "true"
-      MB_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
-      MB_OIDC_CLIENT_ID: "${MB_OIDC_CLIENT_ID}"
-      MB_OIDC_CLIENT_SECRET: "${MB_OIDC_CLIENT_SECRET}"
+      # OIDC (Authentik). Named MB_FREE_OIDC_* to match the free-oidc-* settings
+      # (bare oidc-* collides with enterprise's settings). Real secrets come from the
+      # deploy environment, never committed.
+      MB_FREE_OIDC_ENABLED: "true"
+      MB_FREE_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
+      MB_FREE_OIDC_CLIENT_ID: "${MB_FREE_OIDC_CLIENT_ID}"
+      MB_FREE_OIDC_CLIENT_SECRET: "${MB_FREE_OIDC_CLIENT_SECRET}"
     depends_on:
       db:
         condition: service_healthy
