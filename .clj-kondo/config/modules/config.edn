@@ -449,8 +449,10 @@
 
   branding
   {:team "UX West"
-   :api  #{metabase.branding.init}
-   :uses #{appearance
+   :api  #{metabase.branding.api
+           metabase.branding.init}
+   :uses #{api
+           appearance
            settings
            util}}
 
