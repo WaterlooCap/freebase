@@ -1207,20 +1207,25 @@ Create `src/metabase/sso/api/oidc_settings.clj`:
       current
       new-secret)))
 
+;; Register the closed body schema via mr/def and reference by keyword (see the branding
+;; API note: an inline `[:map {:closed true} ...]` in the defendpoint binding trips a
+;; macros bug and 500s instead of 400ing on an unknown key). Requires
+;; `[metabase.util.malli.registry :as mr]` in the ns.
+(mr/def ::settings
+  [:map {:closed true}
+   [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
+   [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
+   [:free-oidc-client-id     {:optional true} [:maybe :string]]
+   [:free-oidc-client-secret {:optional true} [:maybe :string]]
+   [:free-oidc-scopes        {:optional true} [:maybe :string]]])
+
 #_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :put "/settings"
   "Update OIDC settings. You must be a superuser to do this. The configuration is probed
   against the provider before being saved; if the probe fails, nothing is persisted."
   [_route-params
    _query-params
-   ;; {:closed true} so a caller cannot smuggle non-oidc setting keys into set-many! —
-   ;; the endpoint must write ONLY free-oidc-* settings, not arbitrary registered settings.
-   settings :- [:map {:closed true}
-                [:free-oidc-enabled       {:optional true} [:maybe :boolean]]
-                [:free-oidc-issuer-uri    {:optional true} [:maybe :string]]
-                [:free-oidc-client-id     {:optional true} [:maybe :string]]
-                [:free-oidc-client-secret {:optional true} [:maybe :string]]
-                [:free-oidc-scopes        {:optional true} [:maybe :string]]]]
+   settings :- ::settings]
   (api/check-superuser)
   (let [secret     (update-secret-if-needed (:free-oidc-client-secret settings))
         issuer     (or (:free-oidc-issuer-uri settings) (sso.settings/free-oidc-issuer-uri))
@@ -2165,29 +2170,37 @@ Create `src/metabase/branding/api.clj`:
   "/api/branding endpoints for configuring Waterloo branding.
 
   These write OUR `wc-brand-*` settings. Metabase's gated `application-*` settings are
-  never touched here."
+  never touched here — the body schema is `{:closed true}`, so any key outside the
+  `wc-brand-*`/`wc-help-link*` set is rejected with a 400 before it reaches `set-many!`."
   (:require
    [metabase.api.common :as api]
    [metabase.api.macros :as api.macros]
-   [metabase.settings.core :as setting]))
+   [metabase.settings.core :as setting]
+   [metabase.util.malli.registry :as mr]))
 
 (set! *warn-on-reflection* true)
+
+;; IMPORTANT: register the closed schema via `mr/def` and reference it by keyword below —
+;; do NOT inline `[:map {:closed true} ...]` directly in the defendpoint binding. A literal
+;; inline closed-map trips a bug in `metabase.api.macros/invalid-params-errors` (it can't
+;; resolve the unregistered inline schema when formatting the rejected-key error) and
+;; surfaces as an uncaught 500 instead of the intended 400. The `mr/def` + `::settings`
+;; reference avoids that path — same pattern as `metabase.agent-api.api`.
+(mr/def ::settings
+  [:map {:closed true}
+   [:wc-brand-name            {:optional true} [:maybe :string]]
+   [:wc-brand-logo-url        {:optional true} [:maybe :string]]
+   [:wc-brand-favicon-url     {:optional true} [:maybe :string]]
+   [:wc-brand-colors          {:optional true} [:maybe [:map-of :string :string]]]
+   [:wc-help-link             {:optional true} [:maybe [:enum "metabase" "custom" "hidden"]]]
+   [:wc-help-link-destination {:optional true} [:maybe :string]]])
 
 #_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :put "/settings"
   "Update branding settings. You must be a superuser to do this."
   [_route-params
    _query-params
-   ;; {:closed true} so a caller cannot smuggle non-branding setting keys into set-many! —
-   ;; the endpoint must write ONLY wc-brand-* settings, never Metabase's application-* or
-   ;; any other registered setting. Without this the open :map lets arbitrary keys through.
-   settings :- [:map {:closed true}
-                [:wc-brand-name            {:optional true} [:maybe :string]]
-                [:wc-brand-logo-url        {:optional true} [:maybe :string]]
-                [:wc-brand-favicon-url     {:optional true} [:maybe :string]]
-                [:wc-brand-colors          {:optional true} [:maybe [:map-of :string :string]]]
-                [:wc-help-link             {:optional true} [:maybe [:enum "metabase" "custom" "hidden"]]]
-                [:wc-help-link-destination {:optional true} [:maybe :string]]]]
+   settings :- ::settings]
   (api/check-superuser)
   (setting/set-many! settings)
   {:ok true})
