@@ -188,6 +188,7 @@ export const createMockSettings = (
   "application-favicon-url": "",
   "wc-brand-colors": {},
   "wc-brand-logo-url": "",
+  "wc-brand-favicon-url": "",
   // eslint-disable-next-line metabase/no-literal-metabase-strings -- This is a mock
   "wc-brand-name": "Metabase",
   "free-oidc-enabled": false,

@@ -655,6 +655,7 @@ interface PublicSettings {
   // Metabase's `application-*` settings, these carry no `:feature` gate.
   "wc-brand-name": string;
   "wc-brand-logo-url": string;
+  "wc-brand-favicon-url": string;
   "wc-brand-colors": ColorSettings;
 }
 
