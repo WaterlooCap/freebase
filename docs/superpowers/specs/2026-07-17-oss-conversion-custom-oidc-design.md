@@ -1,4 +1,4 @@
-# Freebase: OSS Conversion + Custom OIDC Connector
+# Freebase: OSS Conversion + Custom OIDC and Branding
 
 **Date:** 2026-07-17
 **Status:** Design — approved for planning
@@ -11,28 +11,35 @@ license check bypassed*. `token_check.clj` is patched to fake a MetaStore respon
 return a hardcoded set of 58 premium features, so the instance behaves as
 "enterprise-unlimited" without a token.
 
-This is not sustainable or defensible. Of the 58 unlocked features, the deployment
-actually needs exactly one: **OIDC SSO**.
+This is not sustainable or defensible. A live audit of the production instance
+(see below) found that of those 58 features, **exactly two are actually in use**:
+OIDC SSO and whitelabel branding. The other 56 are pure liability — maintenance cost
+and licensing exposure for functionality nobody touches.
 
-This design converts the fork to a genuine OSS (AGPL) Metabase build and replaces the
-bypassed enterprise OIDC with an original OIDC connector written against Metabase's
-documented OSS authentication extension points.
+This design converts the fork to a genuine OSS (AGPL) build and reimplements those two
+features as original software written against Metabase's OSS extension points. The
+governing rule throughout is **rewrite, never bypass**: we do not remove Metabase's
+license checks to unlock Metabase's implementations. We write our own, using the AGPL
+machinery that upstream already ships and that AGPL explicitly permits us to modify.
 
 ## Goals
 
 - Run a genuine OSS Metabase build. No license bypass, no faked token, no ungated EE routes.
 - Provide OIDC SSO against the self-hosted Authentik IdP at `sso.waterloocap.com`.
+- Preserve Waterloo branding via an **original implementation**, not by defeating a gate.
 - Keep the fork delta small enough that upstream upgrades stay cheap.
 - Never phone home (telemetry / update checks stay off).
+
+All three ship in a **single cutover**, so the 20 external client users never see stock
+Metabase branding at any point.
 
 ## Non-goals
 
 - Multi-provider OIDC. One IdP (Authentik). YAGNI.
 - Group-claim → Metabase group sync. Four users; admin is granted manually.
 - SAML / JWT / SCIM. Not needed, not built.
-- **Custom branding.** Deferred to a follow-up spec — see "Deferred: branding" below.
-  Confirmed in use, but explicitly lower priority than OIDC and carries a licensing
-  judgment call that should not be smuggled in alongside this work.
+- EE's full whitelabel surface. We reimplement only the six settings actually in use —
+  not illustrations, landing page, loading message, Metabot toggle, or font selection.
 
 ## Production audit (2026-07-17)
 
@@ -75,36 +82,6 @@ tighter, never looser. **The strip cannot widen anyone's data access.**
 All internal. Three of the five active admins authenticate via OIDC; the remaining
 admin (`lmoulton@waterloocap.com`) uses a password and is a useful independent
 break-glass.
-
-## Deferred: branding
-
-`whitelabel` is genuinely in use — the instance is branded "Waterloo" with a custom
-logo, favicon, palette, and help link, and **20 external client users see that branding**.
-Stripping EE reverts the UI to stock Metabase appearance. This is a visible,
-client-facing change with commercial rather than security consequences.
-
-The settings live in the OSS tree (`src/metabase/appearance/settings.clj`) but each
-carries `:feature :whitelabel`; the getter returns the `"Metabase"` default rather than
-the stored value when the feature is absent. The code that *applies* branding is split:
-`enterprise/frontend/src/metabase-enterprise/whitelabel/` (EE) but also
-`frontend/src/metabase/ui/colors/colors.ts` and `GlobalStyles.tsx` (OSS).
-
-Three routes, recorded now so the reasoning is not lost:
-
-1. **Hardcode into the fork.** Change the logo asset and the built-in defaults in AGPL
-   source. The `:feature :whitelabel` gate stays intact and functioning — we change what
-   our fork's *built-in* appearance is, not unlock runtime configurability. Modifying
-   AGPL source is squarely permitted. Requires a rebuild to change.
-2. **Own settings + own application code.** Ungated `wc-brand-*` settings plus our own
-   frontend read-sites. Most conservative; most work; duplicates machinery.
-3. **Delete `:feature :whitelabel`.** ❌ **Explicitly rejected.** This is the same act as
-   the `token_check.clj` bypass, scoped to one feature: removing Metabase's license check
-   to unlock Metabase's implementation. Adopting it would defeat the entire purpose of
-   this project. Recorded here so it is never quietly reintroduced as a "quick win".
-
-Options 1 and 2 reach the same outcome by different roads, and option 1 arguably defeats
-the gate's *purpose* even though it does not remove it. That is a judgment call worth
-making deliberately, with the OIDC work already shipped and not blocked on it.
 
 ## Licensing rationale
 
@@ -333,6 +310,98 @@ in the OIDC cohort.
 Note the 42 password users are untouched by this work. They keep logging in exactly as
 they do today; only the 4 OIDC users change.
 
+## Phase 3 — Custom branding (rewrite, not bypass)
+
+`whitelabel` is genuinely in use: the instance is branded "Waterloo" with a custom logo,
+favicon, palette, and help link, and **20 external client users from five firms see that
+branding**. Losing it is a visible, client-facing regression — commercial rather than
+security. So we reimplement it.
+
+### The line between rewrite and bypass
+
+This is the distinction the entire project turns on, so it is stated explicitly.
+
+There are two gates on Metabase's whitelabel:
+
+```clj
+;; src/metabase/appearance/settings.clj  (OSS tree, but gated)
+(defsetting application-name ... :feature :whitelabel :default "Metabase")
+```
+```ts
+// frontend/src/metabase/ui/colors/colors.ts  (OSS)
+const shouldWhitelabel = !!tokenFeatures["whitelabel"];
+const whitelabelColors = (shouldWhitelabel && win.MetabaseBootstrap?.["application-colors"]) || {};
+```
+
+**Bypass (rejected):** keep using *their* `application-name` / `application-colors`
+settings and delete the checks guarding them. This is the same act as the
+`token_check.clj` bypass, scoped to one feature — removing Metabase's license check to
+unlock Metabase's implementation. It would defeat the entire purpose of this project.
+**Recorded here so it is never reintroduced as a "quick win".**
+
+**Rewrite (adopted):** define our own `wc-brand-*` settings, feed them into the AGPL
+theming machinery that already accepts arbitrary colors *as a parameter*, and never
+consult their gate or their settings at all. `shouldWhitelabel` is not deleted to unlock
+their feature — it becomes irrelevant because ours has no such check. Their gate stays
+intact and functional, guarding their setting, which we simply stop using.
+
+Our settings, our data, their AGPL rendering pipeline. Metabase's commercial license
+covers their code and their implementation; it does not cover the *idea* of showing your
+own logo, nor original code we write, nor our AGPL right to modify the OSS tree.
+
+### Why this is tractable
+
+Architecturally identical to the OIDC situation: the OSS tree holds the machinery, EE
+holds config UI and the gate. The OSS theming pipeline is already fully parameterized:
+
+- `deriveFullMetabaseTheme({ colorScheme, whitelabelColors })` — takes colors as input
+- `ThemeProvider` accepts a `whitelabelColors` prop
+- `AppThemeProvider` (rendered once at `app.js:91`, wrapping the whole app) holds it in
+  state and feeds `ThemeProvider`
+
+EE's 64-file whitelabel module is overwhelmingly admin config forms plus plugin
+overrides — not rendering.
+
+**Colors have a single injection point:** `MetabaseSettings.applicationColors()` inside
+`AppThemeProvider`. Swap what feeds it and the entire app rebrands.
+
+### Scope: whole app, not per-page
+
+Branding lands at the theme layer, so it propagates app-wide for free. Scoping to only
+the login and regular-use pages would require conditionally applying theme by route —
+strictly *more* work for a worse result. Admin pages come along at no cost.
+
+### Settings (ours, ungated)
+
+| Setting | Replaces | Current value |
+|---|---|---|
+| `wc-brand-name` | `application-name` | `"Waterloo"` |
+| `wc-brand-logo-url` | `application-logo-url` | 77KB data URI |
+| `wc-brand-favicon-url` | `application-favicon-url` | 20KB data URI |
+| `wc-brand-colors` | `application-colors` | brand `#3E90C5` + 8 accents |
+| `wc-help-link` | `help-link` | set |
+| `wc-help-link-destination` | `help-link-custom-destination` | set |
+
+Defined in a new `src/metabase/branding/settings.clj`, `:visibility :public` so they
+reach `MetabaseBootstrap`. Values migrate from the existing `application-*` rows.
+
+### Frontend touchpoints
+
+| File | Change |
+|---|---|
+| `AppThemeProvider.tsx` | Seed `whitelabelColors` from `wc-brand-colors`. **The single colors injection point.** |
+| `ui/colors/colors.ts` | Read `wc-brand-colors` for the static initial palette; drop the `tokenFeatures` read. |
+| `common/components/LogoIcon/LogoIcon.tsx` | Render `wc-brand-logo-url` when set. |
+| application-name read sites | Source from `wc-brand-name`. |
+| document head | Inject `wc-brand-favicon-url`. |
+| admin form | Our own branding settings page. |
+
+### Migration
+
+The existing `application-*` values are live in the app DB. A one-time migration copies
+them to the `wc-brand-*` keys so branding is identical across the cutover and nothing is
+re-uploaded by hand. The old rows are left in place, inert.
+
 ## Cutover plan
 
 Sequencing is not negotiable, because getting it wrong locks us out of our own instance.
@@ -343,27 +412,29 @@ Sequencing is not negotiable, because getting it wrong locks us out of our own i
    logging in with each — not merely by setting them.
    `lmoulton@waterloocap.com` is an active password-authenticated admin and serves as an
    independent break-glass if all four are somehow locked out.
-2. Build Phase 1 + Phase 2 together on a branch.
-3. Test locally: `docker-compose` against real `sso.waterloocap.com`.
-4. Clear the four stale OIDC identities — delete `auth_identity` rows bound to EE's
+2. Build Phases 1–3 together on a branch.
+3. Migrate `application-*` branding values → `wc-brand-*` keys.
+4. Test locally: `docker-compose` against real `sso.waterloocap.com`. Compare branding
+   side-by-side against prod (still on the EE build) before cutting over — this is the
+   cheapest moment to catch a palette or logo regression.
+5. Clear the four stale OIDC identities — delete `auth_identity` rows bound to EE's
    `:provider/custom-oidc` and null out `sso_source` on those users, so the new connector
    re-links cleanly on first login.
-5. Deploy **one** container that is already OSS *and* has working OIDC. Prod never sits
-   in a state with no SSO.
-6. Verify OIDC login for all four; confirm the three admins retained superuser.
+6. Deploy **one** container that is already OSS *and* has working OIDC *and* is branded.
+   Prod never sits in a state with no SSO or with stock branding.
+7. Verify OIDC login for all four; confirm the three admins retained superuser; confirm
+   branding renders for an external-user account.
 
 Password login is the permanent fallback: `disable-password-login` is EE-gated, so an
 OSS build cannot turn it off. That is our standing break-glass.
-
-Expect the UI to revert to stock Metabase branding at step 5. This is visible to the 20
-external client users. See "Deferred: branding".
 
 ## Risks
 
 | Risk | Severity | Mitigation |
 |---|---|---|
 | **Lockout.** Cutting `ee → oss` kills EE OIDC instantly; the 4 accounts with `sso_source=oidc` — 3 of them admins — cannot log in without a password. | High | Step 1 of cutover: set and *verify* passwords for all four before touching the build. `lmoulton` is an independent password admin. |
-| **Branding loss visible to 20 external client users.** `whitelabel` is genuinely in use; the strip reverts the UI to stock Metabase. | Medium | Accepted for now — cosmetic, not security. Follow-up spec; see "Deferred: branding". Flag to stakeholders before cutover. |
+| **Branding regression visible to 20 external client users.** | Medium | Phase 3 ships in the same cutover, so stock branding is never shown. Step 4 compares side-by-side against prod before deploying. |
+| **Backsliding into the whitelabel bypass.** Deleting `:feature :whitelabel` is a 5-minute fix that would silently reintroduce a license bypass. | Medium | Explicitly rejected and documented in Phase 3, plus a discriminating regression test — see "Testing". |
 | Losing an EE feature that is actually in use beyond SSO. | ~~Medium~~ **Resolved** | Audited live instance 2026-07-17. Only `sso-oidc` and `whitelabel` are in use; the other 56 are dead weight. |
 | External-user data isolation depends on EE. | ~~High~~ **Resolved** | Audited. All 80 group/db combos are `view-data=unrestricted`; isolation is by OSS collection permissions. The strip cannot widen access. |
 | `ee-sso-configured?` patch missed → login button never renders. | Medium | Covered by test; also caught immediately in local docker-compose. |
@@ -382,6 +453,23 @@ external client users. See "Deferred: branding".
 - **Negative** — confirm the OSS build genuinely has no EE: assert
   `(premium-features/has-feature? :sandboxes)` is false and that `/api/ee/*` 404s.
   This is the test that proves the bypass is actually gone.
+
+- **Anti-bypass (the important one).** A test that proves branding is a *rewrite* rather
+  than a re-gated bypass. Note that asserting `has-feature? :whitelabel` is false does
+  **not** discriminate — deleting the gate leaves the feature flag false anyway, so that
+  test passes either way. The discriminating assertion is that *Metabase's own gated
+  setting is still gated and untouched*:
+
+  ```clj
+  ;; Their setting must still return the stock default — proving the gate is intact.
+  (is (= "Metabase" (appearance.settings/application-name)))
+  ;; Ours carries the real branding.
+  (is (= "Waterloo" (branding.settings/wc-brand-name)))
+  ```
+
+  If someone "fixes" branding by deleting `:feature :whitelabel`, `application-name`
+  starts returning `"Waterloo"` and this test fails loudly. It is the executable form of
+  the licensing line, and it is why this test matters more than any other in the suite.
 
 ## Open questions
 
