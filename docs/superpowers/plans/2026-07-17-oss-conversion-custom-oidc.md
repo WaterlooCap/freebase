@@ -881,6 +881,8 @@ it must match the Authentik application config."
 
 **Why this is legitimate:** `auth_wrapper.clj` already mounts `/auth/sso/slack-connect` as an always-available OSS route and falls back to "ee-build-required" stubs for the rest. We add `/oidc` to the same always-available map. This is the established pattern with a working example.
 
+**Accepted design note — route shadowing (decided 2026-07-17):** EE's `metabase_enterprise/sso/api/sso.clj` defines `GET /auth/sso/:key`, where `:key` is any provider name. Our always-available `/auth/sso/oidc` is mounted *first* in `handlers/routes`, so in an EE-inclusive build it would shadow an EE provider literally keyed `"oidc"`. **This is accepted, not a bug, because freebase ships `MB_EDITION=oss`:** in production `config/ee-available?` is false, EE's `/auth/sso/:key` routes are never mounted, and there is nothing to shadow. The risk exists only in a hypothetical EE build with a provider named exactly `"oidc"` — which contradicts the premise of this project. We keep the clean `/auth/sso/oidc` path (and its Authentik callback registration) rather than rename to `/auth/sso/free-oidc` for a collision that cannot occur in our deployment. Revisit only if freebase ever runs an EE-inclusive build.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `test/metabase/server/auth_wrapper_test.clj`:
