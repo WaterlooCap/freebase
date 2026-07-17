@@ -229,66 +229,71 @@
                false)))
 
 ;;;
-;;; OIDC (Authentik)
+;;; OIDC (Authentik) — the "free-oidc" connector
 ;;;
-;;; Our own OIDC connector settings. Deliberately named `oidc-*` because
-;;; `sso-source-enabled?` below already dispatches :oidc -> (setting/get :oidc-enabled),
-;;; so that function needs no change.
+;;; Our own OIDC connector settings. Named `free-oidc-*` (NOT `oidc-*`) because the
+;;; enterprise SSO module registers settings literally named `oidc-enabled`/`oidc-configured`,
+;;; and defsetting throws on a duplicate registration -- bare `oidc-*` names would make the
+;;; app unbootable under any EE-inclusive build. The stamped sso_source stays :oidc, so the
+;;; `:oidc` case of `sso-source-enabled?` below is patched to read `free-oidc-enabled`.
 
-(defsetting oidc-issuer-uri
+(defsetting free-oidc-issuer-uri
   (deferred-tru "Issuer URI for your OIDC provider, e.g. https://sso.example.com/application/o/metabase/")
   :encryption :no
   :export?    false
   :audit      :getter)
 
-(defsetting oidc-client-id
+(defsetting free-oidc-client-id
   (deferred-tru "Client ID for your OIDC application")
   :encryption :no
   :export?    false
   :audit      :getter)
 
-(defsetting oidc-client-secret
+(defsetting free-oidc-client-secret
   (deferred-tru "Client Secret for your OIDC application")
   :encryption :when-encryption-key-set
   :export?    false
   :audit      :no-value
   :getter     (fn []
-                (-> (setting/get-value-of-type :string :oidc-client-secret)
+                (-> (setting/get-value-of-type :string :free-oidc-client-secret)
                     (u.str/mask 4))))
 
-(defn unobfuscated-oidc-client-secret
-  "Get the unobfuscated value of [[oidc-client-secret]]."
+(defn unobfuscated-free-oidc-client-secret
+  "Get the unobfuscated value of [[free-oidc-client-secret]]."
   []
-  (setting/get-value-of-type :string :oidc-client-secret))
+  (setting/get-value-of-type :string :free-oidc-client-secret))
 
-(defsetting oidc-scopes
+(defsetting free-oidc-scopes
   (deferred-tru "Space-separated OAuth2 scopes to request from the OIDC provider.")
   :encryption :no
   :export?    false
   :default    "openid email profile"
   :audit      :getter)
 
-(defsetting oidc-configured
+(defsetting free-oidc-configured
   (deferred-tru "Are the mandatory OIDC settings configured?")
   :type    :boolean
   :export? false
   :default false
   :setter  :none
   :getter  (fn [] (boolean
-                   (and (oidc-client-id)
-                        (setting/get-value-of-type :string :oidc-client-secret)
-                        (oidc-issuer-uri)))))
+                   (and (free-oidc-client-id)
+                        (setting/get-value-of-type :string :free-oidc-client-secret)
+                        (free-oidc-issuer-uri)))))
 
-(defsetting oidc-enabled
+(defsetting free-oidc-enabled
   (deferred-tru "Is OIDC authentication configured and enabled?")
-  :type    :boolean
-  :export? false
-  :default false
-  :audit   :getter
-  :getter  (fn []
-             (if (oidc-configured)
-               (setting/get-value-of-type :boolean :oidc-enabled)
-               false)))
+  :type       :boolean
+  :export?    false
+  :default    false
+  ;; :public so the unauthenticated login page can decide whether to show the SSO button.
+  ;; The client-id/secret/issuer settings above are intentionally NOT public.
+  :visibility :public
+  :audit      :getter
+  :getter     (fn []
+                (if (free-oidc-configured)
+                  (setting/get-value-of-type :boolean :free-oidc-enabled)
+                  false)))
 
 ;;;
 ;;; Google Auth
@@ -371,7 +376,9 @@
      ;; regardless of license status.
      :saml   (setting/get :saml-enabled)
      :jwt    (setting/get :jwt-enabled)
-     :oidc   (setting/get :oidc-enabled)
+     ;; was: :oidc (setting/get :oidc-enabled) -- our OSS connector's settings are
+     ;; named free-oidc-* to avoid colliding with the enterprise module's oidc-enabled.
+     :oidc   (free-oidc-enabled)
      :slack  (setting/get :slack-connect-enabled)
      :scim   (setting/get :scim-enabled)
      ;; Unknown sso_source -- treat as disabled to allow password reset
