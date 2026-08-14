@@ -42,6 +42,16 @@ services:
       MB_FREE_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
       MB_FREE_OIDC_CLIENT_ID: "${MB_FREE_OIDC_CLIENT_ID}"
       MB_FREE_OIDC_CLIENT_SECRET: "${MB_FREE_OIDC_CLIENT_SECRET}"
+      # REQUIRED: encrypts the OIDC state cookie (CSRF protection). Without it the SSO
+      # flow fails closed. Compose does not pass host env through unless declared here.
+      MB_ENCRYPTION_SECRET_KEY: "${MB_ENCRYPTION_SECRET_KEY}"
+      # Branding. On a prod DB the boot migration seeds wc-brand-* from the existing
+      # application-* values, so these are only needed on a FRESH database (like this
+      # stack's postgres volume). Env values override the DB when set. Logo/favicon are
+      # data URIs living in the prod DB — set MB_WC_BRAND_LOGO_URL / MB_WC_BRAND_FAVICON_URL
+      # here only if you want to pin them from the environment too.
+      MB_WC_BRAND_NAME: "Waterloo"
+      MB_WC_BRAND_COLORS: '{"brand":"#3E90C5"}'
     depends_on:
       db:
         condition: service_healthy
