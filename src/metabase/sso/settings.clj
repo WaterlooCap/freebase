@@ -229,6 +229,73 @@
                false)))
 
 ;;;
+;;; OIDC (Authentik) — the "free-oidc" connector
+;;;
+;;; Our own OIDC connector settings. Named `free-oidc-*` (NOT `oidc-*`) because the
+;;; enterprise SSO module registers settings literally named `oidc-enabled`/`oidc-configured`,
+;;; and defsetting throws on a duplicate registration -- bare `oidc-*` names would make the
+;;; app unbootable under any EE-inclusive build. The stamped sso_source stays :oidc, so the
+;;; `:oidc` case of `sso-source-enabled?` below is patched to read `free-oidc-enabled`.
+
+(defsetting free-oidc-issuer-uri
+  (deferred-tru "Issuer URI for your OIDC provider, e.g. https://sso.example.com/application/o/metabase/")
+  :encryption :no
+  :export?    false
+  :audit      :getter)
+
+(defsetting free-oidc-client-id
+  (deferred-tru "Client ID for your OIDC application")
+  :encryption :no
+  :export?    false
+  :audit      :getter)
+
+(defsetting free-oidc-client-secret
+  (deferred-tru "Client Secret for your OIDC application")
+  :encryption :when-encryption-key-set
+  :export?    false
+  :audit      :no-value
+  :getter     (fn []
+                (-> (setting/get-value-of-type :string :free-oidc-client-secret)
+                    (u.str/mask 4))))
+
+(defn unobfuscated-free-oidc-client-secret
+  "Get the unobfuscated value of [[free-oidc-client-secret]]."
+  []
+  (setting/get-value-of-type :string :free-oidc-client-secret))
+
+(defsetting free-oidc-scopes
+  (deferred-tru "Space-separated OAuth2 scopes to request from the OIDC provider.")
+  :encryption :no
+  :export?    false
+  :default    "openid email profile"
+  :audit      :getter)
+
+(defsetting free-oidc-configured
+  (deferred-tru "Are the mandatory OIDC settings configured?")
+  :type    :boolean
+  :export? false
+  :default false
+  :setter  :none
+  :getter  (fn [] (boolean
+                   (and (free-oidc-client-id)
+                        (setting/get-value-of-type :string :free-oidc-client-secret)
+                        (free-oidc-issuer-uri)))))
+
+(defsetting free-oidc-enabled
+  (deferred-tru "Is OIDC authentication configured and enabled?")
+  :type       :boolean
+  :export?    false
+  :default    false
+  ;; :public so the unauthenticated login page can decide whether to show the SSO button.
+  ;; The client-id/secret/issuer settings above are intentionally NOT public.
+  :visibility :public
+  :audit      :getter
+  :getter     (fn []
+                (if (free-oidc-configured)
+                  (setting/get-value-of-type :boolean :free-oidc-enabled)
+                  false)))
+
+;;;
 ;;; Google Auth
 ;;;
 
@@ -291,6 +358,8 @@
   []
   (or (google-auth-enabled)
       (ldap-enabled)
+      ;; Our OIDC connector is OSS, so it must not sit behind the ee-available? guard.
+      (free-oidc-enabled)
       (ee-sso-configured?)))
 
 (defn sso-source-enabled?
@@ -309,7 +378,9 @@
      ;; regardless of license status.
      :saml   (setting/get :saml-enabled)
      :jwt    (setting/get :jwt-enabled)
-     :oidc   (setting/get :oidc-enabled)
+     ;; was: :oidc (setting/get :oidc-enabled) -- our OSS connector's settings are
+     ;; named free-oidc-* to avoid colliding with the enterprise module's oidc-enabled.
+     :oidc   (free-oidc-enabled)
      :slack  (setting/get :slack-connect-enabled)
      :scim   (setting/get :scim-enabled)
      ;; Unknown sso_source -- treat as disabled to allow password reset

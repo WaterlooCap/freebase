@@ -21,7 +21,9 @@ import { getFont, getFontFiles } from "../../selectors";
 export const GlobalStyles = (): JSX.Element => {
   const font = useSelector(getFont);
   const fontFiles = useSelector(getFontFiles);
-  const whitelabelColors = useSetting("application-colors");
+  // Our own ungated branding setting, not Metabase's gated `application-colors`. This
+  // feeds the app-wide --mb-color-* CSS variables that CSS modules read directly.
+  const whitelabelColors = useSetting("wc-brand-colors");
 
   const sitePath = getSitePath();
   const theme = useMantineTheme();

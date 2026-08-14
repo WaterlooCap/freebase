@@ -7,6 +7,7 @@
    [clojure.string :as str]
    [hiccup.util]
    [metabase.appearance.core :as appearance]
+   [metabase.branding.core :as branding]
    [metabase.config.core :as config]
    [metabase.initialization-status.core :as init-status]
    [metabase.settings.core :as setting]
@@ -92,12 +93,19 @@
      :nonceJSON              (escape-script (json/encode nonce))
      :language               (hiccup.util/escape-html (or (i18n/user-locale-string) (system/site-locale)))
      :userColorScheme        (escape-script (json/encode (users-settings/color-scheme)))
-     :favicon                (hiccup.util/escape-html (let [custom-favicon (appearance/application-favicon-url)]
-                                                        (if (and config/is-dev?
-                                                                 (= custom-favicon "app/assets/img/favicon.ico"))
-                                                          "app/assets/img/favicon-dev.ico"
-                                                          custom-favicon)))
-     :applicationName        (hiccup.util/escape-html (appearance/application-name))
+     ;; favicon and <title> prefer our ungated wc-brand-* settings (see
+     ;; metabase.branding.settings); Metabase's gated application-* settings remain the
+     ;; fallback so an unbranded instance behaves exactly like upstream.
+     :favicon                (hiccup.util/escape-html (or (not-empty (branding/wc-brand-favicon-url))
+                                                          (let [custom-favicon (appearance/application-favicon-url)]
+                                                            (if (and config/is-dev?
+                                                                     (= custom-favicon "app/assets/img/favicon.ico"))
+                                                              "app/assets/img/favicon-dev.ico"
+                                                              custom-favicon))))
+     :applicationName        (hiccup.util/escape-html (let [brand-name (branding/wc-brand-name)]
+                                                        (if (str/blank? brand-name)
+                                                          (appearance/application-name)
+                                                          brand-name)))
      :uri                    (hiccup.util/escape-html uri)
      :baseHref               (hiccup.util/escape-html (base-href))
      :embedCode              (when embeddable? (embed/head uri))

@@ -436,6 +436,16 @@
                     :model/Dashboard
                     :model/Document}}
 
+  branding
+  {:team "UX West"
+   :api  #{metabase.branding.api
+           metabase.branding.core
+           metabase.branding.init}
+   :uses #{api
+           appearance
+           settings
+           util}}
+
   bug-reporting
   {:team "UX West"
    :api  #{metabase.bug-reporting.api
@@ -2032,6 +2042,7 @@
            api-keys
            app-db
            appearance
+           branding
            config
            driver
            embedding
@@ -2180,6 +2191,7 @@
   sso
   {:team "UX West"
    :api     #{metabase.sso.api
+              metabase.sso.api.oidc
               metabase.sso.api.slack-connect
               metabase.sso.core
               metabase.sso.init

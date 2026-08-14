@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Local dev launcher for the freebase fork — branded + OIDC-enabled out of the box.
+#
+#   bin/dev-local backend    # Clojure backend on :3000 (H2 app DB, nREPL, --hot)
+#   bin/dev-local frontend   # rspack hot dev server on :8080 (builds cljs first)
+#
+# The IntelliJ run configurations in .run/ call this script, but it works standalone.
+# Every MB_* value below is a dev default and can be overridden from the environment.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+mode="${1:-}"
+if [ "$mode" != "backend" ] && [ "$mode" != "frontend" ]; then
+  echo "usage: bin/dev-local backend|frontend" >&2
+  exit 64
+fi
+
+# IDEA runs this in a non-login shell, so Homebrew/nvm bins are not on PATH.
+export PATH="/opt/homebrew/bin:$PATH"
+if [ -z "${JAVA_HOME:-}" ] && [ -d /opt/homebrew/opt/openjdk@21 ]; then
+  export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+fi
+if [ -n "${JAVA_HOME:-}" ]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
+if ! command -v java >/dev/null; then
+  echo "No java on PATH — install openjdk@21 (brew install openjdk@21) or set JAVA_HOME" >&2
+  exit 1
+fi
+if ! command -v bun >/dev/null; then
+  for d in "$HOME/.bun/bin" "$HOME"/.nvm/versions/node/*/bin; do
+    if [ -x "$d/bun" ]; then
+      export PATH="$d:$PATH"
+      break
+    fi
+  done
+fi
+
+if [ "$mode" = "frontend" ]; then
+  exec bun run build-hot
+fi
+
+# --- backend ---
+
+# Dev-only app DB. NOT the repo-root metabase.db.mv.db — that one is encrypted with a
+# key nobody has anymore. /*.mv.db is gitignored, so this file stays out of git.
+export MB_DB_FILE="${MB_DB_FILE:-$PWD/metabase-branded.db}"
+export MB_JETTY_PORT="${MB_JETTY_PORT:-3000}"
+# Dev-only key; must stay stable across runs or the H2 DB becomes unreadable.
+export MB_ENCRYPTION_SECRET_KEY="${MB_ENCRYPTION_SECRET_KEY:-dev-only-key-0123456789abcdefghij}"
+
+# OIDC: fake values are enough to render the "Sign in with SSO" button on the login
+# page; actually clicking it needs a real IdP (set the real Authentik values to test).
+export MB_FREE_OIDC_ENABLED="${MB_FREE_OIDC_ENABLED:-true}"
+export MB_FREE_OIDC_ISSUER_URI="${MB_FREE_OIDC_ISSUER_URI:-https://sso.example.test/application/o/metabase/}"
+export MB_FREE_OIDC_CLIENT_ID="${MB_FREE_OIDC_CLIENT_ID:-dev-client}"
+export MB_FREE_OIDC_CLIENT_SECRET="${MB_FREE_OIDC_CLIENT_SECRET:-dev-secret}"
+
+# Waterloo branding — the real brand assets and the exact palette prod serves today
+# (read from analytics.waterloocap.com's public settings). Prod itself gets these from
+# the boot migration (application-* -> wc-brand-*), so these values only matter for dev
+# and other fresh databases. Relative asset URLs resolve against the page's <base href>,
+# matching Metabase's own "app/assets/img/favicon.ico" convention.
+export MB_WC_BRAND_NAME="${MB_WC_BRAND_NAME:-Waterloo}"
+export MB_WC_BRAND_LOGO_URL="${MB_WC_BRAND_LOGO_URL:-app/assets/img/waterloo-logo.svg}"
+export MB_WC_BRAND_FAVICON_URL="${MB_WC_BRAND_FAVICON_URL:-app/assets/img/waterloo-favicon.ico}"
+if [ -z "${MB_WC_BRAND_COLORS:-}" ]; then
+  MB_WC_BRAND_COLORS='{"brand":"#3E90C5","accent0":"#3E90C5","accent1":"#54A140","accent2":"#A32945","accent3":"#365072","accent4":"#C98A1A","accent5":"#98C3DF","accent6":"#828282","accent7":"#D9D8D6","filter":"#365072","summarize":"#54A140"}'
+fi
+export MB_WC_BRAND_COLORS
+
+export MB_ANON_TRACKING_ENABLED="${MB_ANON_TRACKING_ENABLED:-false}"
+export MB_CHECK_FOR_UPDATES="${MB_CHECK_FOR_UPDATES:-false}"
+
+exec clojure -M:run:dev:dev-start --hot
