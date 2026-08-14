@@ -435,6 +435,7 @@
   branding
   {:team "UX West"
    :api  #{metabase.branding.api
+           metabase.branding.core
            metabase.branding.init}
    :uses #{api
            appearance
@@ -1973,6 +1974,7 @@
            api-keys
            app-db
            appearance
+           branding
            config
            driver
            embedding
