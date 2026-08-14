@@ -73,6 +73,20 @@
               (#'index/load-localization "yy"))
             json/decode)))))
 
+(deftest wc-branding-template-parameters-test
+  (testing "server-rendered favicon and <title> use our ungated wc-brand-* settings when set"
+    (mt/with-temporary-setting-values [wc-brand-name        "Waterloo"
+                                       wc-brand-favicon-url "https://cdn.example.com/waterloo.ico"]
+      (let [{:keys [favicon applicationName]} (#'index/template-parameters false {})]
+        (is (= "https://cdn.example.com/waterloo.ico" favicon))
+        (is (= "Waterloo" applicationName)))))
+  (testing "fall back to stock Metabase favicon and name when wc-brand-* are unset"
+    (mt/with-temporary-setting-values [wc-brand-name        nil
+                                       wc-brand-favicon-url nil]
+      (let [{:keys [favicon applicationName]} (#'index/template-parameters false {})]
+        (is (re-find #"favicon" favicon))
+        (is (= "Metabase" applicationName))))))
+
 (deftest load-entrypoint-template-contains-user-locale
   (binding [i18n/*user-locale* "es"]
     (is (= "es" (:language (#'index/template-parameters false {})))))

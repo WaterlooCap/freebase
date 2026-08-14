@@ -14,12 +14,10 @@
   :doc        false)
 
 (defsetting check-for-updates
-  (deferred-tru "Checking for updates is disabled.")
+  (deferred-tru "Identify when new versions of Metabase are available.")
   :type    :boolean
   :audit   :getter
-  :default false
-  :getter  (fn [] false)
-  :setter  :none)
+  :default true)
 
 (defsetting upgrade-threshold
   (deferred-tru "Threshold (value in 0-100) indicating at which threshold it should offer an upgrade to the latest major version.")

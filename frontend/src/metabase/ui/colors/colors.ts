@@ -7,10 +7,11 @@ import { deriveFullMetabaseTheme } from "./derive-theme";
 import type { MetabaseColorKey } from "./types/color-keys";
 
 const win = typeof window !== "undefined" ? window : ({} as Window);
-const tokenFeatures = win.MetabaseBootstrap?.["token-features"] ?? {};
-const shouldWhitelabel = !!tokenFeatures["whitelabel"];
-const whitelabelColors =
-  (shouldWhitelabel && win.MetabaseBootstrap?.["application-colors"]) || {};
+// Our own branding setting, not Metabase's gated `application-colors`. We never read
+// their setting and never consult `token-features` -- their whitelabel gate stays
+// intact and functional, guarding a setting we do not use. See
+// src/metabase/branding/settings.clj.
+const whitelabelColors = win.MetabaseBootstrap?.["wc-brand-colors"] || {};
 
 const baseColors = getBaseColorsForThemeDefinitionOnly();
 

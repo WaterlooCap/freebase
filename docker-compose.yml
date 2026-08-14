@@ -18,7 +18,7 @@ services:
     build:
       context: .
       args:
-        MB_EDITION: ee
+        MB_EDITION: oss
         VERSION: freebase-1.0
     container_name: freebase-app
     ports:
@@ -30,6 +30,28 @@ services:
       MB_DB_USER: metabase_user
       MB_DB_PASS: metabase_password
       MB_DB_HOST: db
+      # Telemetry off. These replace the fork's old hardcoded getters —
+      # same behavior, zero fork delta. Do NOT re-patch the source.
+      MB_ANON_TRACKING_ENABLED: "false"
+      MB_SNOWPLOW_AVAILABLE: "false"
+      MB_CHECK_FOR_UPDATES: "false"
+      # OIDC (Authentik). Named MB_FREE_OIDC_* to match the free-oidc-* settings
+      # (bare oidc-* collides with enterprise's settings). Real secrets come from the
+      # deploy environment, never committed.
+      MB_FREE_OIDC_ENABLED: "true"
+      MB_FREE_OIDC_ISSUER_URI: "https://sso.waterloocap.com/application/o/metabase/"
+      MB_FREE_OIDC_CLIENT_ID: "${MB_FREE_OIDC_CLIENT_ID}"
+      MB_FREE_OIDC_CLIENT_SECRET: "${MB_FREE_OIDC_CLIENT_SECRET}"
+      # REQUIRED: encrypts the OIDC state cookie (CSRF protection). Without it the SSO
+      # flow fails closed. Compose does not pass host env through unless declared here.
+      MB_ENCRYPTION_SECRET_KEY: "${MB_ENCRYPTION_SECRET_KEY}"
+      # Branding. On a prod DB the boot migration seeds wc-brand-* from the existing
+      # application-* values, so these are only needed on a FRESH database (like this
+      # stack's postgres volume). Env values override the DB when set. Logo/favicon are
+      # data URIs living in the prod DB — set MB_WC_BRAND_LOGO_URL / MB_WC_BRAND_FAVICON_URL
+      # here only if you want to pin them from the environment too.
+      MB_WC_BRAND_NAME: "Waterloo"
+      MB_WC_BRAND_COLORS: '{"brand":"#3E90C5"}'
     depends_on:
       db:
         condition: service_healthy

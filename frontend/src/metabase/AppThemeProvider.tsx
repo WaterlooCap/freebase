@@ -117,9 +117,10 @@ export const AppThemeProvider = (props: AppThemeProviderProps) => {
   );
 
   // Whitelabel colors management
+  // Seed from our own wc-brand-colors rather than Metabase's gated application-colors.
   const [whitelabelColors, setWhitelabelColors] = useState<
     ColorSettings | undefined
-  >(() => MetabaseSettings.applicationColors());
+  >(() => MetabaseSettings.get("wc-brand-colors") ?? undefined);
 
   const handleUpdateWhitelabelColors = useCallback(
     (nextColors: ColorSettings) => {
