@@ -2,8 +2,9 @@ import { useEffect } from "react";
 import { useTimeout } from "react-use";
 import { t } from "ttag";
 
-import { DefaultLogoIcon } from "metabase/common/components/LogoIcon";
+import { LogoIcon } from "metabase/common/components/LogoIcon";
 import { useDispatch, useSelector } from "metabase/redux";
+import { getApplicationName } from "metabase/selectors/whitelabel";
 
 import { goToNextStep, loadDefaults } from "../../actions";
 import { LOCALE_TIMEOUT } from "../../constants";
@@ -21,6 +22,7 @@ import {
 export const WelcomePage = (): JSX.Element | null => {
   const [isElapsed] = useTimeout(LOCALE_TIMEOUT);
   const isLocaleLoaded = useSelector(getIsLocaleLoaded);
+  const applicationName = useSelector(getApplicationName);
   const dispatch = useDispatch();
 
   const handleStepSubmit = () => {
@@ -38,8 +40,8 @@ export const WelcomePage = (): JSX.Element | null => {
   return (
     <PageRoot data-testid="welcome-page">
       <PageMain>
-        <DefaultLogoIcon height={118} />
-        <PageTitle>{t`Welcome to Metabase`}</PageTitle>
+        <LogoIcon height={118} />
+        <PageTitle>{t`Welcome to ${applicationName}`}</PageTitle>
         <PageBody>
           {t`Looks like everything is working.`}{" "}
           {t`Now let’s get to know you, connect to your data, and start finding you some answers!`}
