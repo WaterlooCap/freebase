@@ -138,7 +138,7 @@
       ;; actually if we are going to `throw-exceptions` we'll rethrow the original but attempt to humanize the message
       ;; first
       (catch Throwable e
-        (log/error e "Failed to connect to Database")
+        (log/errorf "Failed to connect to Database: %s" (ex-message e))
         (throw (if-let [humanized-message (some->> (u/all-ex-messages e)
                                                    (driver/humanize-connection-error-message driver))]
                  (let [error-data (cond
@@ -155,7 +155,7 @@
     (try
       (can-connect-with-details? driver details-map :throw-exceptions)
       (catch Throwable e
-        (log/error e "Failed to connect to database")
+        (log/errorf "Failed to connect to database: %s" (ex-message e))
         false))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -211,7 +211,7 @@
     (u/with-timeout supports?-timeout-ms
       (driver/database-supports? driver feature database))
     (catch Throwable e
-      (log/error e (u/format-color 'red "Failed to check feature '%s' for database '%s'" (u/qualified-name feature) (:name database)))
+      (log/error (u/format-color 'red "Failed to check feature '%s' for database %s: %s" (u/qualified-name feature) (:id database) (ex-message e)))
       false)))
 
 (def ^:private memoized-supports?*
@@ -283,17 +283,11 @@
         f (if *memoize-supports?* memoized-features* features*)]
     (f driver database)))
 
-(mu/defn- supported-in-environment?
-  "Returns true if a driver is supported in the the current metabase environment. As implemented this just disallows the
-  sqlite driver on hosted metabase because hosted metabase does not support uploading a SQLite file for use."
-  [driver :- :keyword]
-  (or (not (premium-features/is-hosted?))
-      (not= :sqlite (keyword driver))))
-
 (defn available-drivers
   "Return a set of all currently available drivers."
   []
-  (into #{} (filter #(and (driver/available? %) (supported-in-environment? %)))
+  (into #{}
+        (filter driver/available?)
         (descendants driver/hierarchy :metabase.driver/driver)))
 
 (mu/defn semantic-version-gte :- :boolean
@@ -374,7 +368,7 @@
   (let [content (or placeholder
                     (try (getter)
                          (catch Throwable e
-                           (log/errorf e "Error invoking getter for connection property %s" (:name conn-prop)))))]
+                           (log/errorf "Error invoking getter for connection property %s: %s" (:name conn-prop) (ex-message e)))))]
     (when (string? content)
       (-> conn-prop
           (assoc :placeholder content)
@@ -385,7 +379,7 @@
   [{:keys [check] :as conn-prop}]
   (if (try (check)
            (catch Throwable e
-             (log/errorf e "Error invoking getter for connection property %s" (:name conn-prop))))
+             (log/errorf "Error invoking getter for connection property %s: %s" (:name conn-prop) (ex-message e))))
     [(-> conn-prop
          (assoc :type "section")
          (dissoc :check))]
@@ -601,27 +595,41 @@
     "official"
     "community"))
 
+(defn- creatable?
+  "Whether users may select this driver to create a new data warehouse connection, given `context` -- a map describing
+  the environment, currently `{:hosted? <boolean>}`. Defaults to true. A driver registered only to power an
+  internal/bundled database -- e.g. SQLite, which backs the bundled Sample Database but is not offered to Cloud users
+  as a warehouse -- returns false in the contexts where it is not user-creatable, so it is omitted from the
+  add-database engine list there. Affects only the engine list shown to users; the driver stays registered and
+  `available?` for internal use."
+  [driver {:keys [hosted?]}]
+  (not (and
+        (= driver :sqlite)
+        hosted?)))
+
 (defn available-drivers-info
   "Return info about all currently available drivers, including their connection properties fields and supported
   features. The output of `driver/connection-properties` is passed through `connection-props-server->client` before
   being returned, to handle any transformation between the server side and client side representation."
   []
-  (persistent!
-   (reduce (fn [acc driver]
-             (if-some [props (try
-                               (->> (driver/connection-properties driver)
-                                    (connection-props-server->client driver))
-                               (catch Throwable e
-                                 (log/errorf e "Unable to determine connection properties for driver %s" driver)))]
-               ;; TODO - maybe we should rename `details-fields` -> `connection-properties` on the FE as well?
-               (assoc! acc driver {:source {:type (driver-source (name driver))
-                                            :contact (driver/contact-info driver)}
-                                   :details-fields props
-                                   :driver-name    (driver/display-name driver)
-                                   :superseded-by  (driver/superseded-by driver)
-                                   :extra-info     (driver/extra-info driver)})
-               acc))
-           (transient {}) (available-drivers))))
+  (let [context {:hosted? (premium-features/is-hosted?)}]
+    (persistent!
+     (reduce (fn [acc driver]
+               (if-some [props (try
+                                 (->> (driver/connection-properties driver)
+                                      (connection-props-server->client driver))
+                                 (catch Throwable e
+                                   (log/errorf "Unable to determine connection properties for driver %s: %s" driver (ex-message e))))]
+                 ;; TODO - maybe we should rename `details-fields` -> `connection-properties` on the FE as well?
+                 (assoc! acc driver {:source         {:type    (driver-source (name driver))
+                                                      :contact (driver/contact-info driver)}
+                                     :details-fields props
+                                     :driver-name    (driver/display-name driver)
+                                     :superseded-by  (driver/superseded-by driver)
+                                     :creatable?     (creatable? driver context)
+                                     :extra-info     (driver/extra-info driver)})
+                 acc))
+             (transient {}) (available-drivers)))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                             TLS Helpers                                                        |

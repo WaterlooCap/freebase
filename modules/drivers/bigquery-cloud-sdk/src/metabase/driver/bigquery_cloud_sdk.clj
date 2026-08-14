@@ -164,7 +164,7 @@
   ;; check whether we can connect by seeing whether listing datasets succeeds
   (let [[success? datasets] (try [true (list-datasets details)]
                                  (catch Exception e
-                                   (log/error e "Exception caught in :bigquery-cloud-sdk can-connect?")
+                                   (log/errorf "Exception caught in :bigquery-cloud-sdk can-connect?: %s" (ex-message e))
                                    [false nil]))]
     (cond
       (not success?)
@@ -455,6 +455,15 @@
     (sort-by (juxt :table-name :database-position :name)
              (describe-dataset-rows nested-lookup dataset-id table-name columns))))
 
+(def ^:private max-data-type-length
+  "Truncate `INFORMATION_SCHEMA` `data_type` strings to this many characters, in SQL. Only short prefixes are ever
+  consumed (see [[raw-type->database+base-type]]; the longest verbatim type is `RANGE<TIMESTAMP>`), but a STRUCT
+  column's `data_type` spells out its entire nested schema, and the `COLUMN_FIELD_PATHS` join repeats it on every
+  nested-leaf row -- O(n^2) bytes for a column with n leaves. Dynamic-key STRUCTs (e.g. log-sink tables whose JSON
+  payloads use user IDs as keys) can reach thousands of leaves with ~270KB type strings, which OOMed sync before this
+  truncation."
+  200)
+
 (defn- describe-dataset-fields-reducible
   "Reducibly describe the fields (including nested STRUCT fields) of `table-names` within `dataset-id`.
 
@@ -473,10 +482,12 @@
                (query-honeysql driver database
                                {:select    [[:c.table_name :table_name]
                                             [:c.column_name :column_name]
-                                            [:c.data_type :data_type]
+                                            ;; truncated in SQL: a STRUCT's data_type repeats its whole nested schema
+                                            ;; on every leaf row of the join, O(n^2) bytes -- see [[max-data-type-length]]
+                                            [[:substr :c.data_type 1 max-data-type-length] :data_type]
                                             [:c.ordinal_position :ordinal_position]
                                             [[:= :c.is_partitioning_column "YES"] :partitioned]
-                                            [:p.data_type :nested_data_type]
+                                            [[:substr :p.data_type 1 max-data-type-length] :nested_data_type]
                                             [:p.field_path :field_path]]
                                 :from      [[(information-schema-table project-id dataset-id "COLUMNS") :c]]
                                 :left-join [[(information-schema-table project-id dataset-id "COLUMN_FIELD_PATHS") :p]
@@ -489,7 +500,7 @@
                                 :where     [:in :c.table_name table-names]
                                 :order-by  [:c.table_name]})
                (catch Throwable e
-                 (log/warnf e "error in describe-fields for dataset: %s" dataset-id)))]
+                 (log/warnf "error in describe-fields for dataset %s: %s" dataset-id (ex-message e))))]
     (eduction
      (partition-by :table_name)
      (mapcat #(describe-dataset-table dataset-id %))
@@ -509,7 +520,7 @@
                                :from [[(information-schema-table project-id dataset-id "TABLES") :t]]
                                :order-by [:table_name]}))
     (catch Throwable e
-      (log/warnf e "error in list-table-names for dataset: %s" dataset-id))))
+      (log/warnf "error in list-table-names for dataset %s: %s" dataset-id (ex-message e)))))
 
 (defmethod driver/describe-fields :bigquery-cloud-sdk
   [driver database & {:keys [schema-names table-names]}]
@@ -738,6 +749,30 @@
   page, then adaptive sizing) by default, but override for testing."
   nil)
 
+(def ^:private max-sql-query-length-chars
+  "BigQuery's maximum standard SQL query length, in characters — counting comments and whitespace exactly as
+  BigQuery does. BigQuery rejects jobs above this with a raw 400 `INVALID_ARGUMENT` ('The query is too large ...').
+  See
+  https://cloud.google.com/bigquery/quotas#query_limits ('Maximum query length: 1 MB')."
+  (* 1024 1024))
+
+(defn- validate-query-length!
+  "Throw a localized `invalid-query` error if `sql` exceeds [[max-sql-query-length-chars]], before the request
+  reaches BigQuery. `sql` is the final payload — Metabase's `-- remark` comment, appended in
+  [[driver/execute-reducible-query]], is already included — so it is counted exactly as BigQuery will count it. The
+  raw 400 from BigQuery remains a fallback if this limit ever drifts from BigQuery's own."
+  [^String sql parameters]
+  (let [len (count sql)]
+    (when (> len max-sql-query-length-chars)
+      (throw
+       (ex-info
+        (tru (str "This query is too large for BigQuery ({0} characters; the maximum is {1}). "
+                  "Try reducing the number of selected fields, filter values, or rewriting the query to make it shorter.")
+             len max-sql-query-length-chars)
+        {:type       driver-api/qp.error-type.invalid-query
+         :sql        sql
+         :parameters parameters})))))
+
 (defn- throw-invalid-query [e sql parameters]
   (throw (ex-info (tru "Error executing query: {0}" (ex-message e))
                   {:type driver-api/qp.error-type.invalid-query, :sql sql, :parameters parameters}
@@ -782,12 +817,20 @@
      ;; realizing more rows as per the maximum result size
      (.setMaxResults *page-size*))))
 
+(defn- query-results-page
+  "Fetch one page of query-job results from `job` with the given `options`. A thin wrapper over `.getQueryResults`
+  that exists as a redefable seam so tests can simulate BigQuery returning nil for a later page."
+  ^TableResult [^Job job options]
+  (.getQueryResults job options))
+
 (defn- adaptive-query-next-page
   "Adaptive page-advance for query-job results (the regular execution path), mirroring [[adaptive-sample-next-page]]
   but paging via `getQueryResults` -- the query result's own `.getNextPage` re-uses the original page size and can't
   be re-sized. Measures the just-consumed page's real bytes/row and re-issues the next page with a `pageSize`
   targeting [[*page-byte-budget*]], so a wide or heavy result fetches fewer rows per page instead of holding a
-  large parsed page in memory. Returns nil once the result set is exhausted."
+  large parsed page in memory. Returns nil once the result set is exhausted; throws if BigQuery reports another
+  page is available (non-blank page token) but fails to return it, so we surface the error instead of silently
+  truncating the result set."
   [^Job job]
   (let [budget (long *page-byte-budget*)
         seen   (atom {:bytes 0, :rows 0})]
@@ -801,11 +844,12 @@
                                                             :rows  (+ (long (:rows s)) (long page-rows))}))]
             (log/trace "BigQuery: Fetching new page")
             (*page-callback*)
-            (.getQueryResults job
-                              (u/varargs BigQuery$QueryResultsOption
-                                [(BigQuery$QueryResultsOption/pageSize
-                                  (next-page-size budget bytes rows Long/MAX_VALUE))
-                                 (BigQuery$QueryResultsOption/pageToken token)]))))))))
+            (or (query-results-page job
+                                    (u/varargs BigQuery$QueryResultsOption
+                                      [(BigQuery$QueryResultsOption/pageSize
+                                        (next-page-size budget bytes rows Long/MAX_VALUE))
+                                       (BigQuery$QueryResultsOption/pageToken token)]))
+                (throw (ex-info "Cannot get next page from BigQuery" {})))))))))
 
 (defn- reducible-bigquery-results
   "Reducible over the rows of `page` and its successors. `next-page` is the adaptive page-advance: given the
@@ -840,7 +884,7 @@
              (let [acc' (try
                           (rf acc (.next it))
                           (catch Throwable e
-                            (log/errorf e "error in reducible-bigquery-results! %d rows" n)
+                            (log/errorf "error in reducible-bigquery-results! %d rows: %s" n (ex-message e))
                             (throw e)))]
                (recur page it acc' (inc n)))
 
@@ -868,7 +912,7 @@
                                  (.cancel client job-id)
                                  (catch Throwable e
                                    ;; Just log exception if it can't be cancelled.
-                                   (log/debugf e "Could not cancel job-id: %s" job-id)))
+                                   (log/debugf "Could not cancel job-id %s: %s" job-id (ex-message e))))
         ^Schema schema (some-> page .getSchema)
         parsers (some-> schema get-field-parsers)
         columns (for [column (some-> schema .getFields fields->metabase-field-info)]
@@ -885,6 +929,7 @@
 (defn- execute-bigquery
   [respond database-details ^String sql parameters cancel-chan]
   {:pre [(not (str/blank? sql))]}
+  (validate-query-length! sql parameters)
   ;; Kicking off two async jobs:
   ;; - Waiting for the cancel-chan to get either a cancel message or to be closed.
   ;; - Running the BigQuery execution in another thread, since it's blocking.
@@ -926,7 +971,7 @@
         :cancel (try
                   (.cancel client job-id)
                   (catch Throwable t
-                    (log/warnf t "Couldn't cancel job %s" job-id))
+                    (log/warnf "Couldn't cancel job %s: %s" job-id (ex-message t)))
                   (finally
                     (throw-cancelled sql parameters)))
         :ready  (bigquery-execute-response result job client respond cancel-chan)))))
@@ -962,7 +1007,7 @@
     (binding [bigquery.common/*bigquery-timezone-id* (effective-query-timezone-id database)]
       (log/tracef "Running BigQuery query in %s timezone" bigquery.common/*bigquery-timezone-id*)
       (let [sql (if (:include-user-id-and-hash (driver.conn/effective-details database) true)
-                  (str "-- " (driver-api/query->remark :bigquery-cloud-sdk outer-query) "\n" sql)
+                  (str sql "\n\n-- " (driver-api/query->remark :bigquery-cloud-sdk outer-query))
                   sql)]
         (*process-native* respond database sql params (driver-api/canceled-chan))))))
 
@@ -997,10 +1042,16 @@
                               ;; tests expect the converted values.
                               :set-timezone                     true
                               :split-part                       true
+                              ;; This driver reports inaccurate `:rows-affected` counts; the transforms layer
+                              ;; falls back to a native `COUNT(*)` on the CTAS path.
+                              ;; TODO: fix `execute-raw-queries!` to return accurate row counts for DDL
+                              ;; statements by using a different driver-native API for affected-row counts.
+                              :transforms/accurate-rows-affected false
                               :transforms/python                true
                               :transforms/table                 true
                               ;; Workspace isolation using service account impersonation
-                              :workspace                        true}]
+                              ;; Tearing down workspaces is not working right currently
+                              :workspace                        false}]
   (defmethod driver/database-supports? [:bigquery-cloud-sdk feature] [_driver _feature _db] supported?))
 
 (defmethod driver/qualified-name-components :bigquery-cloud-sdk
@@ -1209,16 +1260,16 @@
       (doall
        (for [query queries]
          (let [[sql params] (if (string? query) [query] query)
-               _ (log/debugf "Executing BigQuery DDL: %s" sql)
+               _ (log/debug "Executing BigQuery DDL")
                job-config (-> (QueryJobConfiguration/newBuilder sql)
                               (bigquery.params/set-parameters! params)
                               (.setUseLegacySql false)
                               (.build))
                table-result (.query client job-config (into-array BigQuery$JobOption []))]
-           (or (and table-result (.getTotalRows table-result))
-               0))))
+           {:rows-affected (or (and table-result (.getTotalRows table-result))
+                               0)})))
       (catch Exception e
-        (log/error e "Error executing BigQuery DDL")
+        (log/errorf "Error executing BigQuery DDL: %s" (ex-message e))
         (throw e)))))
 
 (defmethod driver/drop-transform-target! [:bigquery-cloud-sdk :table]

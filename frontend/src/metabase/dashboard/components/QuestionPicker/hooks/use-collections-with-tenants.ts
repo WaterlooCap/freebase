@@ -2,8 +2,8 @@ import { useMemo } from "react";
 import { t } from "ttag";
 
 import { skipToken, useListCollectionsTreeQuery } from "metabase/api";
-import { ROOT_COLLECTION } from "metabase/collections/constants";
-import getExpandedCollectionsById from "metabase/collections/getExpandedCollectionsById";
+import { ROOT_COLLECTION } from "metabase/common/collections/constants";
+import getExpandedCollectionsById from "metabase/common/collections/getExpandedCollectionsById";
 import { useSetting } from "metabase/common/hooks/use-setting";
 import { PLUGIN_TENANTS } from "metabase/plugins";
 import { useSelector } from "metabase/redux";
@@ -124,14 +124,14 @@ export function mergeSharedCollections(
     children: (sharedRoot?.children ?? []).map((child) => ({
       ...child,
       parent: null,
-    })) as ExpandedCollectionNode[],
+    })),
   };
 
   // Fix circular parent reference now that sharedSyntheticRoot exists
   sharedSyntheticRoot.children = sharedSyntheticRoot.children.map((child) => ({
     ...child,
     parent: sharedSyntheticRoot,
-  })) as ExpandedCollectionNode[];
+  }));
 
   // Wire up the top-level children
   syntheticTopLevel.children = [rootCollection, sharedSyntheticRoot];
@@ -193,7 +193,7 @@ export function mergeSharedCollections(
       ...collectionNode,
       // Rewrite path: Collections > Our Analytics > ...
       path: [COLLECTIONS_TOP_LEVEL_ID, ...collectionNode.path],
-    } as ExpandedCollectionNode;
+    };
   }
 
   mergedCollectionsById[SHARED_TENANT_COLLECTIONS_ROOT_ID] =

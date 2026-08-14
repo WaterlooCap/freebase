@@ -3,7 +3,6 @@
   (:require
    [clojure.string :as str]
    [medley.core :as m]
-   [metabase-enterprise.semantic-search.db.datasource :as semantic.db.datasource]
    [metabase-enterprise.semantic-search.embedders]
    [metabase-enterprise.semantic-search.embedding]
    [metabase-enterprise.semantic-search.env :as semantic.env]
@@ -11,12 +10,12 @@
    [metabase-enterprise.semantic-search.pgvector-api :as semantic.pgvector-api]
    [metabase-enterprise.semantic-search.repair :as semantic.repair]
    [metabase-enterprise.semantic-search.settings :as semantic.settings]
+   [metabase-enterprise.semantic-search.util :as semantic.util]
    [metabase.analytics-interface.core :as analytics]
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.search.config :as search.config]
    [metabase.search.engine :as search.engine]
    [metabase.tracing.core :as tracing]
-   [metabase.util :as u]
    [metabase.util.log :as log]
    [potemkin :as p]
    [toucan2.realize :as t2.realize]))
@@ -28,22 +27,32 @@
  [metabase-enterprise.semantic-search.embedding
   get-embeddings-batch])
 
-(defn- fallback-engine
-  "Find the highest priority search engine available for fallback."
-  []
-  (u/seek #(not= :search.engine/semantic %) (search.engine/supported-engines)))
+(defn- fallback-engine []
+  (search.engine/fallback-engine :search.engine/semantic))
 
 (defn- index-active? [pgvector index-metadata]
   (boolean (semantic.index-metadata/get-active-index-state pgvector index-metadata)))
 
-;; TODO: url should likely reside in settings
 (defenterprise supported?
   "Enterprise implementation of semantic search engine support check."
   :feature :semantic-search
   []
-  (and
-   (some? semantic.db.datasource/db-url)
-   (semantic.settings/semantic-search-enabled)))
+  (semantic.util/semantic-search-available?))
+
+(defn build-hnsw-index-async!
+  "Build the HNSW index on the active semantic search index in the background, returning promptly.
+
+  No-ops when semantic search isn't active on this instance. Backs the just-in-time HNSW build, which
+  runs only when an instance is configured to the `:hnsw` vector-search strategy."
+  []
+  (when (semantic.util/semantic-search-active?)
+    (future
+      (try
+        (semantic.pgvector-api/ensure-active-hnsw-index! (semantic.env/get-pgvector-datasource!)
+                                                         (semantic.env/get-index-metadata))
+        (catch Throwable t
+          (log/errorf "Failed to build HNSW index for semantic search: %s" (ex-message t))))))
+  nil)
 
 (defn- with-zero-semantic-distance-score
   "Record a 0 `:semantic-distance` score on `results` that lack it, for a consistent merged-result score breakdown."
@@ -99,7 +108,7 @@
                                        (into [] (comp (map t2.realize/realize)
                                                       (take total-limit))))
                                      (catch Throwable t
-                                       (log/warn t "Semantic search fallback errored, ignoring")
+                                       (log/warnf "Semantic search fallback errored, ignoring: %s" (ex-message t))
                                        []))
                   fallback-results (take total-limit fallback-results)
                   _                (analytics/observe! :metabase-search/semantic-fallback-results-usage (count fallback-results))
@@ -107,7 +116,7 @@
                   deduped-results  (m/distinct-by (juxt :model :id) combined-results)]
               (take total-limit deduped-results)))))
       (catch Exception e
-        (log/error e "Error executing semantic search, falling back to appdb")
+        (log/errorf "Error executing semantic search, falling back to appdb: %s" (ex-message e))
         (let [fallback (fallback-engine)]
           (analytics/inc! :metabase-search/semantic-error-fallback {:fallback-engine fallback})
           (if fallback
@@ -174,7 +183,11 @@
   (let [pgvector       (semantic.env/get-pgvector-datasource!)
         index-metadata (semantic.env/get-index-metadata)]
     (if-not (index-active? pgvector index-metadata)
-      (log/debug "repair-index! called prior to init!")
+      ;; Semantic can become active at runtime (kill switch re-enabled, or added to additional-search-engines)
+      ;; without init! ever having run; initializing here lets the periodic repair task backfill the index.
+      (do
+        (log/info "No active semantic index, initializing it instead of repairing")
+        (init! searchable-documents {}))
       (semantic.repair/with-repair-table!
         pgvector
         (fn [repair-table-name]

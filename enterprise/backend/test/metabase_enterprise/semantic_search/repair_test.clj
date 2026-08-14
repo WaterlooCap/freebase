@@ -5,7 +5,10 @@
    [honey.sql :as sql]
    [java-time.api :as t]
    [metabase-enterprise.semantic-search.core :as semantic.core]
+   [metabase-enterprise.semantic-search.embedding :as semantic.embedding]
    [metabase-enterprise.semantic-search.env :as semantic.env]
+   [metabase-enterprise.semantic-search.index :as semantic.index]
+   [metabase-enterprise.semantic-search.index-metadata :as semantic.index-metadata]
    [metabase-enterprise.semantic-search.repair :as semantic.repair]
    [metabase-enterprise.semantic-search.test-util :as semantic.tu]
    [metabase-enterprise.semantic-search.util :as semantic.util]
@@ -87,6 +90,25 @@
                   (is (tombstone? deleted-card-entry) "Deleted card should be a tombstone in gate table")
                   (is (tombstone? deleted-dashboard-entry) "Deleted dashboard should be a tombstone in gate table"))))))))))
 
+(deftest repair-index-initializes-when-missing-test
+  (testing "repair-index! initializes the index when none is active, so runtime activation backfills"
+    (mt/with-premium-features #{:semantic-search}
+      (semantic.tu/with-test-db! {:mode :blank}
+        ;; with-redefs mirrors the :mock-initialized bindings, which include non-fn values that
+        ;; with-dynamic-fn-redefs cannot proxy.
+        #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
+        (with-redefs [semantic.embedding/get-configured-model        (fn [] semantic.tu/mock-embedding-model)
+                      semantic.index-metadata/default-index-metadata semantic.tu/mock-index-metadata
+                      semantic.index/model-table-suffix              semantic.tu/mock-table-suffix]
+          (let [pgvector       (semantic.env/get-pgvector-datasource!)
+                index-metadata (semantic.env/get-index-metadata)]
+            (is (nil? (semantic.index-metadata/get-active-index-state pgvector index-metadata)))
+            (semantic.core/repair-index! [(create-test-document "card" 1 "Dog Training Guide")])
+            (is (some? (semantic.index-metadata/get-active-index-state pgvector index-metadata)))
+            (testing "the supplied documents are gated for backfill"
+              (let [gate-contents (gate-table-contents pgvector (:gate-table-name index-metadata))]
+                (is (some? (:document (gate-entry-by-id gate-contents "card_1"))))))))))))
+
 (deftest repair-table-cleanup-test
   (testing "The repair table gets cleaned up properly at the end of a repair-index! job"
     (mt/with-premium-features #{:semantic-search}
@@ -99,7 +121,7 @@
           (semantic.tu/index-all!)
           (testing "repair table is cleaned up after successful repair"
             (let [test-repair-table-name "repair_table_cleanup_test"]
-              (with-redefs [semantic.repair/repair-table-name (constantly test-repair-table-name)]
+              (mt/with-dynamic-fn-redefs [semantic.repair/repair-table-name (constantly test-repair-table-name)]
                 (semantic.core/repair-index! [(create-test-document "card" 7 "New Test Card")])
                 (let [gate-contents (gate-table-contents pgvector gate-table)]
                   (is (tombstone? (gate-entry-by-id gate-contents "card_6")))

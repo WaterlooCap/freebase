@@ -104,9 +104,10 @@ Starting with Metabase 57, the SDK consists of two parts:
 Start with one of the quickstarts, then see these pages for more info on components, theming, and more.
 
 - [Authentication](../authentication.md)
-- [Questions](./questions.md)
+- [Embed a chart](../chart.md)
 - [AI chat](./ai-chat.md)
 - [Dashboards](./dashboards.md)
+- [Actions](./actions.md)
 - [Appearance](../appearance.md)
 - [Collections](./collections.md)
 - [Plugins](./plugins.md)

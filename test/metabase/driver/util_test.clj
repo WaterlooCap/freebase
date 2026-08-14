@@ -449,12 +449,12 @@
               feature (keyword (name (ns-name *ns*)) (mt/random-name))]
           (mt/with-log-messages-for-level [log-messages [metabase.driver.util :error]]
             (is (false? (driver.u/supports? :test-driver feature db)))
-            (is (some (fn [{:keys [level e message]}]
+            (is (some (fn [{:keys [level message]}]
                         (and (= level :error)
-                             (= (ex-message e) "test exception message")
-                             (= message (u/format-color 'red "Failed to check feature '%s' for database '%s'"
+                             (= message (u/format-color 'red "Failed to check feature '%s' for database %s: %s"
                                                         (u/qualified-name feature)
-                                                        (:name db)))))
+                                                        (:id db)
+                                                        "test exception message"))))
                       (log-messages)))))))))
 
 (deftest supports?-failure-test-2
@@ -467,12 +467,12 @@
                         driver/database-supports? (fn [_ _ _] (Thread/sleep 200) true)]
             (mt/with-log-messages-for-level [log-messages [metabase.driver.util :error]]
               (is (false? (driver.u/supports? :test-driver feature db)))
-              (is (some (fn [{:keys [level e message]}]
+              (is (some (fn [{:keys [level message]}]
                           (and (= level :error)
-                               (= (ex-message e) "Timed out after 100.0 ms")
-                               (= message (u/format-color 'red "Failed to check feature '%s' for database '%s'"
+                               (= message (u/format-color 'red "Failed to check feature '%s' for database %s: %s"
                                                           (u/qualified-name feature)
-                                                          (:name db)))))
+                                                          (:id db)
+                                                          "Timed out after 100.0 ms"))))
                         (log-messages)))))
           (testing "we memoize the results for the same database, so we don't log the error again"
             (mt/with-log-messages-for-level [log-messages [metabase.driver.util :error]]
@@ -486,8 +486,20 @@
     (testing "includes sqlite in non-hosted environment"
       (is (contains? (driver.u/available-drivers) :sqlite)))
     (mt/with-premium-features #{:hosting}
-      (testing "does not include sqlite in hosted environment"
-        (is (not (contains? (driver.u/available-drivers) :sqlite)))))))
+      (testing "include sqlite in hosted environment"
+        (is (contains? (driver.u/available-drivers) :sqlite))))))
+
+(deftest sqlite-creatable-engine-test
+  (testing "sqlite is always present in the engines info (the FE needs its metadata for the bundled Sample Database)"
+    (testing "and is creatable off hosted Metabase"
+      (mt/with-premium-features #{}
+        (is (true? (get-in (driver.u/available-drivers-info) [:sqlite :creatable?])))))
+    (testing "but is marked not creatable on hosted Metabase, while staying in the map"
+      (mt/with-premium-features #{:hosting}
+        (is (contains? (driver.u/available-drivers-info) :sqlite))
+        (is (false? (get-in (driver.u/available-drivers-info) [:sqlite :creatable?])))
+        (testing "other warehouse engines stay creatable"
+          (is (true? (get-in (driver.u/available-drivers-info) [:postgres :creatable?]))))))))
 
 (deftest ^:parallel process-connection-prop-test
   (testing "process-connection-prop handles different property types"

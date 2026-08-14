@@ -27,7 +27,7 @@ import {
 import { getRawTableFieldId } from "metabase/metadata/utils/field";
 import * as Urls from "metabase/urls";
 import { checkNotNull } from "metabase/utils/types";
-import registerVisualizations from "metabase/visualizations/register";
+import { registerVisualizations } from "metabase/visualizations/register";
 import type {
   Database,
   Field,
@@ -1092,17 +1092,21 @@ async function findTablePickerItem(
 ) {
   let items: HTMLElement[] = [];
 
-  await waitFor(() => {
-    const allItems = screen.queryAllByTestId("tree-item");
-    items = allItems.filter(
-      (el) =>
-        el.getAttribute("data-type") === type && el.textContent?.includes(name),
-    );
+  await waitFor(
+    () => {
+      const allItems = screen.queryAllByTestId("tree-item");
+      items = allItems.filter(
+        (el) =>
+          el.getAttribute("data-type") === type &&
+          el.textContent?.includes(name),
+      );
 
-    if (items.length !== 1) {
-      throw new Error(`Cannot find ${type} in table picker`); // trigger retry
-    }
-  });
+      if (items.length !== 1) {
+        throw new Error(`Cannot find ${type} in table picker`); // trigger retry
+      }
+    },
+    { timeout: 5000 },
+  );
 
   return items[0];
 }
