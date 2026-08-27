@@ -3,7 +3,8 @@ import { useEffect } from "react";
 import { useSetting } from "metabase/common/hooks";
 
 export const useFavicon = ({ favicon }: { favicon: string | null }) => {
-  const defaultFavicon = useSetting("application-favicon-url");
+  // Our own ungated branding setting, not Metabase's gated `application-favicon-url`.
+  const defaultFavicon = useSetting("wc-brand-favicon-url");
 
   useEffect(() => {
     document

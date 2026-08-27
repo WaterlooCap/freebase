@@ -16,6 +16,7 @@ import type { State } from "metabase/redux/store";
 import { getSetting } from "metabase/selectors/settings";
 
 import { GoogleAuthForm } from "./settings/auth/components/GoogleAuthForm";
+import { SettingsFreeOidcForm } from "./settings/components/SettingsFreeOidcForm";
 import { SettingsLdapForm } from "./settings/components/SettingsLdapForm";
 import { SettingsNav } from "./settings/components/SettingsNav";
 import { AppearanceSettingsPage } from "./settings/components/SettingsPages/AppearanceSettingsPage";
@@ -75,6 +76,7 @@ export const getSettingsRoutes = (
       />
       <Route path="authentication/google" component={GoogleAuthForm} />
       <Route path="authentication/ldap" component={SettingsLdapForm} />
+      <Route path="authentication/free-oidc" component={SettingsFreeOidcForm} />
       <Route
         path="authentication/saml"
         component={() => <PLUGIN_AUTH_PROVIDERS.SettingsSAMLForm />}

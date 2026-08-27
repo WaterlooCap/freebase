@@ -7,6 +7,7 @@
    [metabase.analytics.core :as analytics.core]
    [metabase.api-routes.core :as api-routes]
    [metabase.app-db.core :as mdb]
+   [metabase.branding.init :as branding.init]
    [metabase.classloader.core :as classloader]
    [metabase.cloud-migration.core :as cloud-migration]
    [metabase.config.core :as config]
@@ -228,6 +229,9 @@
   (init-status/set-progress! 0.85)
   (embed.settings/check-and-sync-settings-on-startup! env/env)
   (llm.startup/check-and-sync-settings-on-startup!)
+  ;; Seed our wc-brand-* settings from any legacy application-* branding on startup.
+  ;; Idempotent: once wc-brand-* is set it is a no-op; on a fresh install it copies nothing.
+  (branding.init/init!)
   (init-status/set-progress! 0.9)
   (setting/migrate-encrypted-settings!)
   (database/check-health!)

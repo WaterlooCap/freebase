@@ -620,6 +620,11 @@ interface PublicSettings {
   "ldap-group-membership-filter"?: string;
   "ldap-user-provisioning-enabled?": boolean;
   "oidc-user-provisioning-enabled?": boolean;
+  "free-oidc-enabled": boolean;
+  "free-oidc-issuer-uri": string | null;
+  "free-oidc-client-id": string | null;
+  "free-oidc-client-secret": string | null;
+  "free-oidc-scopes": string | null;
   "loading-message": LoadingMessage;
   "mcp-enabled?": boolean;
   "map-tile-server-url": string;
@@ -663,6 +668,12 @@ interface PublicSettings {
   "custom-viz-plugin-dev-mode-enabled": boolean;
   "non-table-chart-generated": boolean;
   "use-tenants": boolean;
+  // Our own ungated branding settings (see src/metabase/branding/settings.clj). Unlike
+  // Metabase's `application-*` settings, these carry no `:feature` gate.
+  "wc-brand-name": string;
+  "wc-brand-logo-url": string;
+  "wc-brand-favicon-url": string;
+  "wc-brand-colors": ColorSettings;
 }
 
 export type UserSettings = {
