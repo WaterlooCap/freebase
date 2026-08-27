@@ -1,6 +1,7 @@
 (ns metabase.sso.api.oidc-settings-test
   (:require
    [clojure.test :refer :all]
+   [metabase.appearance.settings :as appearance.settings]
    [metabase.sso.api.oidc-settings]
    [metabase.sso.settings :as sso.settings]
    [metabase.test :as mt]))
@@ -43,8 +44,15 @@
         (is (true? (sso.settings/free-oidc-enabled))
             "If this is false, the config was not persisted before free-oidc-enabled was set.")))))
 
-(deftest closed-schema-rejects-unknown-keys-test
-  (testing "the endpoint's body schema is closed: unknown keys are rejected, not silently passed to set-many!"
-    (mt/user-http-request :crowberto :put 400 "oidc/settings"
-                          {:free-oidc-enabled false
-                           :bogus-key         "x"})))
+(deftest closed-schema-drops-unknown-keys-test
+  (testing "unknown keys are dropped, never passed through to set-many!"
+    ;; See the note in `metabase.branding.api-test`: since upstream v0.63.15 the API decoder
+    ;; strips undeclared keys, so this returns 200 with the extra key discarded rather than
+    ;; a 400. What matters is that the smuggled setting is never written.
+    (mt/with-temporary-setting-values [application-name  "Metabase"
+                                       free-oidc-enabled false]
+      (mt/user-http-request :crowberto :put 200 "oidc/settings"
+                            {:free-oidc-enabled false
+                             :application-name  "EVIL"})
+      (is (= "Metabase" (appearance.settings/application-name))
+          "the undeclared key is stripped before set-many!, so application-name stays unchanged"))))
