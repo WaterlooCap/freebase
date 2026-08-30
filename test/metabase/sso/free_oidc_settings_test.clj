@@ -1,7 +1,6 @@
 (ns metabase.sso.free-oidc-settings-test
   (:require
    [clojure.test :refer :all]
-   [metabase.settings.core :as setting]
    [metabase.sso.settings :as sso.settings]
    [metabase.test :as mt]))
 
