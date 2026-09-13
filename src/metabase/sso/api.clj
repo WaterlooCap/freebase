@@ -2,10 +2,12 @@
   (:require
    [metabase.api.macros :as api.macros]
    [metabase.sso.api.google]
-   [metabase.sso.api.ldap]))
+   [metabase.sso.api.ldap]
+   [metabase.sso.api.oidc-settings]))
 
 (comment metabase.sso.api.google/keep-me
-         metabase.sso.api.ldap/keep-me)
+         metabase.sso.api.ldap/keep-me
+         metabase.sso.api.oidc-settings/keep-me)
 
 (def ^{:arglists '([request respond raise])} google-auth-routes
   "`/api/google/` routes."
@@ -14,3 +16,7 @@
 (def ^{:arglists '([request respond raise])} ldap-routes
   "`/api/ldap` routes."
   (api.macros/ns-handler 'metabase.sso.api.ldap))
+
+(def ^{:arglists '([request respond raise])} oidc-settings-routes
+  "`/api/oidc` routes."
+  (api.macros/ns-handler 'metabase.sso.api.oidc-settings))

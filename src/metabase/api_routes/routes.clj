@@ -14,6 +14,7 @@
    [metabase.api.util]
    [metabase.api.util.handlers :as handlers]
    [metabase.bookmarks.api]
+   [metabase.branding.api]
    [metabase.bug-reporting.api]
    [metabase.cache.api]
    [metabase.channel.api]
@@ -198,6 +199,8 @@
    "/google"               (+auth metabase.sso.api/google-auth-routes)
    "/health-inspector"     (+auth 'metabase.health-inspector.api)
    "/ldap"                 (+auth metabase.sso.api/ldap-routes)
+   "/oidc"                 (+auth metabase.sso.api/oidc-settings-routes)
+   "/branding"             (+auth metabase.branding.api/routes)
    "/llm"                  (+auth metabase.llm.api/routes)
    "/logger"               (+auth 'metabase.logger.api)
    "/login-history"        (+auth 'metabase.login-history.api)

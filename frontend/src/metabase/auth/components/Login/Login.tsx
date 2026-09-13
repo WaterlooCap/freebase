@@ -1,4 +1,5 @@
 import type { Location } from "history";
+import { Fragment } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
@@ -61,12 +62,12 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
             </Box>
           ))}
           {passwordProvider.map((provider) => (
-            <>
+            <Fragment key={provider.name}>
               <Divider mt="2rem" />
-              <Box key={provider.name} mt="1rem" ta="center">
+              <Box mt="1rem" ta="center">
                 <provider.Button isCard={true} redirectUrl={redirectUrl} />
               </Box>
-            </>
+            </Fragment>
           ))}
         </Box>
       )}

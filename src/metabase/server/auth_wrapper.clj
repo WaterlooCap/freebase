@@ -2,6 +2,7 @@
   (:require
    [metabase.api.util.handlers :as handlers]
    [metabase.config.core :as config]
+   [metabase.sso.api.oidc :as oidc.api]
    [metabase.sso.api.slack-connect :as slack-connect.api]
    [ring.util.response :as response]))
 
@@ -21,10 +22,12 @@
 ;; This needs to be injected into [[metabase.server.routes/routes]] -- not [[metabase.api-routes.core/routes]] !!!
 (def routes
   "Ring routes for auth API endpoints.
-   Slack Connect (OSS) is always available. Other SSO routes (SAML, JWT, OIDC) require EE."
+   Slack Connect and OIDC (both OSS) are always available. Other SSO routes (SAML, JWT)
+   require EE."
   (handlers/routes
-   ;; Slack Connect routes always available (OSS)
-   (handlers/route-map-handler {"/auth" {"/sso" {"/slack-connect" slack-connect.api/routes}}})
+   ;; OSS SSO routes, always available
+   (handlers/route-map-handler {"/auth" {"/sso" {"/slack-connect" slack-connect.api/routes
+                                                 "/oidc"          oidc.api/routes}}})
    ;; Other SSO routes require EE
    (if (and config/ee-available? (not *compile-files*))
      (requiring-resolve 'metabase-enterprise.sso.api.routes/routes)
