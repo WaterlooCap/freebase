@@ -5,6 +5,7 @@
    [clojure.string :as str]
    [hiccup2.core :as h]
    [metabase.appearance.core :as appearance]
+   [metabase.branding.core :as branding]
    [metabase.system.core :as system]))
 
 (defn- absolute-url
@@ -30,16 +31,17 @@
   [font-name]
   (let [dir-name      (str/replace font-name " " "_")
         file-stem     (str/replace font-name " " "")
-        css-font-name (css-escape-font-name font-name)]
+        css-font-name (css-escape-font-name font-name)
+        fonts-url     (absolute-url "/app/fonts")]
     (if (= font-name "Lato")
       (str "@font-face { font-family: 'Lato'; font-weight: 400; font-style: normal; font-display: swap;"
-           " src: url('/app/fonts/Lato/lato-v16-latin-regular.woff2') format('woff2'); }\n"
+           " src: url('" fonts-url "/Lato/lato-v16-latin-regular.woff2') format('woff2'); }\n"
            "@font-face { font-family: 'Lato'; font-weight: 700; font-style: normal; font-display: swap;"
-           " src: url('/app/fonts/Lato/lato-v16-latin-700.woff2') format('woff2'); }\n")
+           " src: url('" fonts-url "/Lato/lato-v16-latin-700.woff2') format('woff2'); }\n")
       (str "@font-face { font-family: '" css-font-name "'; font-weight: 400; font-style: normal; font-display: swap;"
-           " src: url('/app/fonts/" dir-name "/" file-stem "-Regular.woff2') format('woff2'); }\n"
+           " src: url('" fonts-url "/" dir-name "/" file-stem "-Regular.woff2') format('woff2'); }\n"
            "@font-face { font-family: '" css-font-name "'; font-weight: 700; font-style: normal; font-display: swap;"
-           " src: url('/app/fonts/" dir-name "/" file-stem "-Bold.woff2') format('woff2'); }\n"))))
+           " src: url('" fonts-url "/" dir-name "/" file-stem "-Bold.woff2') format('woff2'); }\n"))))
 
 (def ^:private default-logo-url "app/assets/img/logo.svg")
 
@@ -65,14 +67,26 @@
   (some-> @default-logo-svg (str/replace "currentColor" brand-color)))
 
 (defn- appearance-settings
-  "Return a map of appearance settings for the consent page."
+  "Return a map of appearance settings for the consent page.
+
+  Prefers our ungated `wc-brand-*` settings (see [[metabase.branding.settings]]) and falls
+  back to Metabase's gated `application-*` settings, exactly as
+  [[metabase.server.routes.index]] does for the SPA's `<title>` and favicon. Without this
+  the OAuth consent page -- the screen a user approves when connecting an MCP client -- is
+  the one place in the product that still shows Metabase's name and logo."
   []
-  (let [colors   (appearance/application-colors)
-        logo-url (appearance/application-logo-url)]
+  (let [logo-url (or (not-empty (branding/wc-brand-logo-url))
+                     (appearance/application-logo-url))
+        ;; NOTE the key types differ: `wc-brand-colors` is decoded with keyword keys
+        ;; (see test/metabase/branding/settings_test.clj) while Metabase's
+        ;; `application-colors` uses string keys. Getting this wrong fails silently --
+        ;; the lookup just misses and you fall back to the stock blue.
+        brand    (or (:brand (branding/wc-brand-colors))
+                     (get (appearance/application-colors) "brand"))]
     {:font-family    (appearance/application-font)
      :logo-url       (absolute-url logo-url)
      :default-logo?  (= logo-url default-logo-url)
-     :brand-color    (sanitize-css-color (get colors "brand"))}))
+     :brand-color    (sanitize-css-color brand)}))
 
 (defn- render-scope-list
   "Render the requested OAuth scopes as a hiccup list so the user sees exactly what they're granting.
@@ -154,7 +168,10 @@
             [:img {:src logo-url :alt "Logo" :height "32"}])]
          [:h1 "Authorize " (or client-name "Unknown Application") "?"]
          [:p.subtitle (or client-name "This application") " is requesting access to "
-          [:strong (appearance/application-name)] " on your behalf:"]
+          [:strong (let [brand-name (branding/wc-brand-name)]
+                     (if (str/blank? brand-name)
+                       (appearance/application-name)
+                       brand-name))] " on your behalf:"]
          (when (some :full-access? scopes)
            [:div.warning
             [:span.mark "!"]
@@ -162,7 +179,9 @@
              (or client-name "this application") " can do, including reading and changing all data you "
              "can reach. Only approve it for a tool you trust and control."]])
          (render-scope-list scopes)
-         [:form {:method "POST" :action "/oauth/authorize/decision"}
+         ;; Absolute action: a root-relative path would drop the subpath when Metabase is hosted
+         ;; under one (site-url like https://example.com/metabase).
+         [:form {:method "POST" :action (absolute-url "/oauth/authorize/decision")}
           [:input {:type "hidden" :name "csrf_token" :value csrf-token}]
           [:input {:type "hidden" :name "params_sig" :value params-sig}]
           (for [[k v] oauth-params

@@ -486,6 +486,41 @@
                                                                         :payload      {}
                                                                         :payload_type "notification/card"})))))
 
+(deftest update-notification-route-id-is-authoritative-test
+  (testing "PUT /api/notification/:id - the URL names the row being updated; body ids are ignored"
+    (notification.tu/with-card-notification
+      [notification {}]
+      (let [{notification-id    :id
+             payload-id         :payload_id
+             {card-id :card_id} :payload} notification
+            put! (fn [expected-status body]
+                   (mt/user-http-request :crowberto :put expected-status
+                                         (format "notification/%d" notification-id) body))]
+        (testing "a body that omits :id updates the row in place instead of deleting and recreating it"
+          (is (=? {:id     notification-id
+                   :active false}
+                  (put! 200 {:payload_type "notification/card"
+                             :active       false
+                             :payload      {:card_id        card-id
+                                            :send_condition "has_result"}})))
+          (testing "\nthe notification and its payload keep their primary keys"
+            (is (=? {:active     false
+                     :payload_id payload-id}
+                    (t2/select-one :model/Notification notification-id)))
+            (is (true? (t2/exists? :model/NotificationCard :id payload-id)))))
+        (testing "a body naming a different notification id is ignored - the URL row is updated in place"
+          (is (=? {:id notification-id}
+                  (put! 200 (assoc notification :id (inc notification-id)))))
+          (is (=? {:active     true
+                   :payload_id payload-id}
+                  (t2/select-one :model/Notification notification-id))))
+        (testing "a body payload naming a different payload row is ignored - the payload keeps its primary key"
+          (is (=? {:id notification-id}
+                  (put! 200 (assoc-in notification [:payload :id] (inc payload-id)))))
+          (is (true? (t2/exists? :model/NotificationCard :id payload-id))))
+        (testing "no orphan payload rows were created along the way"
+          (is (= 1 (t2/count :model/NotificationCard :card_id card-id))))))))
+
 (deftest put-creator-id-permissions-test
   (testing "PUT /api/notification/:id and creator_id"
     (notification.tu/with-card-notification
@@ -595,6 +630,30 @@
           (is (false? (has-link? "embedding-simple"))))
         (testing "no x-metabase-client header: result email has links"
           (is (true? (has-link? nil))))))))
+
+(deftest send-unsaved-notification-ignores-body-ids-test
+  (testing "POST /api/notification/send leaves a saved notification named by the body's id/payload_id untouched"
+    (notification.tu/with-card-notification
+      [{existing-id :id}
+       {:subscriptions [{:type          :notification-subscription/cron
+                         :cron_schedule "0 0 0 * * ?"}]}]
+      (mt/with-temp [:model/Card {card-id :id} {:dataset_query (mt/mbql-query products {:aggregation [[:count]]})}]
+        (let [existing-payload-id (t2/select-one-fn :payload_id :model/Notification :id existing-id)]
+          (notification.tu/with-channel-fixtures [:channel/email]
+            (notification.tu/with-captured-channel-send!
+              (mt/user-http-request :rasta :post 204 "notification/send"
+                                    {:id           existing-id
+                                     :payload_id   (+ existing-payload-id 999999)
+                                     :payload_type :notification/card
+                                     :payload      {:card_id        card-id
+                                                    :send_condition :has_result
+                                                    :send_once      false}
+                                     :handlers     [{:channel_type :channel/email
+                                                     :recipients   [{:type    :notification-recipient/user
+                                                                     :user_id (mt/user->id :rasta)}]}]}))
+            (is (t2/exists? :model/Notification :id existing-id))
+            (is (t2/exists? :model/NotificationCard :id existing-payload-id))
+            (is (= 1 (t2/count :model/NotificationSubscription :notification_id existing-id)))))))))
 
 (deftest get-notification-permissions-test
   (mt/with-temp

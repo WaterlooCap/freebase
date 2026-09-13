@@ -10,5 +10,7 @@
 
 (p/import-vars
  [metabase.branding.settings
+  wc-brand-colors
   wc-brand-favicon-url
+  wc-brand-logo-url
   wc-brand-name])
