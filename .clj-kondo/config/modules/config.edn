@@ -1495,6 +1495,7 @@
    :uses #{api
            api-scope
            appearance
+           branding
            mcp
            models
            request

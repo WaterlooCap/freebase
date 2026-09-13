@@ -5,6 +5,7 @@
    [clojure.string :as str]
    [hiccup2.core :as h]
    [metabase.appearance.core :as appearance]
+   [metabase.branding.core :as branding]
    [metabase.system.core :as system]))
 
 (defn- absolute-url
@@ -66,14 +67,26 @@
   (some-> @default-logo-svg (str/replace "currentColor" brand-color)))
 
 (defn- appearance-settings
-  "Return a map of appearance settings for the consent page."
+  "Return a map of appearance settings for the consent page.
+
+  Prefers our ungated `wc-brand-*` settings (see [[metabase.branding.settings]]) and falls
+  back to Metabase's gated `application-*` settings, exactly as
+  [[metabase.server.routes.index]] does for the SPA's `<title>` and favicon. Without this
+  the OAuth consent page -- the screen a user approves when connecting an MCP client -- is
+  the one place in the product that still shows Metabase's name and logo."
   []
-  (let [colors   (appearance/application-colors)
-        logo-url (appearance/application-logo-url)]
+  (let [logo-url (or (not-empty (branding/wc-brand-logo-url))
+                     (appearance/application-logo-url))
+        ;; NOTE the key types differ: `wc-brand-colors` is decoded with keyword keys
+        ;; (see test/metabase/branding/settings_test.clj) while Metabase's
+        ;; `application-colors` uses string keys. Getting this wrong fails silently --
+        ;; the lookup just misses and you fall back to the stock blue.
+        brand    (or (:brand (branding/wc-brand-colors))
+                     (get (appearance/application-colors) "brand"))]
     {:font-family    (appearance/application-font)
      :logo-url       (absolute-url logo-url)
      :default-logo?  (= logo-url default-logo-url)
-     :brand-color    (sanitize-css-color (get colors "brand"))}))
+     :brand-color    (sanitize-css-color brand)}))
 
 (defn- render-scope-list
   "Render the requested OAuth scopes as a hiccup list so the user sees exactly what they're granting.
@@ -155,7 +168,10 @@
             [:img {:src logo-url :alt "Logo" :height "32"}])]
          [:h1 "Authorize " (or client-name "Unknown Application") "?"]
          [:p.subtitle (or client-name "This application") " is requesting access to "
-          [:strong (appearance/application-name)] " on your behalf:"]
+          [:strong (let [brand-name (branding/wc-brand-name)]
+                     (if (str/blank? brand-name)
+                       (appearance/application-name)
+                       brand-name))] " on your behalf:"]
          (when (some :full-access? scopes)
            [:div.warning
             [:span.mark "!"]

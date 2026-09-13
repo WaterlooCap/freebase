@@ -130,3 +130,47 @@
                                       :full-access? false}])]
       (is (not (re-find #"class=\"warning\"" html)))
       (is (not (re-find #"complete access to your account" html))))))
+
+;;; ------------------------------------------- Waterloo branding --------------------------------------------
+;;;
+;;; The consent page is the screen a user approves when connecting an MCP client (Claude,
+;;; Claude Code, Cursor, ...). It is server-rendered, so none of the frontend branding
+;;; interception points reach it — it has to read our ungated `wc-brand-*` settings
+;;; directly. See [[metabase.branding.settings]] for the boundary with Metabase's own
+;;; gated `application-*` settings.
+
+(defn- appearance []
+  (mt/with-temporary-setting-values [site-url "https://analytics.example.com"]
+    (#'consent-page/appearance-settings)))
+
+(deftest wc-brand-logo-and-color-test
+  (testing "logo and brand color come from wc-brand-* when set"
+    (mt/with-temporary-setting-values [wc-brand-logo-url "https://cdn.example.com/waterloo-logo.svg"
+                                       wc-brand-colors   {"brand" "#0a2540"}]
+      (let [{:keys [logo-url default-logo? brand-color]} (appearance)]
+        (is (= "https://cdn.example.com/waterloo-logo.svg" logo-url))
+        (is (false? default-logo?))
+        ;; NOTE `wc-brand-colors` decodes with keyword keys while Metabase's
+        ;; `application-colors` uses string keys — looking this up with "brand" fails
+        ;; silently and falls back to the stock blue.
+        (is (= "#0a2540" brand-color)))))
+  (testing "falls back to Metabase's application-* settings when wc-brand-* are unset"
+    (mt/with-temporary-setting-values [wc-brand-logo-url nil
+                                       wc-brand-colors   {}]
+      (let [{:keys [logo-url default-logo? brand-color]} (appearance)]
+        (is (true? default-logo?))
+        (is (re-find #"app/assets/img/logo\.svg" logo-url))
+        (is (= "#509ee3" brand-color)))))
+  (testing "a garbage brand color is still sanitized rather than interpolated into CSS"
+    (mt/with-temporary-setting-values [wc-brand-colors {"brand" "red; } body { display: none"}]
+      (is (= "#509ee3" (:brand-color (appearance)))))))
+
+(deftest wc-brand-name-test
+  (testing "the consent page names our brand, not Metabase, when wc-brand-name is set"
+    (mt/with-temporary-setting-values [wc-brand-name "Waterloo"]
+      (let [html (render!)]
+        (is (re-find #"access to <strong>Waterloo</strong>" html))
+        (is (not (re-find #"access to <strong>Metabase</strong>" html))))))
+  (testing "an unbranded instance still says Metabase"
+    (mt/with-temporary-setting-values [wc-brand-name nil]
+      (is (re-find #"access to <strong>Metabase</strong>" (render!))))))
