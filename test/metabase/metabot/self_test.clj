@@ -74,6 +74,9 @@
                                              llm-openai-api-key     "sk-test-key"]
             (doseq [[model expected] [["anthropic/test-model"   {:type "any"}]
                                       ["metabase/anthropic/claude-sonnet-4-6" {:type "any"}]
+                                      ["anthropic/claude-haiku-5-5" {:type "any"}]
+                                      ["anthropic/claude-opus-5-5" {:type "auto"}]
+                                      ["anthropic/claude-sonnet-5-5" {:type "auto"}]
                                       ["openrouter/test-model" "required"]
                                       ["openai/test-model"     "required"]]]
               (try

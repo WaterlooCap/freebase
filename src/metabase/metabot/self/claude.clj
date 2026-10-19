@@ -293,15 +293,18 @@
   "Anthropic chat models offered in the Metabot model picker, as a map of model id -> display name.
   `list-models` returns the intersection of this map with the account's `/v1/models` catalog."
   {"claude-fable-5"             "Claude Fable 5"
+   "claude-opus-5-5"            "Claude Opus 5.5"
    "claude-opus-5"              "Claude Opus 5"
    "claude-opus-4-8"            "Claude Opus 4.8"
    "claude-opus-4-7"            "Claude Opus 4.7"
    "claude-opus-4-6"            "Claude Opus 4.6"
    "claude-opus-4-5-20251101"   "Claude Opus 4.5"
    "claude-opus-4-1-20250805"   "Claude Opus 4.1"
+   "claude-sonnet-5-5"          "Claude Sonnet 5.5"
    "claude-sonnet-5"            "Claude Sonnet 5"
    "claude-sonnet-4-6"          "Claude Sonnet 4.6"
    "claude-sonnet-4-5-20250929" "Claude Sonnet 4.5"
+   "claude-haiku-5-5"           "Claude Haiku 5.5"
    "claude-haiku-4-5-20251001"  "Claude Haiku 4.5"})
 
 (defn- supported-model?
@@ -338,31 +341,72 @@
                  (mapv (fn [{:keys [id display_name]}]
                          {:id id :display_name (or display_name (supported-models id))})))}))
 
-(defn- model-supports-temperature?
-  "Whether `model` accepts an explicit `temperature` parameter.
-
-  Sampling parameters (`temperature`, `top_p`, `top_k`) were removed starting with Claude Opus 4.7 and Sonnet 5.
-  Strips an optional vendor prefix (e.g. Bedrock's `anthropic.`) before checking."
+(defn- strip-vendor-prefix
+  "`model` without an optional vendor prefix (e.g. Bedrock's `anthropic.`)."
   [model]
-  (let [model (str/replace-first (str model) #"^anthropic\." "")]
-    (not (or (str/starts-with? model "claude-fable")
-             (when-let [[_ family major minor] (re-find #"^claude-(opus|sonnet)-(\d+)(?:-(\d+))?" model)]
-               (let [major (parse-long major)
-                     minor (or (some-> minor parse-long) 0)]
-                 (case family
-                   "opus"   (or (> major 4)
-                                (and (= major 4) (>= minor 7)))
-                   "sonnet" (>= major 5))))))))
+  (str/replace-first (str model) #"^anthropic\." ""))
+
+(defn- claude-model-version
+  "`[family major minor]` for a Claude opus/sonnet/haiku/fable/mythos model id, or nil.
+  The minor version is one or two digits, so a date suffix doesn't read as one: `claude-opus-4-20250514` is 4.0."
+  [model]
+  ;; the minor version accepts both separators: canonical ids are hyphenated (claude-opus-4-8)
+  ;; but Azure admins name deployments freely, and the dotted display-name spelling (claude-opus-4.8) is common
+  (when-let [[_ family major minor] (re-find #"^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[-.](\d{1,2})(?!\d))?"
+                                             (strip-vendor-prefix model))]
+    [family (parse-long major) (or (some-> minor parse-long) 0)]))
+
+(defn- model-current-gen?
+  "Whether `model` is current-generation Claude: Fable, Mythos, Opus >=4.7, Sonnet >=5 or Haiku >=5.
+  These reject sampling params. Accepts a bare id, a Bedrock `anthropic.` id or an Azure deployment name."
+  [model]
+  (or (str/starts-with? (strip-vendor-prefix model) "claude-fable")
+      (when-let [[family major minor] (claude-model-version model)]
+        (case family
+          ("fable" "mythos") true
+          "opus"             (or (> major 4) (and (= major 4) (>= minor 7)))
+          ("sonnet" "haiku") (>= major 5)))))
+
+(defn- model-supports-temperature?
+  "Whether `model` accepts an explicit `temperature` parameter: current-generation models
+  (see [[model-current-gen?]]) reject sampling params (`temperature`, `top_p`, `top_k`)."
+  [model]
+  (not (model-current-gen? model)))
+
+(def ^:private first-version-rejecting-forced-tool-choice
+  "The first `[major minor]` of each Claude family that rejects a forced `tool_choice`:
+  https://platform.claude.com/docs/en/api/errors#forced-tool-use-not-supported
+  A family missing here accepts one in every version, as Haiku 4.5 and 5.5 do:
+  https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools#forcing-tool-use"
+  {"opus"   [5 5]
+   "sonnet" [5 5]
+   "fable"  [5 1]
+   "mythos" [5 1]})
+
+(defn- model-supports-forced-tool-choice?
+  "Whether `model` accepts a forced `tool_choice` (`any`, or a named tool).
+  True for a model id that isn't a recognizable Claude version."
+  [model]
+  (let [[family major minor] (claude-model-version model)
+        first-rejecting      (get first-version-rejecting-forced-tool-choice family)]
+    (or (nil? first-rejecting)
+        (neg? (compare [major minor] first-rejecting)))))
+
+(def ^:private unforced-structured-output-token-floor
+  "Smallest `max_tokens` for structured output on a model that can't be forced to call the tool.
+  It answers under `auto` and thinks first (these models think by default), which bills against the same cap."
+  2048)
 
 (mu/defn claude-request-body
   "Build the Anthropic Messages API request body for an LLM request."
   [{:keys [model system input tools schema tool_choice temperature max-tokens]
     :or   {model "claude-haiku-4-5"}} :- core/LLMRequestOpts]
-  (let [messages  (parts->claude-messages input)
-        all-tools (when (seq tools) (mapv tool->claude tools))
-        all-tools (if (and all-tools (not schema))
-                    (add-tools-cache-breakpoint all-tools)
-                    all-tools)]
+  (let [can-force? (model-supports-forced-tool-choice? model)
+        messages   (parts->claude-messages input)
+        all-tools  (when (seq tools) (mapv tool->claude tools))
+        all-tools  (if (and all-tools (not schema))
+                     (add-tools-cache-breakpoint all-tools)
+                     all-tools)]
     (cond-> {:model         model
              :max_tokens    (or max-tokens 4096)
              :stream        true
@@ -370,16 +414,21 @@
              :messages      messages}
       system            (assoc :system (system->cached-content-blocks system))
       all-tools         (assoc :tools all-tools)
-      schema            (assoc :tool_choice {:type "tool"
-                                             :name "structured_output"}
+      schema            (assoc :tool_choice (if can-force?
+                                              {:type "tool"
+                                               :name "structured_output"}
+                                              {:type "auto"})
                                :tools [{:name         "structured_output"
                                         :description  "Output structured data"
                                         :input_schema schema}])
 
+      (and schema (not can-force?))
+      (update :max_tokens max unforced-structured-output-token-floor)
+
       (and all-tools tool_choice)
       (assoc :tool_choice (case (name tool_choice)
                             "auto"     {:type "auto"}
-                            "required" {:type "any"}))
+                            "required" (if can-force? {:type "any"} {:type "auto"})))
 
       (and temperature (model-supports-temperature? model))
       (assoc :temperature temperature))))
