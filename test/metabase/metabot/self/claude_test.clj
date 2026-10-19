@@ -576,5 +576,15 @@
       (are [expected opts] (= expected (:max_tokens (body (assoc opts :model "claude-opus-5-5"))))
         2048 {:schema schema :max-tokens 512}
         4096 {:schema schema :max-tokens 4096}
-        4096 {:schema schema}
-        512  {:max-tokens 512}))))
+        512  {:max-tokens 512}))
+    (testing "with no max-tokens they get the larger chat ceiling; models that can be forced keep 4096"
+      (are [expected model] (= expected (:max_tokens (body {:model model :tools tools :tool_choice "required"})))
+        32000 "claude-opus-5-5"
+        32000 "anthropic.claude-sonnet-5-5"
+        4096  "claude-haiku-5-5"
+        4096  "claude-opus-5"
+        4096  "claude-sonnet-4-6"))
+    (testing "an Azure deployment name is matched case-insensitively"
+      (is (=? {:tool_choice {:type "auto"}}
+              (body {:model "Claude-Opus-5-5" :tools tools :tool_choice "required"})))
+      (is (not (contains? (body {:model "Claude-Opus-4-8" :temperature 0.3}) :temperature))))))

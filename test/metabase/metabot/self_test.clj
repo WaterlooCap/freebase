@@ -927,6 +927,28 @@
                                   "event_details" {"tool_name" "get-time"}}}]
                       tool-events)))))))))
 
+(deftest call-llm-structured-text-reply-test
+  (testing "a model that answers in text instead of calling the structured-output tool still yields its JSON"
+    (let [schema {:type "object" :properties {:questions {:type "array" :items {:type "string"}}} :required ["questions"]}
+          call!  (fn [text]
+                   (mt/with-dynamic-fn-redefs [openrouter/openrouter
+                                               (constantly (test-util/mock-llm-response
+                                                            [{:type :start :id "msg-1"}
+                                                             {:type :text :id "t1" :text text}]))]
+                     (self/call-llm-structured "openrouter/test-model" [{:role "user" :content "test"}]
+                                               schema 0.3 1024 {:tag "test-tag"})))]
+      (testing "the whole reply is the JSON object"
+        (is (= {:questions ["How many orders?"]}
+               (call! "{\"questions\": [\"How many orders?\"]}"))))
+      (testing "the JSON is in a fenced block, and the last matching block wins"
+        (is (= {:questions ["B"]}
+               (call! "Here you go:\n```json\n{\"questions\": [\"A\"]}\n```\nRevised:\n```json\n{\"questions\": [\"B\"]}\n```"))))
+      (testing "JSON without the required keys, or no JSON at all, is still an error"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"LLM returned no tool call"
+                              (call! "{\"answer\": 42}")))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"LLM returned no tool call"
+                              (call! "I can't help with that.")))))))
+
 (deftest call-llm-structured-snowplow-test
   (testing "fires :snowplow/token_usage event for call-llm-structured"
     (let [rasta-id (mt/user->id :rasta)]

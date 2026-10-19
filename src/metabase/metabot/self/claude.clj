@@ -342,9 +342,10 @@
                          {:id id :display_name (or display_name (supported-models id))})))}))
 
 (defn- strip-vendor-prefix
-  "`model` without an optional vendor prefix (e.g. Bedrock's `anthropic.`)."
+  "`model` lower-cased and without an optional vendor prefix (e.g. Bedrock's `anthropic.`).
+  Azure deployment names are admin free text, so `Claude-Opus-5-5` reads the same as `claude-opus-5-5`."
   [model]
-  (str/replace-first (str model) #"^anthropic\." ""))
+  (str/replace-first (u/lower-case-en (str model)) #"^anthropic\." ""))
 
 (defn- claude-model-version
   "`[family major minor]` for a Claude opus/sonnet/haiku/fable/mythos model id, or nil.
@@ -392,6 +393,12 @@
     (or (nil? first-rejecting)
         (neg? (compare [major minor] first-rejecting)))))
 
+(def ^:private unforced-default-max-tokens
+  "Default `max_tokens` when the caller sets none, for a model that can't be forced to call a tool (Opus and
+  Sonnet 5.5). These models always think, and the thinking bills against the same cap, so the usual 4096 can cut a
+  tool call short. 32000 is the flat Metabot chat ceiling upstream moved to (metabase/metabase#82436)."
+  32000)
+
 (def ^:private unforced-structured-output-token-floor
   "Smallest `max_tokens` for structured output on a model that can't be forced to call the tool.
   It answers under `auto` and thinks first (these models think by default), which bills against the same cap."
@@ -408,7 +415,7 @@
                      (add-tools-cache-breakpoint all-tools)
                      all-tools)]
     (cond-> {:model         model
-             :max_tokens    (or max-tokens 4096)
+             :max_tokens    (or max-tokens (if can-force? 4096 unforced-default-max-tokens))
              :stream        true
              :cache_control {:type "ephemeral"}
              :messages      messages}
