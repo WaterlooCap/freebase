@@ -479,7 +479,8 @@
 
 (deftest ^:parallel supported-model?-test
   (testing "whitelisted models are supported"
-    (doseq [id ["claude-fable-5" "claude-opus-5" "claude-opus-4-8" "claude-sonnet-5" "claude-haiku-4-5-20251001"]]
+    (doseq [id ["claude-fable-5" "claude-opus-5-5" "claude-opus-5" "claude-opus-4-8" "claude-sonnet-5-5"
+                "claude-sonnet-5" "claude-haiku-5-5" "claude-haiku-4-5-20251001"]]
       (is (true? (#'claude/supported-model? {:id id})) id)))
   (testing "non-whitelisted models are not supported"
     (doseq [id ["claude-3-5-sonnet-20241022" "claude-opus-4-0" "claude-sonnet-4-20250514"]]
@@ -492,10 +493,14 @@
                                    {:body (json/encode
                                            {:data [{:id "claude-sonnet-5"            :display_name "Claude Sonnet 5"  :created_at "2026-01-01"}
                                                    {:id "claude-opus-4-8"            :display_name "Claude Opus 4.8"  :created_at "2026-02-01"}
+                                                   {:id "claude-opus-5-5"            :display_name "Claude Opus 5.5"  :created_at "2026-10-01"}
+                                                   {:id "claude-haiku-5-5"           :display_name "Claude Haiku 5.5" :created_at "2026-10-01"}
                                                    {:id "claude-3-5-sonnet-20241022" :display_name "Claude 3.5"       :created_at "2024-10-22"}
                                                    {:id "claude-fable-5"             :display_name "Claude Fable 5"   :created_at "2026-03-01"}]})})]
         (is (= [{:id "claude-fable-5" :display_name "Claude Fable 5"}
+                {:id "claude-haiku-5-5" :display_name "Claude Haiku 5.5"}
                 {:id "claude-opus-4-8" :display_name "Claude Opus 4.8"}
+                {:id "claude-opus-5-5" :display_name "Claude Opus 5.5"}
                 {:id "claude-sonnet-5" :display_name "Claude Sonnet 5"}]
                (:models (claude/list-models))))))))
 
@@ -506,20 +511,23 @@
 (deftest ^:parallel model-supports-temperature?-test
   (testing "models that accept an explicit temperature"
     (doseq [model ["claude-haiku-4-5" "claude-sonnet-4-6" "claude-sonnet-4-5"
-                   "claude-opus-4-5" "claude-opus-4-6" "claude-opus-4-1"]]
+                   "claude-opus-4-5" "claude-opus-4-6" "claude-opus-4-1" "claude-opus-4-20250514"
+                   "claude-haiku-4-5-20251001"]]
       (is (true? (#'claude/model-supports-temperature? model))
           model)))
-  (testing "sampling parameters were removed starting with Opus 4.7, Sonnet 5, and on Fable models"
+  (testing "sampling parameters were removed starting with Opus 4.7, Sonnet 5, Haiku 5, and on Fable models"
     (doseq [model ["claude-opus-4-7" "claude-opus-4-8" "claude-opus-4-8-20260415"
-                   "claude-opus-5" "claude-opus-5-0"
-                   "claude-sonnet-5" "claude-sonnet-5-0" "claude-sonnet-6"
+                   "claude-opus-5" "claude-opus-5-0" "claude-opus-5-5" "claude-opus-5.5"
+                   "claude-sonnet-5" "claude-sonnet-5-0" "claude-sonnet-5-5" "claude-sonnet-6"
+                   "claude-haiku-5-5"
                    "claude-fable-5"]]
       (is (false? (#'claude/model-supports-temperature? model))
           model))))
 
 (deftest ^:parallel model-supports-temperature?-bedrock-prefixed-test
   (testing "Bedrock mantle ids carry an anthropic. vendor prefix that is stripped before the check"
-    (doseq [model ["anthropic.claude-opus-4-8" "anthropic.claude-opus-4-7" "anthropic.claude-fable-5"]]
+    (doseq [model ["anthropic.claude-opus-4-8" "anthropic.claude-opus-4-7" "anthropic.claude-fable-5"
+                   "anthropic.claude-opus-5-5" "anthropic.claude-sonnet-5-5" "anthropic.claude-haiku-5-5"]]
       (is (false? (#'claude/model-supports-temperature? model))
           model))
     (is (true? (#'claude/model-supports-temperature? "anthropic.claude-haiku-4-5")))))
@@ -533,4 +541,50 @@
     (testing "temperature is omitted for models that reject sampling parameters"
       (is (not (contains? (request-body "claude-opus-4-8") :temperature)))
       (is (not (contains? (request-body "claude-sonnet-5") :temperature)))
-      (is (not (contains? (request-body "anthropic.claude-opus-4-8") :temperature))))))
+      (is (not (contains? (request-body "anthropic.claude-opus-4-8") :temperature)))
+      (is (not (contains? (request-body "claude-opus-5-5") :temperature)))
+      (is (not (contains? (request-body "claude-haiku-5-5") :temperature))))))
+
+;;; ──────────────────────────────────────────────────────────────────
+;;; forced tool choice tests
+;;; ──────────────────────────────────────────────────────────────────
+
+(deftest ^:parallel forced-tool-choice-test
+  (let [schema {:type "object" :properties {:answer {:type "string"}}}
+        tools  [(metabot.tu/get-time-tool)]
+        body   #(claude/claude-request-body (merge {:input [{:role :user :content "hi"}]} %))]
+    (testing "structured output and a required tool choice force the call, including on date-suffixed 5.0 names and on Haiku"
+      (doseq [model ["claude-opus-5" "claude-sonnet-5" "claude-opus-5-20261005" "claude-sonnet-5-2026-10-05"
+                     "claude-fable-5" "claude-haiku-4-5" "claude-haiku-5-5" "anthropic.claude-haiku-5-5"]]
+        (testing model
+          (is (=? {:tool_choice {:type "tool" :name "structured_output"} :max_tokens 512}
+                  (body {:model model :schema schema :max-tokens 512})))
+          (is (=? {:tool_choice {:type "any"}}
+                  (body {:model model :tools tools :tool_choice "required"}))))))
+    (testing "Opus and Sonnet from 5.5 reject a forced tool choice, so they get auto"
+      (doseq [model ["claude-opus-5-5" "claude-sonnet-5-5" "anthropic.claude-opus-5-5" "anthropic.claude-sonnet-5-5"
+                     "claude-opus-5.5" "claude-opus-5-5-20261005" "claude-sonnet-5-5-2026-10-05"]]
+        (testing model
+          (is (=? {:tool_choice {:type "auto"}
+                   :tools       [{:name "structured_output"}]}
+                  (body {:model model :schema schema})))
+          (is (=? {:tool_choice {:type "auto"}}
+                  (body {:model model :tools tools :tool_choice "required"})))
+          (is (=? {:tool_choice {:type "auto"}}
+                  (body {:model model :tools tools :tool_choice "auto"}))))))
+    (testing "their structured-output cap is floored, since thinking bills against it"
+      (are [expected opts] (= expected (:max_tokens (body (assoc opts :model "claude-opus-5-5"))))
+        2048 {:schema schema :max-tokens 512}
+        4096 {:schema schema :max-tokens 4096}
+        512  {:max-tokens 512}))
+    (testing "with no max-tokens they get the larger chat ceiling; models that can be forced keep 4096"
+      (are [expected model] (= expected (:max_tokens (body {:model model :tools tools :tool_choice "required"})))
+        32000 "claude-opus-5-5"
+        32000 "anthropic.claude-sonnet-5-5"
+        4096  "claude-haiku-5-5"
+        4096  "claude-opus-5"
+        4096  "claude-sonnet-4-6"))
+    (testing "an Azure deployment name is matched case-insensitively"
+      (is (=? {:tool_choice {:type "auto"}}
+              (body {:model "Claude-Opus-5-5" :tools tools :tool_choice "required"})))
+      (is (not (contains? (body {:model "Claude-Opus-4-8" :temperature 0.3}) :temperature))))))

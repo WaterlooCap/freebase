@@ -10,6 +10,7 @@
   TODO:
   - figure out what's lacking compared to ai-service"
   (:require
+   [clojure.string :as str]
    [metabase.analytics-interface.core :as analytics]
    [metabase.analytics.core :as analytics.core]
    [metabase.api.common :as api]
@@ -24,6 +25,7 @@
    [metabase.metabot.self.zai :as zai]
    [metabase.metabot.usage :as usage]
    [metabase.util :as u]
+   [metabase.util.json :as json]
    [metabase.util.log :as log]
    [metabase.util.o11y :refer [with-span]]))
 
@@ -327,6 +329,20 @@
                  tracking-opts
                  #(reduce rf init (make-source)))))))))))
 
+(defn- structured-output-in-text
+  "JSON in the text reply of a model that answered without calling the structured-output tool, as Claude Opus and
+  Sonnet 5.5 may under `tool_choice: auto` (they reject a forced tool call). Tries the whole reply, then each fenced
+  code block from the last one back, and keeps the first JSON object that has every top-level key `json-schema`
+  requires. Keys are keywordized, as tool-call arguments are. Nil when nothing matches."
+  [parts json-schema]
+  (let [text     (str/join (keep #(when (= :text (:type %)) (:text %)) parts))
+        required (map keyword (:required json-schema))]
+    (some (fn [candidate]
+            (let [value (try (json/decode+kw candidate) (catch Exception _ nil))]
+              (when (and (map? value) (every? #(contains? value %) required))
+                value)))
+          (cons text (reverse (map second (re-seq #"(?is)```(?:json)?\s*(.*?)```" text)))))))
+
 (defn call-llm-structured
   "Make an LLM call that returns structured JSON output.
 
@@ -374,5 +390,6 @@
                                  arguments))
                              parts)]
             (or result
+                (structured-output-in-text parts json-schema)
                 (throw (ex-info "LLM returned no tool call in structured response"
                                 {:parts parts})))))))))
