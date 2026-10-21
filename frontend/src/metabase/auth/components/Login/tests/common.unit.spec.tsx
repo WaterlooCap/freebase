@@ -48,9 +48,16 @@ describe("Login", () => {
     expect(screen.getByRole("button")).toBeInTheDocument();
   });
 
-  it("should not disable password login for OSS", () => {
+  it("should hide password login when it is disabled", () => {
     setup({ isPasswordLoginEnabled: false, isGoogleAuthEnabled: true });
 
+    expect(screen.queryByText("Sign in with email")).not.toBeInTheDocument();
+  });
+
+  it("should offer password login as a secondary option when it is enabled", () => {
+    setup({ isPasswordLoginEnabled: true, isGoogleAuthEnabled: true });
+
+    expect(screen.getByText("or")).toBeInTheDocument();
     expect(screen.getByText("Sign in with email")).toBeInTheDocument();
   });
 });

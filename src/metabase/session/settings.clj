@@ -12,7 +12,7 @@
   :visibility :public
   :type       :boolean
   :default    true
-  :feature    :disable-password-login
+  ;; Waterloo fork: no `:feature :disable-password-login` gate, so this OSS build can go SSO-only.
   :audit      :raw-value
   :getter     (fn []
                 ;; if `:enable-password-login` has an *explicit* (non-default) value, and SSO is configured, use that;

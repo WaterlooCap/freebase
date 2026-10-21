@@ -10,6 +10,7 @@
    [metabase.request.settings :as request.settings]
    [metabase.session.api :as api.session]
    [metabase.session.models.session :as session]
+   [metabase.session.settings :as session.settings]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.settings.models.setting]
    [metabase.sso.ldap-test-util :as ldap.test]
@@ -838,6 +839,28 @@
         (mt/with-temporary-setting-values [enable-password-login false]
           (is (= "Password login is disabled for this instance."
                  (mt/client :post 401 "session" (mt/user->credentials :crowberto)))))))))
+
+(deftest sso-only-login-without-premium-feature-test
+  (testing "Waterloo fork: with free OIDC on, enable-password-login false refuses password logins on an OSS build"
+    (mt/with-premium-features #{}
+      (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                         free-oidc-client-id     "abc"
+                                         free-oidc-client-secret "shh"
+                                         free-oidc-issuer-uri    "https://sso.example.test/application/o/metabase/"
+                                         enable-password-login   false]
+        (is (false? (session.settings/enable-password-login)))
+        (is (= "Password login is disabled for this instance."
+               (mt/client :post 401 "session" (mt/user->credentials :crowberto)))))))
+  (testing "password login comes back by itself when OIDC is not configured, so a broken IdP config cannot lock admins out"
+    (mt/with-premium-features #{}
+      (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                         free-oidc-client-id     nil
+                                         free-oidc-client-secret nil
+                                         free-oidc-issuer-uri    nil
+                                         enable-password-login   false]
+        (is (true? (session.settings/enable-password-login)))
+        (is (malli= SessionResponse
+                    (mt/client :post 200 "session" (mt/user->credentials :crowberto))))))))
 
 (deftest ldap-login-no-fallback-for-invalid-ldap-password-test
   (testing "LDAP login - no fallback for users in LDAP with invalid password"

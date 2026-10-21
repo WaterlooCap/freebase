@@ -15,21 +15,22 @@ export const LayoutBody = styled.div`
   justify-content: center;
   align-items: center;
   position: relative;
-  padding: 1.5rem 1rem 3rem;
+  padding: 1.5rem 1rem 4rem;
   min-height: 100vh;
 `;
 
 export const LayoutCard = styled.div`
   width: 100%;
-  margin-top: 1.5rem;
-  padding: 2.5rem 1.5rem;
+  margin-top: 2rem;
+  padding: 2rem 1.5rem;
   background-color: var(--mb-color-background_page-primary);
-  box-shadow: 0 1px 15px var(--mb-color-shadow-default);
-  border-radius: 6px;
+  border: 1px solid var(--mb-color-border-neutral);
+  box-shadow: 0 2px 8px var(--mb-color-shadow-default);
+  border-radius: 12px;
 
   ${breakpointMinSmall} {
-    width: 30.875rem;
-    padding: 2.5rem 3.5rem;
+    width: 26.5rem;
+    padding: 2.5rem;
   }
 `;
 

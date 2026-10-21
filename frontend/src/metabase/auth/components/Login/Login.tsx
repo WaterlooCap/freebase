@@ -1,5 +1,4 @@
 import type { Location } from "history";
-import { Fragment } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
@@ -7,7 +6,7 @@ import { usePageTitle } from "metabase/hooks/use-page-title";
 import type { AuthProvider } from "metabase/plugins/types";
 import { useSelector } from "metabase/redux";
 import { getApplicationName } from "metabase/selectors/whitelabel";
-import { Box, Divider } from "metabase/ui";
+import { Box, Divider, Stack, Text, Title } from "metabase/ui";
 
 import { getAuthProviders } from "../../selectors";
 import { AuthLayout } from "../AuthLayout";
@@ -33,43 +32,43 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
 
   usePageTitle(t`Login`);
 
-  const [passwordProvider, otherProviders] = _.partition(
+  const [passwordProviders, otherProviders] = _.partition(
     providers,
     (provider) => provider.name === "password",
   );
   return (
     <AuthLayout>
-      <Box
-        role="heading"
-        c="text-primary"
-        fz="1.25rem"
-        fw="bold"
-        lh="1.5rem"
-        ta="center"
-      >
-        {t`Sign in to ${applicationName}`}
-      </Box>
+      <Stack gap="0.5rem" ta="center">
+        <Title order={1} c="text-primary" fz="1.5rem" lh="2rem">
+          {t`Sign in to ${applicationName}`}
+        </Title>
+        {!selection && (
+          <Text c="text-secondary">{t`Use your ${applicationName} account to continue.`}</Text>
+        )}
+      </Stack>
       {selection && selection.Panel && (
-        <Box mt="2.5rem">
+        <Box mt="2rem">
           <selection.Panel redirectUrl={redirectUrl} />
         </Box>
       )}
       {!selection && (
-        <Box mt="3.5rem">
+        <Stack mt="2rem" gap="1rem">
           {otherProviders.map((provider) => (
-            <Box key={provider.name} mt="2rem" ta="center">
-              <provider.Button isCard={true} redirectUrl={redirectUrl} />
+            <provider.Button
+              key={provider.name}
+              isCard={true}
+              redirectUrl={redirectUrl}
+            />
+          ))}
+          {passwordProviders.length > 0 && (
+            <Divider label={t`or`} labelPosition="center" />
+          )}
+          {passwordProviders.map((provider) => (
+            <Box key={provider.name} ta="center" fz="sm">
+              <provider.Button redirectUrl={redirectUrl} />
             </Box>
           ))}
-          {passwordProvider.map((provider) => (
-            <Fragment key={provider.name}>
-              <Divider mt="2rem" />
-              <Box mt="1rem" ta="center">
-                <provider.Button isCard={true} redirectUrl={redirectUrl} />
-              </Box>
-            </Fragment>
-          ))}
-        </Box>
+        </Stack>
       )}
     </AuthLayout>
   );
