@@ -52,6 +52,7 @@ describe("Login", () => {
     setup({ isPasswordLoginEnabled: false, isGoogleAuthEnabled: true });
 
     expect(screen.queryByText("Sign in with email")).not.toBeInTheDocument();
+    expect(screen.queryByText("or")).not.toBeInTheDocument();
   });
 
   it("should offer password login as a secondary option when it is enabled", () => {

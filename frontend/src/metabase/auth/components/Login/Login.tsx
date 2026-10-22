@@ -60,7 +60,7 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
               redirectUrl={redirectUrl}
             />
           ))}
-          {passwordProviders.length > 0 && (
+          {otherProviders.length > 0 && passwordProviders.length > 0 && (
             <Divider label={t`or`} labelPosition="center" />
           )}
           {passwordProviders.map((provider) => (

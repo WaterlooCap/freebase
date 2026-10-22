@@ -17,15 +17,14 @@
 (defn- join-url
   [user-id redirect]
   ;; TODO: the reset token should come from the event-info, not generated here!
-  (let [reset-token               (auth-identity/create-password-reset! user-id)
-        should-link-to-login-page (and (sso/sso-enabled?)
+  (let [should-link-to-login-page (and (sso/sso-enabled?)
                                        (not (session/enable-password-login)))
         email (t2/select-one-fn :email [:model/User :email] user-id)]
     (if should-link-to-login-page
       (cond-> (str (system/site-url) "/auth/login")
         redirect (str "?redirect=" redirect))
       ;; NOTE: the new user join url is a password reset route with an indicator that this is a first time user.
-      (str (user/form-password-reset-url reset-token)
+      (str (user/form-password-reset-url (auth-identity/create-password-reset! user-id))
            "?"
            (str/join "&" (remove nil? [(when redirect (str "redirect=" redirect))
                                        (when email (str "email=" email))]))
