@@ -4,12 +4,12 @@ import { screen } from "__support__/ui";
 import { setup } from "./setup";
 
 describe("Login", () => {
-  it("should not disable password login without the 'disable_password_login' token feature", () => {
+  it("should disable password login without the 'disable_password_login' token feature", () => {
     setup({
       isPasswordLoginEnabled: false,
       isGoogleAuthEnabled: true,
     });
 
-    expect(screen.getByText("Sign in with email")).toBeInTheDocument();
+    expect(screen.queryByText("Sign in with email")).not.toBeInTheDocument();
   });
 });

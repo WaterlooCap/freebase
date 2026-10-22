@@ -10,6 +10,7 @@
    [metabase.request.settings :as request.settings]
    [metabase.session.api :as api.session]
    [metabase.session.models.session :as session]
+   [metabase.session.settings :as session.settings]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.settings.models.setting]
    [metabase.sso.ldap-test-util :as ldap.test]
@@ -838,6 +839,61 @@
         (mt/with-temporary-setting-values [enable-password-login false]
           (is (= "Password login is disabled for this instance."
                  (mt/client :post 401 "session" (mt/user->credentials :crowberto)))))))))
+
+(deftest sso-only-login-without-premium-feature-test
+  (testing "Waterloo fork: with free OIDC on, enable-password-login false refuses password logins on an OSS build"
+    (mt/with-premium-features #{}
+      (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                         free-oidc-client-id     "abc"
+                                         free-oidc-client-secret "shh"
+                                         free-oidc-issuer-uri    "https://sso.example.test/application/o/metabase/"
+                                         enable-password-login   false]
+        (is (false? (session.settings/enable-password-login)))
+        (is (= "Password login is disabled for this instance."
+               (mt/client :post 401 "session" (mt/user->credentials :crowberto)))))))
+  (testing "password login comes back by itself when OIDC is not configured, so a broken IdP config cannot lock admins out"
+    (mt/with-premium-features #{}
+      (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                         free-oidc-client-id     nil
+                                         free-oidc-client-secret nil
+                                         free-oidc-issuer-uri    nil
+                                         enable-password-login   false]
+        (is (true? (session.settings/enable-password-login)))
+        (is (malli= SessionResponse
+                    (mt/client :post 200 "session" (mt/user->credentials :crowberto))))))))
+
+(deftest sso-only-blocks-password-reset-test
+  (testing "Waterloo fork: with free OIDC on and password login off, the reset flow cannot mint a session around SSO"
+    ;; the test client signs crowberto in with a password, so mint that session before password login goes off
+    (mt/user-http-request :crowberto :get 200 "user/current")
+    (with-redefs [api.session/forgot-password-impl
+                  (let [orig @#'api.session/forgot-password-impl]
+                    (fn [& args] (u/deref-with-timeout (apply orig args) 1000)))]
+      (mt/with-premium-features #{}
+        (mt/with-temporary-setting-values [free-oidc-enabled       true
+                                           free-oidc-client-id     "abc"
+                                           free-oidc-client-secret "shh"
+                                           free-oidc-issuer-uri    "https://sso.example.test/application/o/metabase/"
+                                           enable-password-login   false
+                                           site-url                "http://test.example.com"]
+          (mt/with-temp [:model/User {:keys [email id]} {}]
+            (auth-identity/set-password! id "password")
+            (testing "forgot_password tells them to use SSO and sends no reset link"
+              (mt/with-fake-inbox
+                (mt/client :post 204 "session/forgot_password" {:email email})
+                (is (mt/received-email-body? email #"single sign-on"))
+                (is (not (mt/received-email-body? email #"reset_password")))))
+            (let [token (auth-identity/create-password-reset! id)]
+              (testing "a reset token minted before the switch can neither be checked nor redeemed"
+                (is (= "Password login is disabled for this instance."
+                       (mt/client :get 400 "session/password_reset_token_valid" :token token)))
+                (is (= "Password login is disabled for this instance."
+                       (mt/client :post 400 "session/reset_password" {:token token :password "whateverUP12!!"}))))
+              (testing "no session was minted for the user"
+                (is (zero? (t2/count :model/Session :user_id id)))))
+            (testing "an admin cannot mint a password-reset link either"
+              (is (= "Password login is disabled for this instance."
+                     (mt/user-http-request :crowberto :post 400 (format "user/%d/password-reset-url" id)))))))))))
 
 (deftest ldap-login-no-fallback-for-invalid-ldap-password-test
   (testing "LDAP login - no fallback for users in LDAP with invalid password"

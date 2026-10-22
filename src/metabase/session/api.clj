@@ -15,6 +15,7 @@
    [metabase.session.challenge :as session.challenge]
    [metabase.session.models.session :as session]
    [metabase.session.schema :as session.schema]
+   [metabase.session.settings :as session.settings]
    [metabase.settings.core :as setting]
    [metabase.sso.core :as sso]
    [metabase.system.core :as system]
@@ -242,6 +243,13 @@
   {:email      (throttle/make-throttler :email :attempts-threshold 3 :attempt-ttl-ms (* 1000 60 60))
    :ip-address (throttle/make-throttler :email :attempts-threshold 50)})
 
+(defn- check-password-login-enabled
+  "Waterloo fork: refuse the password-reset endpoints while password login is off. A reset mints a session under the
+  reset provider rather than `password`, so the session guard in `session.models.session` does not catch it."
+  []
+  (api/check (session.settings/enable-password-login)
+             [400 (tru "Password login is disabled for this instance.")]))
+
 (defn- sso-password-reset-disabled?
   "Disable password reset for users whose SSO provider is still active — they should use SSO.
    When a provider is no longer available (e.g., after license downgrade), allow password reset
@@ -280,6 +288,10 @@
         ;; SSO users should use their SSO provider, not password reset.
         (sso-password-reset-disabled? sso-source)
         (messages/send-password-reset-email! email sso-source nil is-active?)
+
+        ;; Waterloo fork: with password login off, every user signs in with SSO, so send no reset link.
+        (not (session.settings/enable-password-login))
+        (messages/send-password-reset-email! email (or sso-source :oidc) nil is-active?)
 
         ;; Support-access users get a refreshed token bound to the grant.
         ;; If the grant has expired, refresh-support-access-token! returns nil and we silently
@@ -354,6 +366,7 @@
    request]
   (let [request-source (request/ip-address request)]
     (throttle-check reset-password-throttler request-source))
+  (check-password-login-enabled)
   ;; Forward only what the reset providers consume -- belt and braces alongside the decoding above.
   (let [auth-result (auth-identity/with-fallback auth-identity/login!
                       [:provider/support-access-grant
@@ -388,6 +401,7 @@
   [_route-params
    {:keys [token]} :- [:map
                        [:token ms/NonBlankString]]]
+  (check-password-login-enabled)
   (let [auth-result (auth-identity/with-fallback auth-identity/authenticate
                       [:provider/support-access-grant
                        :provider/emailed-secret-password-reset]

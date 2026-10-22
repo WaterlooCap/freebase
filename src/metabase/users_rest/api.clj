@@ -15,6 +15,7 @@
    [metabase.permissions.core :as perms]
    [metabase.premium-features.core :as premium-features]
    [metabase.request.core :as request]
+   [metabase.session.core :as session]
    [metabase.sso.core :as sso]
    [metabase.system.core :as system]
    [metabase.tenants.core :as tenants]
@@ -620,6 +621,9 @@
   [{:keys [id]} :- [:map
                     [:id ms/PositiveInt]]]
   (api/check-superuser)
+  ;; Waterloo fork: with password login off, a reset link would mint a password session around SSO.
+  (api/check (session/enable-password-login)
+             [400 (tru "Password login is disabled for this instance.")])
   (let [user (api/check-404 (t2/select-one [:model/User :id :is_active :type] :id id))]
     (api/check-404 (:is_active user))
     (api/check-404 (= :personal (:type user)))
