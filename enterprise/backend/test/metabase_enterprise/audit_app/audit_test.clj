@@ -7,14 +7,13 @@
    [metabase-enterprise.audit-app.audit :as ee-audit]
    [metabase-enterprise.audit-app.settings :as ee.audit.settings]
    [metabase-enterprise.serialization.cmd :as serialization.cmd]
-   [metabase-enterprise.serialization.v2.backfill-ids :as serdes.backfill]
    [metabase.audit-app.core :as audit]
    [metabase.core.core :as mbc]
    [metabase.lib.core :as lib]
-   [metabase.models.serialization :as serdes]
    [metabase.permissions-rest.data-permissions.graph :as data-perms.graph]
    [metabase.permissions.models.permissions-group :as perms-group]
    [metabase.plugins.core :as plugins]
+   [metabase.queries.card-schema :as card-schema]
    [metabase.sync.core :as sync.core]
    [metabase.sync.sync :as sync]
    [metabase.sync.task.sync-databases :as task.sync-databases]
@@ -68,8 +67,7 @@
       (is (not= 0 (t2/count :model/Card {:where [:= :database_id audit/audit-db-id]}))
           "Cards should be created for Audit DB when the content is there."))
     (testing "Cards in the audit collection have non-empty :result_metadata after installation"
-      (let [audit-cards             (t2/select [:model/Card :id :name :result_metadata :card_schema]
-                                               :database_id audit/audit-db-id)
+      (let [audit-cards             (t2/select (card-schema/selection [:name]) :database_id audit/audit-db-id)
             audit-cards-no-metadata (filter (comp empty? :result_metadata) audit-cards)]
         (is (seq audit-cards))
         (is (empty? audit-cards-no-metadata)
@@ -143,26 +141,6 @@
       (is (= '("metabase.task.update-field-values.trigger.13371337")
              (get-audit-db-trigger-keys))
           "no sync occurred even when called directly for audit db."))))
-
-(deftest no-backfill-occurs-when-loading-analytics-content-test
-  (mt/with-model-cleanup [:model/Collection]
-    (let [c1-instance (t2/insert-returning-instance! :model/Collection
-                                                     {:entity_id nil,
-                                                      :name      "My Duped Collection",
-                                                      :location  "/"})]
-      ;; fill in the entity_id for c1:
-      (serdes.backfill/backfill-ids-for! :model/Collection)
-      ;; insert c2, which will have the same entity id:
-      (let [c2-instance (t2/insert-returning-instance! :model/Collection (dissoc c1-instance :id))]
-        (testing "c1 and c2 hash to the same entity id."
-          (is (= (u/generate-nano-id (serdes/identity-hash c1-instance))
-                 (u/generate-nano-id (serdes/identity-hash c2-instance)))))
-        (testing "A backfill with 'duplicate' rows (with different ids)."
-          (is (thrown? Exception
-                       (serdes.backfill/backfill-ids-for! :model/Collection))))
-        (testing "No exception is thrown when db has 'duplicate' entries."
-          (is (= ::ee-audit/no-op
-                 (ee-audit/ensure-audit-db-installed!))))))))
 
 (deftest checksum-not-recorded-when-load-fails-test
   (mt/test-drivers #{:postgres :h2 :mysql}
@@ -498,17 +476,17 @@
       (try
         ;; stale the content checksum so the (stubbed) load runs inside the locked pipeline
         (audit/last-analytics-checksum! 0)
-        (with-redefs [serialization.cmd/v2-load-internal!
-                      (fn [& _]
-                        (t2/insert! :model/User (assoc (mt/with-temp-defaults :model/User) :email email))
-                        (reset! visible
-                                (deref (future
-                                         (binding [t2.connection/*current-connectable* nil]
-                                           (t2/exists? :model/User :email email)))
-                                       5000 ::timeout))
-                        ;; report no errors: content is already loaded from the steady state, so
-                        ;; letting the checksum advance leaves a consistent end state
-                        {:errors [] :seen []})]
+        (mt/with-dynamic-fn-redefs [serialization.cmd/v2-load-internal!
+                                    (fn [& _]
+                                      (t2/insert! :model/User (assoc (mt/with-temp-defaults :model/User) :email email))
+                                      (reset! visible
+                                              (deref (future
+                                                       (binding [t2.connection/*current-connectable* nil]
+                                                         (t2/exists? :model/User :email email)))
+                                                     5000 ::timeout))
+                                      ;; report no errors: content is already loaded from the steady state, so
+                                      ;; letting the checksum advance leaves a consistent end state
+                                      {:errors [] :seen []})]
           (mbc/ensure-audit-db-installed!))
         (testing "work committed inside the audit pipeline is visible mid-pipeline from another connection"
           (is (true? @visible)))
@@ -527,8 +505,8 @@
       (audit/last-analytics-checksum! 0)
       ;; "Boot 1": the serdes load dies partway through.
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"killed mid-load"
-                            (with-redefs [serialization.cmd/v2-load-internal!
-                                          (fn [& _] (throw (ex-info "killed mid-load" {})))]
+                            (mt/with-dynamic-fn-redefs [serialization.cmd/v2-load-internal!
+                                                        (fn [& _] (throw (ex-info "killed mid-load" {})))]
                               (mbc/ensure-audit-db-installed!))))
       (testing "the content checksum does not advance past an incomplete load"
         (is (= 0 (audit/last-analytics-checksum))))

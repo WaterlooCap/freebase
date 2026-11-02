@@ -16,6 +16,7 @@
    [metabase.lib.test-util.metadata-providers.mock :as providers.mock]
    [metabase.lib.test-util.uuid-dogs-metadata-provider :as lib.tu.uuid-dogs-metadata-provider]
    [metabase.query-processor.preprocess :as qp.preprocess]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.test :as mt]
@@ -1079,9 +1080,8 @@
                                    "Total_number_of_people_from_each_state_separated_by_00028d48"]]}]}
               (add-alias-info query))))))
 
-;;; [[add-alias-info]] runs during compilation, after preprocessing. A query that carries its keys back into
-;;; preprocessing has them dropped there along with every other foreign clause option, since options are how a caller
-;;; would otherwise hand the drivers keys they read.
+;;; in the future when we remove all the roundtripping that happens inside of the QP then we can remove this test
+;;; entirely.
 (deftest ^:parallel additional-keys-do-not-survive-preprocessing-test
   (driver/with-driver :h2
     (let [query (lib/query
@@ -1392,10 +1392,10 @@
                           (lib/aggregate $q (lib/count)))
           ;; Inject stale :inherited-temporal-unit into the breakout field ref, simulating a card
           ;; saved when the source column had :minute granularity.
-          ;; Legacy field refs are [:field name-or-id opts-map].
+          ;; MBQL 5 field refs are [:field opts-map id], so the options live at index 1.
           model-2-query (lib/update-query-stage
                          model-2-query -1
-                         assoc-in [:breakouts 0 1 :inherited-temporal-unit] :minute)
+                         assoc-in [:breakout 0 1 :inherited-temporal-unit] :minute)
           mp (lib.tu/mock-metadata-provider
               mp
               {:cards [{:id            2

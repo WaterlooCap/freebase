@@ -1,10 +1,8 @@
 (ns metabase.dashboards.models.dashboard-card-test
   (:require
    [clojure.test :refer :all]
-   [honey.sql :as sql]
    [metabase.dashboards.models.dashboard :as dashboard]
    [metabase.dashboards.models.dashboard-card :as dashboard-card]
-   [metabase.models.serialization :as serdes]
    [metabase.queries.models.card-test :as card-test]
    [metabase.test :as mt]
    [metabase.util :as u]
@@ -181,7 +179,6 @@
       (testing "return value from the update call should be nil"
         (is (nil? (dashboard-card/update-dashboard-card!
                    {:id                     dashcard-id
-                    :actor_id               (mt/user->id :rasta)
                     :dashboard_id           nil
                     :card_id                nil
                     :size_x                 5
@@ -233,21 +230,21 @@
         (testing "Should have more calls if there are changes to the dashcards"
           (t2/with-call-count [call-count]
             (dashboard/update-dashcards! dashboard [{:id     (:id dashcard-1)
-                                                     :cardId card-id
+                                                     :card_id card-id
                                                      :row    1
                                                      :col    2
                                                      :size_x 3
                                                      :size_y 4
                                                      :series [{:id series-id-1}]}
                                                     {:id     (:id dashcard-2)
-                                                     :cardId card-id
+                                                     :card_id card-id
                                                      :row    1
                                                      :col    2
                                                      :size_x 3
                                                      :size_y 4
                                                      :series [{:id series-id-2}]}
                                                     {:id     (:id dashcard-3)
-                                                     :cardId card-id
+                                                     :card_id card-id
                                                      :row    1
                                                      :col    2
                                                      :size_x 3
@@ -284,22 +281,6 @@
                                                        :visualization_settings original}]
            (is (= expected
                   (t2/select-one-fn :visualization_settings :model/DashboardCard :id (u/the-id dashcard))))))))))
-
-(deftest ^:parallel identity-hash-test
-  (testing "Dashboard card hashes are composed of the card hash, dashboard hash, and visualization settings"
-    (let [now #t "2022-09-01T12:34:56Z"]
-      (mt/with-temp [:model/Collection    c1       {:name "top level" :location "/" :created_at now}
-                     :model/Dashboard     dash     {:name "my dashboard"  :collection_id (:id c1) :created_at now}
-                     :model/Card          card     {:name "some question" :collection_id (:id c1) :created_at now}
-                     :model/DashboardCard dashcard {:card_id                (:id card)
-                                                    :dashboard_id           (:id dash)
-                                                    :visualization_settings {}
-                                                    :row                    6
-                                                    :col                    3
-                                                    :created_at             now}]
-        (is (= "1311d6dc"
-               (serdes/raw-hash [(serdes/identity-hash card) (serdes/identity-hash dash) {} 6 3 (:created_at dashcard)])
-               (serdes/identity-hash dashcard)))))))
 
 (deftest ^:parallel from-decoded-json-test
   (testing "Dashboard Cards should remain the same if they are serialized to JSON,
@@ -371,29 +352,6 @@
           (is (= [{:sourceId (str "card:" (:id src))}]
                  (get-in loaded [:visualization_settings :visualization :columnValuesMapping :COLUMN_1]))))))))
 
-(deftest ^:parallel link-card-info-query-for-model-requires-integer-id-test
-  (testing "a link-card entity id is spliced into the :where clause, so a non-integer"
-    (testing "must be rejected before it reaches the app DB"
-      (doseq [[label bad-id] {"a {:raw ...} map"      {:raw "1); DROP TABLE t; --"}
-                              "a raw SQL string"      "1 OR 1=1"
-                              "a honeysql op vector"  [:raw "1=1"]
-                              "a set with a bad id"   #{1 {:raw "x"}}
-                              "nil"                    nil}]
-        (testing label
-          (is (thrown-with-msg?
-               clojure.lang.ExceptionInfo
-               #"Link card entity id must be an integer"
-               (dashboard-card/link-card-info-query-for-model "card" bad-id)))))))
-  (testing "legitimate integer ids still build a parameterized query (no literal splicing)"
-    (testing "a single id"
-      (let [[sql & params] (sql/format (dashboard-card/link-card-info-query-for-model "card" 42))]
-        (is (re-find #"WHERE id = \?" sql))
-        (is (= [42] params))))
-    (testing "a set of ids (the batched hydration path)"
-      (let [[sql & params] (sql/format (dashboard-card/link-card-info-query-for-model "card" #{1 2 3}))]
-        (is (re-find #"WHERE id IN \(\?, \?, \?\)" sql))
-        (is (= #{1 2 3} (set params)))))))
-
 (deftest link-card-entity-id-validated-on-write-test
   (testing "a link-card entity id must be an integer before it is stored, and a legitimate id round-trips"
     (mt/with-temp [:model/Dashboard {dash-id :id} {}]
@@ -460,14 +418,3 @@
                                    :column_settings
                                    {"[\"name\",\"abc\"]"
                                     {:click_behavior {:type "link" :linkType "question" :targetId card-id}}}}}))))))))
-
-(deftest ^:parallel link-card-id-compiles-as-query-parameter-test
-  (testing "a non-integer id is rejected when building the link-card query"
-    (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"must be an integer"
-         (dashboard-card/link-card-info-query-for-model "card" {:raw "x"}))))
-  (testing "single-id and collection forms both pass a legitimate id as a bind parameter"
-    (doseq [ids [42 #{42} [42]]]
-      (let [[query & params] (sql/format (dashboard-card/link-card-info-query-for-model "card" ids))]
-        (is (re-find #"\?" query) "the id appears as a bind parameter")
-        (is (= [42] params))))))

@@ -12,9 +12,6 @@
   Excludes metadata columns (timestamps, IDs, collection_id, creator_id, etc.)
   following the same pattern established for Card revisions.
 
-  `:public_uuid` and `:made_public_by_id` are excluded because public sharing is admin-only: recording them
-  would let anyone with curate permission on the Document reinstate a revoked public link by reverting.
-
   The :document field contains the actual content and is preserved."
   #{:id
     :creator_id

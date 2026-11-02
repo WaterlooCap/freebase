@@ -1,6 +1,7 @@
 (ns metabase.revisions.impl.card
   (:require
    [metabase.queries.core :as queries]
+   [metabase.revisions.db :as revisions.db]
    [metabase.revisions.models.revision :as revision]
    [toucan2.core :as t2]))
 
@@ -21,6 +22,11 @@
     :legacy_query
     :made_public_by_id
     :metabase_version
+    ;; internal Metabot bookkeeping (which conversation/chart the card was saved from);
+    ;; excluding them also keeps a revert from writing back a stale conversation id
+    ;; after the conversation is deleted (the FK would reject it)
+    :metabot_chart_id
+    :metabot_conversation_id
     :public_uuid
     :public_uuid_prefix
     :updated_at
@@ -36,8 +42,7 @@
                           (not (:card_schema serialized-card)) (assoc :card_schema queries/starting-card-schema-version))
         restored        (apply dissoc serialized-card excluded-columns-for-card-revision)]
     (queries/check-new-parameter-source-card-permissions "card" id (:parameters restored))
-    (queries/maybe-unverify! (t2/hydrate (t2/select-one :model/Card :id id)
-                                         [:moderation_reviews :moderator_details])
+    (queries/maybe-unverify! (t2/hydrate (revisions.db/card id) [:moderation_reviews :moderator_details])
                              restored
                              {:id user-id})
     ((get-method revision/revert-to-revision! :default) model id user-id restored)))

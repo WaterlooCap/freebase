@@ -3,8 +3,13 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer :all]
+   [metabase.analytics-interface.core :as analytics-interface]
    [metabase.sql-parsing.core :as sql-parsing]
-   [metabase.util :as u]))
+   [metabase.sql-parsing.graal :as graal]
+   [metabase.test.util.dynamic-redefs :as dynamic-redefs]
+   [metabase.util :as u])
+  (:import
+   (java.util.concurrent TimeoutException)))
 
 (set! *warn-on-reflection* true)
 
@@ -756,6 +761,41 @@
       (is (= [[nil nil "accounts"]] (sql-parsing/referenced-tables "postgres" sql)))
       (is (=? {:errors #{}} (sql-parsing/field-references "postgres" sql))))))
 
+;;; ------------------------------------------- validate-executable-stmt -------------------------------------------
+
+(deftest ^:parallel validate-executable-stmt-test
+  (testing "whether a query is one statement of the kind asked for, which is what tells a caller the rest is unread"
+    (are [sql stmt-type expected] (=? expected (sql-parsing/validate-executable-stmt "postgres" sql stmt-type))
+      "SELECT * FROM orders"                              "read"  {:verdict :allowed    :single-stmt? true}
+      "SELECT * FROM orders; DELETE FROM people"          "read"  {:verdict :disallowed :single-stmt? false}
+      "SELECT * FROM orders;"                             "read"  {:verdict :allowed    :single-stmt? true}
+      "SELECT * FROM orders WHERE note = 'a; b'"          "read"  {:verdict :allowed    :single-stmt? true}
+      "DELETE FROM people WHERE id = 1"                   "read"  {:verdict :disallowed :single-stmt? true}
+      "DELETE FROM people WHERE id = 1"                   "write" {:verdict :allowed    :single-stmt? true}
+      "WITH c AS (SELECT id FROM people) SELECT * FROM c" "read"  {:verdict :allowed    :single-stmt? true}))
+  (testing "SQL the dialect cannot parse is unchecked, not disallowed"
+    (is (=? {:verdict :unknown, :reason "unparseable", :error some?}
+            (sql-parsing/validate-executable-stmt "postgres" "SELECT (" "read"))))
+  (testing "an unknown dialect is unchecked rather than parsed generically"
+    (is (= {:verdict :unknown, :reason "unknown-dialect", :sql "SELECT 1"}
+           (sql-parsing/validate-executable-stmt nil "SELECT 1" "read"))))
+  (testing "never answers about a stripped rewrite"
+    ;; Analysis can read a stripped query because it only needs the shape. This answer has to hold for the
+    ;; string the caller will execute, so it parses the original and reports SQL over its ceiling as
+    ;; unchecked rather than answering about a rewrite.
+    (let [under (str "SELECT * FROM t WHERE id IN (" (str/join ", " (range 150)) ")")
+          over  (str "SELECT * FROM t WHERE id IN (" (str/join ", " (range 20000)) ")")]
+      (testing "a list the analysis threshold would strip still validates as one statement"
+        (is (=? {:verdict :allowed} (sql-parsing/validate-executable-stmt "postgres" under "read"))))
+      (testing "a list past the ceiling comes back unchecked, not stripped and vouched for"
+        (is (= {:verdict :unknown, :reason "large-literal-list", :sql over}
+               (sql-parsing/validate-executable-stmt "postgres" over "read"))))))
+  (testing "a second statement hidden in a comment inside an oversized list is refused, not run"
+    (let [sql (str "SELECT * FROM (VALUES " (str/join ", " (repeat 2001 "(1)"))
+                   " -- ), (1)) AS v(x); SET ROLE NONE; SELECT 1 AS x\n) AS v(x)")]
+      (is (=? {:verdict :unknown, :reason "large-literal-list", :sql sql}
+              (sql-parsing/validate-executable-stmt "postgres" sql "read"))))))
+
 (deftest ^:parallel large-values-referenced-tables-test
   (testing "referenced-tables works on queries with massive VALUES clauses"
     (let [tuples (str/join ", " (map #(format "(%d, %d)" % (mod % 100)) (range 20000)))
@@ -805,3 +845,18 @@
               (sql-parsing/referenced-tables "postgres" "SELECT !!!")
               (catch Exception e e))]
       (is (sql-parsing/parse-error? e)))))
+
+;;; ------------------------------------------------ Timeout robustness --------------------------------------------
+
+(deftest timeout-surfaces-even-when-metric-inc-fails-test
+  (testing (str "A fired Python-call timeout still surfaces as TimeoutException from the API even if "
+                "the timeout-metric bump throws — a misconfigured analytics registry must not shadow "
+                "the timeout (#77084).")
+    (dynamic-redefs/with-dynamic-fn-redefs [;; force the timeout branch of do-with-python-context without waiting 30s
+                                            graal/with-timeout* (fn [_ _] :metabase.sql-parsing.graal/timeout)
+                                            ;; poison only the timeout metric; leave the acquisition inc! alone
+                                            analytics-interface/inc! (fn [k & _]
+                                                                       (when (= k :metabase-sql-parsing/context-timeouts)
+                                                                         (throw (Exception. "boom"))))]
+      (is (thrown? TimeoutException
+                   (sql-parsing/referenced-tables "postgres" "SELECT 1"))))))

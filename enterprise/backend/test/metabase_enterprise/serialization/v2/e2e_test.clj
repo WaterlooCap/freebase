@@ -16,6 +16,7 @@
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.models.serialization :as serdes]
+   [metabase.queries.card-schema :as card-schema]
    [metabase.query-processor :as qp]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.search.core :as search]
@@ -35,7 +36,6 @@
 ;; `reindex!` below is ok in a parallel test since it's not actually executing anything.
 ;; Many tests here rely on the H2 test-data database via Card defaults, so we keep the H2 guard
 ;; off and re-enable the H2 path in the extract (production keeps it filtered).
-#_{:clj-kondo/ignore [:metabase/validate-deftest]}
 (use-fixtures :each (fn [thunk]
                       (mt/with-dynamic-fn-redefs [search/reindex! (constantly nil)
                                                   models.database/assert-not-h2! (constantly nil)]
@@ -109,6 +109,7 @@
   [entity]
   (dissoc entity :created_at :result_metadata :metadata_sync_schedule :cache_field_values_schedule))
 
+;; one generated random dump feeds all storage+ingestion assertions; splitting regenerates it per test
 #_{:clj-kondo/ignore [:metabase/i-like-making-cams-eyes-bleed-with-horrifically-long-tests]}
 (deftest e2e-storage-ingestion-test
   (ts/with-random-dump-dir [dump-dir "serdesv2-"]
@@ -526,7 +527,7 @@
                          [{:id model-eid         :model "Card"}]
                          [{:id card-eid          :model "Card"}]
                          [{:id "Linked database" :model "Database"}]}
-                       (set (serdes/dependencies extracted-dashboard))))
+                       (set (serdes/deserialization-dependencies extracted-dashboard))))
                 (storage/store! (seq extraction) (storage.files/file-writer dump-dir))))
             (testing "ingest and load"
               ;; ingest
@@ -961,7 +962,7 @@
                                                                                                               [:field %products.category {:join-alias "Products"}]]}]})}]
             ;; Populate the native source card's result_metadata the way the app does when a user runs and
             ;; saves the query. This is the state serdes must preserve across the round-trip.
-            (let [source-cols  (-> (qp/process-query (t2/select-one-fn :dataset_query [:model/Card :dataset_query] native-id))
+            (let [source-cols  (-> (qp/process-query (t2/select-one-fn :dataset_query (card-schema/selection) native-id))
                                    (get-in [:data :results_metadata :columns]))
                   source-names (mapv :name source-cols)]
               (t2/update! :model/Card native-id {:result_metadata source-cols})
@@ -1043,3 +1044,42 @@
         (is (=? {:table_id (:id table) :name field-name :active false}             field))
         (is (= (:id table) (lib/primary-source-table-id imported)))
         (is (=? [[:field {} (:id field)]] (lib/fields imported)))))))
+
+(deftest orphaned-transform-yaml-round-trip-test
+  (testing "A Transform whose source database was deleted round-trips through YAML storage as a tombstone"
+    (mt/with-premium-features #{:transforms-basic}
+      (ts/with-random-dump-dir [dump-dir "serdesv2-"]
+        (ts/with-dbs [source-db dest-db]
+          (ts/with-db source-db
+            (t2/delete! :model/TransformTag)
+            (let [db    (ts/create! :model/Database :name "soon-to-be-deleted")
+                  table (ts/create! :model/Table :name "customers" :db_id (:id db))
+                  mp    (lib-be/application-database-metadata-provider (:id db))]
+              (ts/create! :model/Transform
+                          :name   "Orphan Transform"
+                          :source {:type  "query"
+                                   :query (lib/query mp (lib.metadata/table mp (:id table)))}
+                          :target {:database (:id db)
+                                   :type     "table"
+                                   :schema   "public"
+                                   :name     "orphan_target"})
+              (t2/delete! :model/Database :id (:id db))
+              (storage/store! (serdes/with-cache (into [] (extract/extract {})))
+                              (storage.files/file-writer dump-dir))))
+          (let [file     (io/file dump-dir "collections" "transforms" "orphan_transform.yaml")
+                exported (yaml/from-file file)]
+            (testing "the exported query carries no metadata provider"
+              (is (=? {:database nil, :lib/type "mbql/query"} (get-in exported [:source :query])))
+              (is (not (contains? (get-in exported [:source :query]) :lib/metadata))))
+            (dump/spit-yaml! file (assoc-in exported [:source :query :lib/metadata] nil)))
+          (ts/with-db dest-db
+            (t2/delete! :model/TransformTag)
+            (is (serdes/with-cache (serdes.load/load-metabase! (ingest/ingest-yaml dump-dir)))
+                "an export written with a nil `lib/metadata` still loads")
+            (let [transform (t2/select-one :model/Transform :name "Orphan Transform")]
+              (is (=? {:source_database_id nil
+                       :source             {:type :query}}
+                      transform))
+              (is (=? {"database" nil
+                       "stages"   [{"source-table" pos-int?}]}
+                      (get-in transform [:source :query]))))))))))

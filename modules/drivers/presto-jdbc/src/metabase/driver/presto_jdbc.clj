@@ -47,8 +47,7 @@
 
 (set! *warn-on-reflection* true)
 
-(driver/register! :presto-jdbc, :parent #{:sql-jdbc
-                                          ::sql-jdbc.legacy/use-legacy-classes-for-read-and-set})
+(driver/register! :presto-jdbc, :parent #{:sql-jdbc ::sql-jdbc.legacy/use-legacy-classes-for-read-and-set})
 
 (defmethod driver/host-carrying-parameters :presto-jdbc
   [_driver]
@@ -66,6 +65,7 @@
                               :expressions                      true
                               :metadata/key-constraints         false
                               :native-parameters                true
+                              :native-pivot-tables              true
                               :now                              true
                               :regex/lookaheads-and-lookbehinds false
                               :set-timezone                     true
@@ -160,8 +160,8 @@
                                [:from_utf8 expr]))
 
 (defmethod sql.qp/->honeysql [:presto-jdbc ::sql.qp/cast-to-text]
-  [driver [_ expr]]
-  (sql.qp/->honeysql driver [::sql.qp/cast expr "varchar"]))
+  [driver [_ _opts expr]]
+  (sql.qp/->honeysql driver [::sql.qp/cast {} expr "varchar"]))
 
 (defmethod sql.qp/->honeysql [:presto-jdbc Boolean]
   [_ bool]
@@ -171,20 +171,16 @@
   [_driver bs]
   [:from_base64 (u/encode-base64-bytes bs)])
 
-(defmethod sql.qp/->honeysql [:presto-jdbc :time]
-  [_ [_ t]]
-  (h2x/cast :time (u.date/format-sql (t/local-time t))))
-
 (defmethod sql.qp/->honeysql [:presto-jdbc :regex-match-first]
-  [driver [_ arg pattern]]
+  [driver [_ _opts arg pattern]]
   [:regexp_extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern)])
 
 (defmethod sql.qp/->honeysql [:presto-jdbc :median]
-  [driver [_ arg]]
+  [driver [_ _opts arg]]
   [:approx_percentile (sql.qp/->honeysql driver arg) 0.5])
 
 (defmethod sql.qp/->honeysql [:presto-jdbc :percentile]
-  [driver [_ arg p]]
+  [driver [_ _opts arg p]]
   [:approx_percentile (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver p)])
 
 ;;; Presto mod is a function like mod(x, y) rather than an operator like x mod y
@@ -209,7 +205,7 @@
 (defmethod sql.qp/inline-value [:presto-jdbc String]
   [_ ^String s]
   (case *inline-param-style*
-    :friendly (str \' (sql.u/escape-sql s :ansi) \')
+    :friendly (sql.u/quote-literal s :ansi)
     :paranoid (format "from_utf8(from_hex('%s'))" (codecs/bytes->hex (.getBytes s "UTF-8")))))
 
 ;; See https://prestodb.io/docs/current/functions/datetime.html
@@ -317,18 +313,17 @@
 (def ^:private ^:const timestamp-with-time-zone-db-type "timestamp with time zone")
 
 (defmethod sql.qp/->honeysql [:presto-jdbc :log]
-  [driver [_ field]]
-  ;; recent Presto versions have a `log10` function (not `log`)
+  [driver [_ _opts field]]
   [:log10 (sql.qp/->honeysql driver field)])
 
 (defmethod sql.qp/->honeysql [:presto-jdbc :count-where]
-  [driver [_ pred]]
+  [driver [_ _opts pred]]
   ;; Presto will use the precision given here in the final expression, which chops off digits
   ;; need to explicitly provide two digits after the decimal
-  (sql.qp/->honeysql driver [:sum-where 1.00M pred]))
+  (sql.qp/->honeysql driver [:sum-where {} 1.00M pred]))
 
 (defmethod sql.qp/->honeysql [:presto-jdbc :time]
-  [_driver [_ t]]
+  [_driver [_ _opts t]]
   ;; make time in UTC to avoid any interpretation by Presto in the connection (i.e. report) time zone
   [:inline (t/offset-time (t/local-time t) 0)])
 
@@ -458,7 +453,23 @@
    :kerberos-service-principal-pattern "KerberosServicePrincipalPattern"
    :kerberos-config-path "KerberosConfigPath"})
 
+(defn- check-kerberos-file-paths!
+  "The keytab, config and credential-cache paths are files on the Metabase host that an admin types in, so they have
+  to be somewhere `readable-paths` allows. A credential cache may also be named by type: `FILE:`/`DIR:` name a path,
+  the others (`KEYRING:`, `MEMORY:`, `KCM:`, ...) name no file."
+  [details]
+  (doseq [k     [:kerberos-keytab-path :kerberos-config-path :kerberos-credential-cache-path]
+          :let  [v    (some-> (get details k) str str/trim)
+                 path (cond
+                        (str/blank? v)                    nil
+                        (re-find #"(?i)^(FILE|DIR):" v)   (str/replace v #"(?i)^(FILE|DIR):" "")
+                        (re-find #"^[A-Za-z]{2,}:" v)     nil
+                        :else                             v)]
+          :when path]
+    (driver-api/ensure-readable-path! path)))
+
 (defn- details->kerberos-url-params [details]
+  (check-kerberos-file-paths! details)
   (let [remove-blank-vals (fn [m] (into {} (remove (comp str/blank? val) m)))
         ks                (keys kerb-props->url-param-names)]
     (-> (select-keys details ks)
@@ -499,6 +510,11 @@
 
     :else
     (str c "/" s)))
+
+;; `jdbc-spec` splices the schema into the URL path after the catalog
+(defmethod driver/url-building-detail-keys :presto-jdbc
+  [driver]
+  (conj ((get-method driver/url-building-detail-keys :default) driver) :schema))
 
 (defn- jdbc-spec
   "Creates a spec for `clojure.java.jdbc` to use for connecting to Presto via JDBC, from the given `opts`."

@@ -1,3 +1,4 @@
+;; grandfathered two-segment ns; the canonical QP entrypoint name predates the module layout
 #_{:clj-kondo/ignore [:metabase/namespace-name]}
 (ns metabase.query-processor
   "Primary entrypoints to running Metabase (MBQL) queries.
@@ -16,6 +17,7 @@
    [metabase.query-processor.middleware.catch-exceptions :as qp.catch-exceptions]
    [metabase.query-processor.middleware.enterprise :as qp.middleware.enterprise]
    [metabase.query-processor.middleware.process-userland-query :as qp.process-userland-query]
+   [metabase.query-processor.middleware.reject-sensitive-field-refs :as qp.reject-sensitive-field-refs]
    [metabase.query-processor.postprocess :as qp.postprocess]
    [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.reducible :as qp.reducible]
@@ -41,6 +43,7 @@
   ;;
   ;; ↓↓↓ POST-PROCESSING ↓↓↓ happens from TOP TO BOTTOM
   [#'qp.middleware.enterprise/handle-audit-app-internal-queries-middleware
+   #'qp.reject-sensitive-field-refs/reject-sensitive-field-refs
    #'qp.process-userland-query/process-userland-query-middleware
    ;; userland queries only: catch Exceptions and return a special error response
    #'qp.catch-exceptions/catch-exceptions])
@@ -79,7 +82,7 @@
 
 (mu/defn process-query :- [:fn {:error/message "process-query unexpectedly returned nil."} some?]
   "Process an MBQL query. This is the main entrypoint to the magical realm of the Query Processor."
-  ([query]
+  ([query :- ::qp.schema/any-query]
    (process-query query nil))
 
   ([query :- ::qp.schema/any-query
@@ -101,7 +104,7 @@
 
   3. A few extra keys like `:running_time` and `:started_at` are added to the QP
      response (see [[process-userland-query/process-userland-query-middleware]])"
-  ([query]
+  ([query :- ::qp.schema/any-query]
    (userland-query query nil))
 
   ([query :- ::qp.schema/any-query
@@ -111,12 +114,6 @@
        (cond-> info (update :info merge info)))))
 
 (def ^:private userland-query-middleware-options
-  "The only `:middleware` options a caller may set on a query they submit
-  to [[userland-query-with-default-constraints]]. Everything else in there is the query processor's own plumbing.
-
-  An allowlist rather than a blocklist, because the cost of the two mistakes is not symmetric: forgetting to allow an
-  option breaks a feature visibly, while forgetting to block one silently hands out whatever that option controls.
-  These two are what the frontend and the embedding SDK actually send."
   #{:js-int-to-string? :ignore-cached-results?})
 
 (mu/defn userland-query-with-default-constraints :- ::qp.schema/any-query
@@ -124,14 +121,8 @@
   as those for [[userland-query]], *plus* the default userland constraints (limits) are applied --
   see [[qp.constraints/add-default-userland-constraints]].
 
-  This ultimately powers most of the REST API entrypoints into the QP, so it makes those defaults actually win: the
-  caller's own `:constraints` and any `:middleware` option outside [[userland-query-middleware-options]] are dropped
-  first, so the default userland row cap is applied.
-
-  The internal callers that legitimately lift the cap -- [[disable-max-results]] for persisted-model refresh and
-  referenced-card compilation, and `lib/disable-default-limit` for transforms -- build their queries in process and
-  hand them straight to the QP, so they are unaffected."
-  ([query]
+  This ultimately powers most of the REST API entrypoints into the QP."
+  ([query :- ::qp.schema/any-query]
    (userland-query-with-default-constraints query nil))
 
   ([query :- ::qp.schema/any-query

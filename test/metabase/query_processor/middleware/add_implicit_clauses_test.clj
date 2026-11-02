@@ -17,7 +17,6 @@
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]))
 
-;; some of these tests run the full preprocessor, which includes EE middleware that reads the app DB
 (use-fixtures :once (fixtures/initialize :db))
 
 (defn- add-implicit-clauses

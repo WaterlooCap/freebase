@@ -1,7 +1,6 @@
 import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 import type { ComponentProps } from "react";
-import { Route } from "react-router";
 import _ from "underscore";
 
 import {
@@ -9,10 +8,11 @@ import {
   setupTableEndpoints,
 } from "__support__/server-mocks";
 import { setupGetUserKeyValueEndpoint } from "__support__/server-mocks/user-key-value";
+import { createMockState } from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { fireEvent, renderWithProviders, screen } from "__support__/ui";
-import { createMockState } from "metabase/redux/store/mocks";
-import { getMetadata } from "metabase/selectors/metadata";
+import { getMetadata } from "metabase/metadata-store";
+import { Route } from "metabase/router";
 import MetabaseSettings from "metabase/utils/settings";
 import { checkNotNull } from "metabase/utils/types";
 import * as Lib from "metabase-lib";
@@ -218,10 +218,7 @@ function setup({
   };
 
   renderWithProviders(
-    <Route
-      path="/"
-      component={() => <ViewTitleHeader {...viewTitleHeaderProps} />}
-    />,
+    <Route path="/" element={<ViewTitleHeader {...viewTitleHeaderProps} />} />,
     {
       withRouter: true,
       storeInitialState,

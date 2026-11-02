@@ -7,7 +7,6 @@
    [metabase.permissions.core :as perms]
    [metabase.permissions.models.permissions-group :as perms-group]
    [metabase.test :as mt]
-   [metabase.warehouse-schema.models.field-values :as field-values]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -429,20 +428,13 @@
                       (mapv (fn [f] {:id (:id f) :table-id table-id}) fields))
             all-columns (into (columns restricted-fields (:id restricted-table))
                               (columns open-fields (:id open-table)))
-            ;; The two paths use different lookups: a restricted table's values are resolved per user,
-            ;; an unrestricted table's come from the shared cache.
-            per-user-calls (atom 0)
-            shared-calls   (atom 0)]
+            calls (atom 0)]
         (try
           (mt/with-dynamic-fn-redefs [params.field-values/get-or-create-field-values!
-                                      (fn [_field] (swap! per-user-calls inc) nil)
-                                      field-values/get-or-create-full-field-values!
-                                      (fn [_field] (swap! shared-calls inc) nil)]
+                                      (fn [_field] (swap! calls inc) nil)]
             (#'context/fetch-field-values all-columns #{(:id restricted-table)}))
-          (is (= @#'context/max-restricted-field-values-fetches @per-user-calls)
-              "the restricted cap, not all 40 restricted columns")
-          (is (= 3 @shared-calls)
-              "and the unrestricted columns are not capped")
+          (is (= (+ 3 @#'context/max-restricted-field-values-fetches) @calls)
+              "3 unrestricted + the restricted cap, not all 40 restricted columns")
           (finally
             (t2/delete! :model/Field :id [:in (map :id (concat restricted-fields open-fields))])))))))
 

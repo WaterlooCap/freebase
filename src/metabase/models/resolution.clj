@@ -13,6 +13,7 @@
 
   Tests will check to make sure new models get included in this map."
   '{:model/Action                            metabase.actions.models
+    :model/AgentApiCallLog                   metabase.agent-api.models.agent-api-call-log
     :model/AnalysisFinding                   metabase-enterprise.dependencies.models.analysis-finding
     :model/AnalysisFindingError              metabase-enterprise.dependencies.models.analysis-finding-error
     :model/ApiKey                            metabase.api-keys.models.api-key
@@ -34,6 +35,7 @@
     :model/ConnectionImpersonation           metabase-enterprise.impersonation.models
     :model/ContentTranslation                metabase.content-translation.models
     :model/CustomVizPlugin                   metabase-enterprise.custom-viz-plugin.models.custom-viz-plugin
+    :model/DataApp                           metabase-enterprise.data-apps.models.data-app
     :model/Dashboard                         metabase.dashboards.models.dashboard
     :model/DashboardBookmark                 metabase.bookmarks.models.bookmark
     :model/DashboardCard                     metabase.dashboards.models.dashboard-card
@@ -47,17 +49,32 @@
     :model/Dimension                         metabase.warehouse-schema.models.dimension
     :model/Document                          metabase.documents.models.document
     :model/DocumentBookmark                  metabase.bookmarks.models.bookmark
+    :model/EmbeddingSdkReact18Host           metabase.embedding.models.sdk-react-18-host
     :model/EmbeddingTheme                    metabase.embedding.models.theme
+    :model/Exploration                       metabase.explorations.models.exploration
+    :model/ExplorationBlock                  metabase.explorations.models.exploration-block
+    :model/ExplorationBookmark               metabase.bookmarks.models.bookmark
+    :model/ExplorationPage                   metabase.explorations.models.exploration-page
+    :model/ExplorationQuery                  metabase.explorations.models.exploration-query
+    :model/ExplorationQueryResult            metabase.explorations.models.exploration-query-result
+    :model/ExplorationThread                 metabase.explorations.models.exploration-thread
+    :model/ExplorationThreadTimeline         metabase.explorations.models.exploration-thread-timeline
     :model/Field                             metabase.warehouse-schema.models.field
     :model/FieldUserSettings                 metabase.warehouse-schema.models.field-user-settings
+    :model/TableUserSettings                 metabase.warehouse-schema.models.table-user-settings
     :model/FieldValues                       metabase.warehouse-schema.models.field-values
     :model/Glossary                          metabase.glossary.models.glossary
     :model/Sandbox                           metabase-enterprise.sandbox.models.sandbox
     :model/HTTPAction                        metabase.actions.models
     :model/ImplicitAction                    metabase.actions.models
+    :model/ImpersonationQueryCache           metabase-enterprise.impersonation.models.impersonation-query-cache
     :model/LoginHistory                      metabase.login-history.models.login-history
+    :model/McpFeedback                       metabase.mcp.models.mcp-feedback
     :model/McpQueryHandle                    metabase.mcp.models.mcp-query-handle
+    :model/McpSessionLog                     metabase.mcp.models.mcp-session-log
+    :model/McpToolCallLog                    metabase.mcp.models.mcp-tool-call-log
     :model/Measure                           metabase.measures.models.measure
+    :model/TableIndex                        metabase.indexes.models.table-index
     :model/Metabot                           metabase.metabot.models.metabot
     :model/MetabotConversation               metabase.metabot.models.metabot-conversation
     :model/MetabotFeedback                   metabase.metabot.models.metabot-feedback
@@ -116,15 +133,17 @@
     :model/Session                           metabase.session.models.session
     :model/Setting                           metabase.settings.models.setting
     :model/SsoRelayState                     metabase-enterprise.sso.models.relay-state
+    :model/StoredResult                      metabase.queries.models.stored-result
+    :model/StoredResultUse                   metabase.queries.models.stored-result-use
     :model/SupportAccessGrantLog metabase-enterprise.support-access-grants.models.support-access-grant-log
     :model/Table                             metabase.warehouse-schema.models.table
-    :model/TableRemapping                    metabase-enterprise.workspaces.models.table-remapping
     :model/TaskHistory                       metabase.task-history.models.task-history
     :model/TaskRun                           metabase.task-history.models.task-run
     :model/Tenant                            metabase-enterprise.tenants.models
     :model/Timeline                          metabase.timeline.models.timeline
     :model/TimelineEvent                     metabase.timeline.models.timeline-event
     :model/Transform                         metabase.transforms.models.transform
+    :model/TransformDagRun                   metabase.transforms.models.dag-run
     :model/TransformJob                      metabase.transforms.models.transform-job
     :model/TransformJobRun                   metabase.transforms.models.job-run
     :model/TransformJobTransformTag          metabase.transforms.models.transform-job-transform-tag
@@ -141,9 +160,7 @@
     :model/User                              metabase.users.models.user
     :model/UserKeyValue                      metabase.user-key-value.models.user-key-value
     :model/UserParameterValue                metabase.users.models.user-parameter-value
-    :model/ViewLog                           metabase.view-log.models.view-log
-    :model/Workspace                         metabase-enterprise.workspaces.models.workspace
-    :model/WorkspaceDatabase                 metabase-enterprise.workspaces.models.workspace-database})
+    :model/ViewLog                           metabase.view-log.models.view-log})
 
 ;;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ;;; !!                                                                                                !!
@@ -160,7 +177,8 @@
     ;; Always require the model's namespace when we know it. It is fast, and there can be race conditions between
     ;; before side effects like `deftransforms` and `define-before-insert` have run
     (when-let [nspace (get model->namespace x)]
-      ;; [[classloader/require]] for thread safety
+      ;; The registry selects the namespace dynamically; use [[classloader/require]] for thread safety.
+      #_{:clj-kondo/ignore [:metabase/modules]}
       (classloader/require nspace)))
   x)
 

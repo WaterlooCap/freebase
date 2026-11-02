@@ -5,7 +5,7 @@ import {
   isAdminGroup,
   isDefaultGroup,
   isDefaultTenantGroup,
-} from "metabase/admin/utils/groups";
+} from "metabase/common/utils/groups";
 import { Box, Card, TreeTable } from "metabase/ui";
 
 import { AdvancedGroupModeButton } from "./AdvancedGroupMode";
@@ -47,7 +47,7 @@ export function AiFeatureAccessTable(props: AiFeatureAccessTableProps) {
     <Card
       withBorder
       p={0}
-      radius="md"
+      radius="sm"
       data-testid="ai-feature-access-table"
       className={S.card}
     >

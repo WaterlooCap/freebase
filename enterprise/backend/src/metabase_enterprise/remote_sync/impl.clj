@@ -3,6 +3,8 @@
    [clojure.string :as str]
    [diehard.core :as dh]
    [java-time.api :as t]
+   [metabase-enterprise.data-apps.sync :as data-apps.sync]
+   [metabase-enterprise.remote-sync.db :as remote-sync.db]
    [metabase-enterprise.remote-sync.guards :as guards]
    [metabase-enterprise.remote-sync.merge :as remote-sync.merge]
    [metabase-enterprise.remote-sync.models.remote-sync-object :as remote-sync.object]
@@ -13,6 +15,7 @@
    [metabase-enterprise.remote-sync.source.protocol :as source.p]
    [metabase-enterprise.remote-sync.spec :as spec]
    [metabase-enterprise.serialization.core :as serialization]
+   [metabase-enterprise.transforms-python.core :as transforms-python]
    [metabase.analytics-interface.core :as analytics]
    [metabase.api.common :as api]
    [metabase.app-db.cluster-lock :as cluster-lock]
@@ -32,9 +35,9 @@
 (set! *warn-on-reflection* true)
 
 (defn- snapshot-has-transforms?
-  "Checks if the snapshot contains any Transform, PythonLibrary entities,
-   non-built-in TransformTags, or transforms-namespace collections.
-   Used to auto-enable/disable remote-sync-transforms setting during import.
+  "Checks if the snapshot contains any Transform, PythonLibrary entities other than the built-in one with its default
+   empty source, non-built-in TransformTags, or transforms-namespace collections.
+   Used to auto-enable remote-sync-transforms setting during import.
 
    Uses the ingestable to list all entities and checks their :model metadata,
    then also checks if any Collection entities have namespace=transforms.
@@ -42,7 +45,12 @@
   [ingestable]
   (let [serdes-paths (serialization/ingest-list ingestable)
         models-present (spec/models-in-import serdes-paths)]
-    (or (some spec/transform-models models-present)
+    (or (some (disj spec/transform-models "PythonLibrary") models-present)
+        (some (fn [path]
+                (when (= "PythonLibrary" (:model (last path)))
+                  (or (not= transforms-python/builtin-entity-id (:id (last path)))
+                      (not (str/blank? (:source (serialization/ingest-one ingestable path)))))))
+              serdes-paths)
         ;; Check for non-built-in TransformTags
         (when (contains? models-present "TransformTag")
           (some (fn [path]
@@ -56,27 +64,15 @@
                     (spec/transforms-namespace-collection? entity))))
               serdes-paths))))
 
-(defn- build-entity-id-where-clause
-  "Builds a HoneySQL WHERE clause for entity_id filtering.
-   Combines the imported entity-ids exclusion with any spec-level entity_id condition."
-  [entity-ids spec-entity-id-condition]
-  (let [imported-condition (when (seq entity-ids)
-                             [:not-in :entity_id entity-ids])
-        spec-condition (when spec-entity-id-condition
-                         (let [[op value] spec-entity-id-condition]
-                           [op :entity_id value]))
-        conditions (filterv some? [imported-condition spec-condition])]
-    (when (pos? (count conditions))
-      (into [:and] conditions))))
-
 (defn- remove-unsynced!
   "Deletes any remote sync content that was NOT part of the import.
 
   Takes a sequence of remote-synced collection IDs and imported-data map from spec/extract-imported-entities.
   For each entity-id based model, deletes entities whose entity_id is not in the imported set.
 
-  Models with :scope-key in their spec are scoped to synced collections (using :id for Collection, :collection_id
-  for others). Models without :scope-key (like TransformTag) are deleted globally by entity_id.
+  Models with :scope-key in their spec are scoped to synced collections (using :id for Collection, :model_id through
+  the model Card for Action, :collection_id for others). Models without :scope-key (like TransformTag) are deleted
+  globally by entity_id.
 
   Path-based models (Table, Field) are not removed here - they are controlled by published table settings.
 
@@ -84,33 +80,10 @@
   Collection are deleted before Collection itself)."
   [synced-collection-ids {:keys [by-entity-id]}]
   (doseq [[model-key model-spec] (spec/specs-for-deletion)
-          :let [serdes-model (:model-type model-spec)
-                entity-ids (get by-entity-id serdes-model [])
-                removal-conds (spec/removal-conditions model-spec)
-                spec-entity-id-condition (get removal-conds :entity_id)
-                entity-id-where (build-entity-id-where-clause entity-ids spec-entity-id-condition)
-                scope-key (get-in model-spec [:removal :scope-key])
-                ;; Get non-entity_id conditions from spec
-                other-conditions (into [] cat (dissoc removal-conds :entity_id))]]
-    (let [conditions (cond-> []
-                       (and scope-key (seq synced-collection-ids))
-                       (conj [:in scope-key synced-collection-ids])
-
-                       entity-id-where
-                       (conj entity-id-where)
-
-                       (and (not scope-key) (seq other-conditions))
-                       (into (for [[k v] (partition 2 other-conditions)]
-                               [:= k v])))
-          where-clause (when (seq conditions)
-                         (if (= 1 (count conditions))
-                           (first conditions)
-                           (into [:and] conditions)))]
-      (cond
-        ;; Scoped models with no collections to scope to — nothing to delete
-        (and scope-key (empty? synced-collection-ids)) nil
-        where-clause (t2/delete! model-key {:where where-clause})
-        :else        (t2/delete! model-key)))))
+          :let [entity-ids (get by-entity-id (:model-type model-spec) [])]]
+    (remote-sync.db/delete-removed-instances!
+     model-key
+     (spec/removal-opts model-spec synced-collection-ids entity-ids))))
 
 (defn- quoted
   "Wraps `s` in backticks so that leading and trailing whitespace is visible to the reader."
@@ -221,6 +194,13 @@
       :else
       (format "Failed to reload from git repository: %s" (ex-message e)))))
 
+(defn- library-has-content?
+  "Whether `library` holds anything beyond its system collections."
+  [library]
+  (let [collection-ids (vec (remote-sync.db/subtree-collection-ids [library]))]
+    (or (some (complement collection/library-root-collection?) (remote-sync.db/collections collection-ids))
+        (remote-sync.db/collection-content-exists? collection-ids))))
+
 (defn- get-conflicts
   "Detects conflicts that would prevent or complicate import. Returns a map with two classes:
    - :first-import-conflicts - feature/namespace/library conflicts that only block on the very first import
@@ -228,12 +208,12 @@
                                would wholesale-delete; these block on EVERY import, not just the first
 
    Conflict types detected:
-   - :library-conflict - First import only, local Library exists, import has Library
+   - :library-conflict - First import only, local unsynced Library with content, import has Library
    - :transforms-conflict / :snippets-conflict - import has matching content but local has unsynced entities
    - :*-conflict (deletion) - import lacks transforms/tags/libraries that exist locally and unsynced (GHY-3900)"
   [ingestable first-import?]
   (let [ingest-list (serialization/ingest-list ingestable)
-        imported-data (spec/extract-imported-entities ingest-list)
+        imported-data (spec/extract-imported-entities ingest-list #(serialization/ingest-one ingestable %))
         models-present (spec/models-in-import ingest-list)
         ;; Extract namespace info from imported Collection entities
         import-ns-info
@@ -254,13 +234,12 @@
         ns-coll-conflicts (spec/check-namespace-collection-conflicts
                            import-namespace-collections
                            (:entity-ids import-ns-info))
-        library-conflict (when-let [local-library (t2/select-one :model/Collection :type collection/library-collection-type)]
+        library-conflict (when-let [local-library (remote-sync.db/library-collection collection/library-collection-type)]
                            (when (and first-import?
                                       (contains? (get-in imported-data [:by-entity-id "Collection"] #{})
                                                  collection/library-entity-id)
-                                      (not (t2/exists? :model/RemoteSyncObject
-                                                       :model_type "Collection"
-                                                       :model_id (:id local-library))))
+                                      (not (remote-sync.db/rso-exists? "Collection" (:id local-library)))
+                                      (library-has-content? local-library))
                              {:type :library-conflict
                               :category "Library"
                               :message "Import contains Library but local instance has an unsynced Library collection"}))
@@ -269,7 +248,8 @@
                                 ns-coll-conflicts
                                 (when library-conflict [library-conflict]))]
     {:first-import-conflicts (vec first-import-conflicts)
-     :deletion-conflicts     (spec/check-deletion-conflicts imported-data)}))
+     :deletion-conflicts     (into (spec/check-deletion-conflicts imported-data)
+                                   (spec/check-content-deletion-conflicts imported-data))}))
 
 (def app-db-batch-size
   "Max rows per select/update batch, to keep IN-lists and CASE expressions bounded."
@@ -282,7 +262,7 @@
   Returns:
    - [{:model_type :model_id :path :content_hash}] (entities that fail to serialize are omitted)"
   [rows repo-paths]
-  (let [storage-opts (serdes/storage-base-context)
+  (let [storage-opts (source/storage-context)
         repo-by-eid  (into {} (map (fn [{:keys [model_type entity_id path]}] [[model_type entity_id] path])) repo-paths)
         serialize    (fn [model-type opts id->eid instance]
                        (try
@@ -303,10 +283,12 @@
           (mapcat (fn [[model-type model-rows]]
                     (let [spec      (spec/spec-for-model-type model-type)
                           model-key (:model-key spec)
-                          opts      {:where [:in :id (mapv :model_id model-rows)] :skip-archived true}
+                          opts      (merge spec/git-sync-extract-opts
+                                           {:filter-column :id
+                                            :filter-ids    (mapv :model_id model-rows)})
                           ;; entity-id models: map local id -> entity_id so we can look up the repo path
                           id->eid   (when (and model-key (= :entity-id (:identity spec)))
-                                      (t2/select-pk->fn :entity_id model-key :id [:in (mapv :model_id model-rows)]))]
+                                      (remote-sync.db/entity-ids-by-id model-key (mapv :model_id model-rows)))]
                       (eduction (keep #(serialize model-type opts id->eid %))
                                 (serdes/extract-query model-type opts)))))
           (group-by :model_type rows))))
@@ -328,8 +310,7 @@
   [rows repo-paths]
   (serdes/with-cache
     (doseq [chunk (partition-all app-db-batch-size rows)]
-      (t2/insert! :model/RemoteSyncObject
-                  (merge-content-metadata chunk (import-content-metadata chunk repo-paths))))))
+      (remote-sync.db/insert-rsos! (merge-content-metadata chunk (import-content-metadata chunk repo-paths))))))
 
 (defn- branch-changed-since-scheduling?
   "Returns true if `pre-task-branch` was captured by the async-* function and the
@@ -339,6 +320,19 @@
   [pre-task-branch]
   (and (some? pre-task-branch)
        (not= pre-task-branch (settings/remote-sync-branch))))
+
+(defn- materialize-data-apps!
+  "After a successful content import, materialize data apps from the same
+   snapshot. Data apps live under `data_apps/` in the repo (outside the serdes
+   paths), so they ride this import rather than having their own sync. Adapts the
+   snapshot to plain reader fns; `data-apps.sync/sync-from-snapshot!` never throws."
+  [^SourceSnapshot snapshot]
+  ;; `read-file` returns file text (a string) or nil; data-apps.sync converts to
+  ;; bytes on its side, keeping all Java interop out of this namespace.
+  (data-apps.sync/sync-from-snapshot!
+   {:read-file (fn [path] (source.p/read-file snapshot path))
+    :list-dir  (fn [path] (source.p/list-dir snapshot path))
+    :sha       (source.p/version snapshot)}))
 
 (defn load-snapshot!
   "Loads a snapshot's serialized entities into the app DB and reconciles local state to match it:
@@ -372,14 +366,10 @@
       ;; Replace the RemoteSyncObject table, folding each entity's repo file_path (so later renames/deletes
       ;; resolve the real file) and serialized-content hash (so a post-pull no-op edit stays synced) into the
       ;; insert. Chunked so insert/IN params and memory stay bounded.
-      (t2/delete! :model/RemoteSyncObject)
+      (remote-sync.db/delete-all-rsos!)
       (insert-with-metadata! (spec/sync-all-entities! sync-timestamp imported-data)
                              (source.ingestable/cached-file-paths base-ingestable))
       (when finalize! (finalize!)))
-    (when (and (not has-transforms?)
-               (settings/remote-sync-transforms))
-      (log/info "No transforms in remote source, disabling remote-sync-transforms setting")
-      (settings/remote-sync-transforms! false))
     ;; On H2 the reindex's table DDL blocks readers and can deadlock with them, so it must finish
     ;; inside the task; other app DBs keep the previous behavior of reindexing asynchronously.
     (try
@@ -405,18 +395,25 @@
        (when-let [i (str/index-of path "/")]
          (contains? serialization/legal-top-level-paths (subs path 0 i)))))
 
-(defn- rso-where-for
-  "HoneySQL :where matching the RemoteSyncObject rows for the given `[{:model_type :model_id}]` maps."
-  [rows]
-  (into [:or] (map (fn [{:keys [model_type model_id]}]
-                     [:and [:= :model_type model_type] [:= :model_id model_id]]))
-        rows))
-
 (defn- pulled-change-count
   "Total number of entities applied by a pull, across entity-id- and path-identified models in `imported-data`."
   [imported-data]
   (transduce (map count) + 0 (concat (vals (:by-entity-id imported-data))
                                      (vals (:by-path imported-data)))))
+
+(defn- fold-data-app-changes
+  "Fold the count of data apps a pull changed — upserted *or* removed — into its
+  `:outcome`. Data apps live under `data_apps/` — outside serdes — and are
+  materialized separately (see [[materialize-data-apps!]]), so they're invisible
+  to [[pulled-change-count]]. Without this, a pull whose only changes are data
+  apps (including one that only deletes an app) reports `pull-skipped` /
+  `count 0`. Caller guarantees `da-changed` is positive."
+  [outcome da-changed]
+  (case (:kind outcome)
+    "pull-skipped" {:kind "pulled" :count da-changed :branch (settings/remote-sync-branch)}
+    "pulled"       (update outcome :count (fnil + 0) da-changed)
+    "merged"       (update outcome :pulled (fnil + 0) da-changed)
+    outcome))
 
 (defn- incremental-import-plan
   "What an incremental load would touch, or [[incremental-not-possible]] if the change must fall back to a full
@@ -429,7 +426,7 @@
         deleted      (into #{} (filter legal-yaml-path?) (:deleted changed))
         ;; N+1: one query per deleted path (bounded by deletions in a single pull; left un-batched because
         ;; file_path values are long, making an IN clause bulky for marginal gain).
-        deleted-rsos (mapv (fn [p] (t2/select-one :model/RemoteSyncObject :file_path p)) deleted)
+        deleted-rsos (mapv remote-sync.db/rso-by-file-path deleted)
         ingestable (when (seq add-mod)
                      (source.p/->ingestable snapshot {:path-filters (mapv #(re-pattern (java.util.regex.Pattern/quote %)) add-mod)}))
         add-models (if ingestable
@@ -467,7 +464,7 @@
                         (serdes/with-cache
                           (serialization/load-metabase!
                            (source.ingestable/wrap-progress-ingestable task-id 0.7 ingestable)
-                           :backfill? false :reindex? false)))
+                           :reindex? false)))
         imported-data (spec/extract-imported-entities (:seen load-result))
         loaded-eid?   (fn [model-type eid]
                         ;; by-entity-id holds sets of raw entity_id strings, keyed by model type
@@ -478,26 +475,28 @@
                             ;; N+1: one entity_id query per delete candidate (bounded by deletions in a single
                             ;; pull; batching would need grouping by model-key into per-table IN queries).
                             :let [model-key (:model-key (spec/spec-for-model-type model_type))
-                                  eid (when model-key (t2/select-one-fn :entity_id model-key :id model_id))]
+                                  eid (when model-key (remote-sync.db/entity-id model-key model_id))]
                             :when (not (loaded-eid? model_type eid))]
-                        {:model_type model_type :model_id model_id :model-key model-key})
+                        {:model_type model_type :model_id model_id})
+        model-key-of  (fn [{:keys [model_type]}] (:model-key (spec/spec-for-model-type model_type)))
         sync-rows     (spec/sync-all-entities! sync-timestamp imported-data)]
     (remote-sync.task/update-progress! task-id 0.8)
     (t2/with-transaction [_conn]
-      (doseq [[model-key ds] (group-by :model-key deletes)]
-        (t2/delete! model-key :id [:in (mapv :model_id ds)]))
+      (doseq [[model-key ds] (group-by model-key-of deletes)]
+        (remote-sync.db/delete-instances! model-key (mapv :model_id ds)))
       (when (seq deletes)
-        (t2/delete! :model/RemoteSyncObject {:where (rso-where-for deletes)}))
+        (remote-sync.db/delete-rsos-of-keys! deletes))
       (when (seq sync-rows)
         ;; fold file_path + content_hash into the insert so the touched rows are written once (chunked)
-        (t2/delete! :model/RemoteSyncObject {:where (rso-where-for sync-rows)})
+        (remote-sync.db/delete-rsos-of-keys! sync-rows)
         (insert-with-metadata! sync-rows (when ingestable (source.ingestable/cached-file-paths ingestable))))
       (when finalize! (finalize!)))
     ;; We skip the whole-appdb reindex the full load runs. Added/modified entities are already
     ;; re-indexed by the load itself — serdes' t2 insert!/update! fire the :hook/search-index
     ;; after-insert/after-update hooks. Deletes have no such hook, so remove them explicitly.
-    (doseq [[model-key ds] (group-by :model-key deletes)]
-      (search/delete! model-key (mapv :model_id ds)))
+    (doseq [[model-key ds] (group-by model-key-of deletes)]
+      ;; the search index stores model_id as text
+      (search/delete! model-key (mapv (comp str :model_id) ds)))
     (remote-sync.task/update-progress! task-id 0.95)
     (log/info "Successfully reloaded entities from git repository")
     {:status :success
@@ -510,7 +509,7 @@
   "Returns the current non-synced RemoteSyncObject rows — the local changes that have not been pushed.
   Captured before a local-only merge so they can be restored afterwards (see [[import-merged!]])."
   []
-  (t2/select :model/RemoteSyncObject {:where [:not= :status "synced"]}))
+  (remote-sync.db/unsynced-rsos))
 
 (defn- restore-dirty-objects!
   "Re-applies captured dirty statuses after a merge load (which marks everything 'synced'). For each
@@ -518,11 +517,9 @@
   (e.g. a pending local deletion, whose entity is absent from the merged set)."
   [dirty-objects timestamp]
   (doseq [{:keys [model_type model_id status] :as row} dirty-objects]
-    (if-let [existing (t2/select-one :model/RemoteSyncObject :model_type model_type :model_id model_id)]
-      (t2/update! :model/RemoteSyncObject (:id existing)
-                  {:status status :status_changed_at timestamp})
-      (t2/insert! :model/RemoteSyncObject
-                  (-> row (dissoc :id) (assoc :status_changed_at timestamp))))))
+    (if-let [existing (remote-sync.db/rso model_type model_id)]
+      (remote-sync.db/update-rso! (:id existing) {:status status :status_changed_at timestamp})
+      (remote-sync.db/insert-rso! (-> row (dissoc :id) (assoc :status_changed_at timestamp))))))
 
 (defn- import-merged!
   "Import in merge mode. Should only be called when you have a base-snapshot and its version differs from snaphot's version.
@@ -534,7 +531,11 @@
     - Local changes stay dirty
     - Sets version to remote tip"
   [snapshot base-snapshot task-id sync-timestamp]
-  (let [{:keys [conflicts merged summary]} (source/compute-merge (spec/extract-entities-for-export) snapshot base-snapshot task-id)]
+  (let [{:keys [conflicts merged summary]} (serdes/with-cache
+                                             (let [targets (spec/exportable-entities)]
+                                               (source/compute-merge (spec/extract-entities-for-export targets)
+                                                                     snapshot base-snapshot task-id
+                                                                     :total (spec/exportable-entity-count targets))))]
     (if (seq conflicts)
       (let [labels (mapv remote-sync.merge/conflict-label conflicts)]
         (log/infof "Pull merge conflict on %d entit(ies)" (count labels))
@@ -601,90 +602,105 @@
                                      (not force-deletion?)
                                      (into (:deletion-conflicts @conflicts)))))
             incremental-plan   (delay (incremental-import-plan snapshot last-imported-version))
-            dirty?             (delay (remote-sync.object/dirty?))]
-        (cond
-          ;; --- Merge mode: fold remote changes into local, keeping un-pushed local changes. ---
-          merge?
-          (cond
-            ;; No safe merge base (no prior sync, or base orphaned by a force-push/rebase) — can't 3-way merge.
-            (nil? base-snapshot)
-            {:status    :conflict
-             :version   snapshot-version
-             :conflicts ["Remote history was rewritten (force-push or rebase); cannot merge automatically."]
-             :message   "Cannot merge: the remote branch history was rewritten. Discard local changes and pull, or push to a new branch."}
+            dirty?             (delay (remote-sync.object/dirty?))
+            result
+            (cond
+              ;; --- Merge mode: fold remote changes into local, keeping un-pushed local changes. ---
+              merge?
+              (cond
+                ;; No safe merge base (no prior sync, or base orphaned by a force-push/rebase) — can't 3-way merge.
+                (nil? base-snapshot)
+                {:status    :conflict
+                 :version   snapshot-version
+                 :conflicts ["Remote history was rewritten (force-push or rebase); cannot merge automatically."]
+                 :message   "Cannot merge: the remote branch history was rewritten. Discard local changes and pull, or push to a new branch."}
 
-            ;; Remote hasn't advanced past the merge base — nothing to fold in; keep local changes dirty.
-            (= (source.p/version base-snapshot) snapshot-version)
-            (do
-              (log/info "Pull merge: remote has not advanced; keeping local changes unchanged")
-              {:status        :success
-               :version       snapshot-version
-               :merge-summary {:added 0 :updated 0 :removed 0}
-               :outcome       {:kind "pull-skipped"}})
+                ;; Remote hasn't advanced past the merge base — nothing to fold in; keep local changes dirty.
+                (= (source.p/version base-snapshot) snapshot-version)
+                (do
+                  (log/info "Pull merge: remote has not advanced; keeping local changes unchanged")
+                  {:status        :success
+                   :version       snapshot-version
+                   :merge-summary {:added 0 :updated 0 :removed 0}
+                   :outcome       {:kind "pull-skipped"}})
 
-            :else
-            (import-merged! snapshot base-snapshot task-id sync-timestamp))
+                :else
+                (import-merged! snapshot base-snapshot task-id sync-timestamp))
 
-          ;; --- Forced reload: bypasses the no-op/incremental guards. Deletion conflicts (when
-          ;; force-deletion? is false) still block; otherwise a full reload. ---
-          force?
-          (cond
-            (seq @blocking-conflicts)
-            (let [message (format "Skipping import: snapshot version %s contains conflicts use force to override" snapshot-version)]
-              (log/info message)
-              {:status :conflict
-               :version snapshot-version
-               :conflicts (into #{} (map :category) @blocking-conflicts)
-               :conflict-details @blocking-conflicts
-               :message message})
+              ;; --- Forced reload: bypasses the no-op/incremental guards. Deletion conflicts (when
+              ;; force-deletion? is false) still block; otherwise a full reload. ---
+              force?
+              (cond
+                (seq @blocking-conflicts)
+                (let [message (format "Skipping import: snapshot version %s contains conflicts use force to override" snapshot-version)]
+                  (log/info message)
+                  {:status :conflict
+                   :version snapshot-version
+                   :conflicts (into #{} (map :category) @blocking-conflicts)
+                   :conflict-details @blocking-conflicts
+                   :message message})
 
-            :else
-            (let [_             (log/info "Remote sync full import: forced")
-                  imported-data (load-snapshot! snapshot task-id sync-timestamp :finalize! finalize!)]
-              (log/info "Successfully reloaded entities from git repository")
-              {:status :success
-               :version snapshot-version
-               :outcome {:kind "pulled"
-                         :count (pulled-change-count imported-data)
-                         :branch (settings/remote-sync-branch)}}))
+                :else
+                (let [_             (log/info "Remote sync full import: forced")
+                      imported-data (load-snapshot! snapshot task-id sync-timestamp :finalize! finalize!)]
+                  (log/info "Successfully reloaded entities from git repository")
+                  {:status :success
+                   :version snapshot-version
+                   :outcome {:kind "pulled"
+                             :count (pulled-change-count imported-data)
+                             :branch (settings/remote-sync-branch)}}))
 
-          ;; --- Normal pull ---
-          ;; Cheap no-op pull: nothing changed remotely, so nothing is loaded or deleted.
-          (= last-imported-version snapshot-version)
-          (do
-            (log/infof "Skipping import: snapshot version %s matches last imported version" snapshot-version)
-            {:status :success
-             :version snapshot-version
-             :outcome {:kind "pull-skipped"}})
+              ;; --- Normal pull ---
+              ;; Cheap no-op pull: nothing changed remotely, so nothing is loaded or deleted.
+              (= last-imported-version snapshot-version)
+              (do
+                (log/infof "Skipping import: snapshot version %s matches last imported version" snapshot-version)
+                {:status :success
+                 :version snapshot-version
+                 :outcome {:kind "pull-skipped"}})
 
-          ;; Incremental fast-path: no local drift and the change is incrementally loadable. Tested before the
-          ;; conflict. It touches only changed files, so it can't wholesale-delete unsynced transforms.
-          (and (not @dirty?)
-               (not= :remote-sync/incremental-not-possible @incremental-plan))
-          (incremental-load-snapshot! @incremental-plan snapshot-version task-id sync-timestamp :finalize! finalize!)
+              ;; Incremental fast-path: no local drift and the change is incrementally loadable. Tested before the
+              ;; conflict. It touches only changed files, so it can't wholesale-delete unsynced transforms.
+              (and (not @dirty?)
+                   (not= :remote-sync/incremental-not-possible @incremental-plan))
+              (incremental-load-snapshot! @incremental-plan snapshot-version task-id sync-timestamp :finalize! finalize!)
 
-          (seq @blocking-conflicts)
-          (let [message (format "Skipping import: snapshot version %s contains conflicts use force to override" snapshot-version)]
-            (log/info message)
-            {:status :conflict
-             :version snapshot-version
-             :conflicts (into #{} (map :category) @blocking-conflicts) ; Backward compat: set of category names
-             :conflict-details @blocking-conflicts
-             :message message})
+              (seq @blocking-conflicts)
+              (let [message (format "Skipping import: snapshot version %s contains conflicts use force to override" snapshot-version)]
+                (log/info message)
+                {:status :conflict
+                 :version snapshot-version
+                 :conflicts (into #{} (map :category) @blocking-conflicts) ; Backward compat: set of category names
+                 :conflict-details @blocking-conflicts
+                 :message message})
 
-          :else ;; fall back to full import
-          (let [reason        (cond
-                                @dirty?       "local changes pending"
-                                first-import? "first import"
-                                :else         "changes not incrementally loadable")
-                _             (log/infof "Remote sync full import: %s" reason)
-                imported-data (load-snapshot! snapshot task-id sync-timestamp :finalize! finalize!)]
-            (log/info "Successfully reloaded entities from git repository")
-            {:status :success
-             :version snapshot-version
-             :outcome {:kind "pulled"
-                       :count (pulled-change-count imported-data)
-                       :branch (settings/remote-sync-branch)}})))
+              :else ;; fall back to full import
+              (let [reason        (cond
+                                    @dirty?       "local changes pending"
+                                    first-import? "first import"
+                                    :else         "changes not incrementally loadable")
+                    _             (log/infof "Remote sync full import: %s" reason)
+                    imported-data (load-snapshot! snapshot task-id sync-timestamp :finalize! finalize!)]
+                (log/info "Successfully reloaded entities from git repository")
+                {:status :success
+                 :version snapshot-version
+                 :outcome {:kind "pulled"
+                           :count (pulled-change-count imported-data)
+                           :branch (settings/remote-sync-branch)}}))]
+        ;; Data apps ride the pull: re-materialize from the real source snapshot
+        ;; (the repo file tree under `data_apps/`), not the synthetic merged
+        ;; snapshot `load-snapshot!` sees. They're counted outside serdes, so fold
+        ;; how many they upserted or removed into the outcome — otherwise a
+        ;; data-app-only pull would report `pull-skipped` / `count 0`.
+        (if (= :success (:status result))
+          (let [da-result  (materialize-data-apps! snapshot)
+                ;; Removals count too: a pull whose only change is deleting an app
+                ;; directory upserts nothing (`:changed` 0) but still changed what
+                ;; this instance serves, so it must report as a pull, not skipped.
+                da-changed (+ (:changed da-result 0) (:removed da-result 0))]
+            (cond-> result
+              (pos? da-changed) (update :outcome fold-data-app-changes da-changed)))
+          result))
       (catch Exception e
         ;; A cancellation isn't a failure: log it and return nil. Otherwise log the error, count it, and
         ;; return a user-friendly :error result.
@@ -693,7 +709,7 @@
           (do
             (log/errorf "Failed to reload from git repository: %s" (ex-message e))
             (analytics/inc! :metabase-remote-sync/imports-failed)
-            {:status :error
+            {:status  :error
              :message (source-error-message e)
              :version (source.p/version snapshot)
              :details {:error-type (type e)}})))
@@ -703,24 +719,27 @@
 (defn- commit-staged!
   "Open a commit on `snapshot`, stage into it via `stage-fn`, then finish it.
 
-  `stage-fn` will be passed the open commit. It should return the synced write-rows.
+  `stage-fn` will be passed the open commit. It should return the synced write-rows. `report-progress`, when
+  non-nil, is a reporter fn forwarded unchanged to `finish-commit!` (fired forced at the commit checkpoint,
+  before the push, then throttled during the push itself).
 
   Will abort the commit if it is empty.
 
   Returns `[version, write-rows]` where version is the new commit SHA or `:remote-sync/empty-commit` if empty.
 
   Will abort the commit and throw on any Throwable."
-  [snapshot message stage-fn]
-  (let [commit (source.p/open-commit snapshot)]
-    (try
-      (let [synced  (stage-fn commit)
-            version (if (source.p/empty-commit? commit)
-                      (do (source.p/abort-commit! commit) :remote-sync/empty-commit)
-                      (source.p/finish-commit! commit message))]
-        [synced version])
-      (catch Throwable e
-        (source.p/abort-commit! commit)
-        (throw e)))))
+  ([snapshot message stage-fn] (commit-staged! snapshot message stage-fn nil))
+  ([snapshot message stage-fn report-progress]
+   (let [commit (source.p/open-commit snapshot)]
+     (try
+       (let [synced  (stage-fn commit)
+             version (if (source.p/empty-commit? commit)
+                       (do (source.p/abort-commit! commit) :remote-sync/empty-commit)
+                       (source.p/finish-commit! commit message report-progress))]
+         [synced version])
+       (catch Throwable e
+         (source.p/abort-commit! commit)
+         (throw e))))))
 
 (defn- export-merged!
   "Export when the remote branch has advanced beyond the last synced version. Runs an entity-identity 3-way merge of
@@ -732,9 +751,9 @@
     changes.
 
   Returns a `:success` result with a `:merge-summary`."
-  [source snapshot base-snapshot task-id message sync-timestamp models]
+  [source snapshot base-snapshot task-id message sync-timestamp models & {:keys [total]}]
   (let [pushed-count (count (remote-sync.object/dirty-rows))
-        {:keys [merged conflicts summary]} (source/compute-merge models snapshot base-snapshot task-id)]
+        {:keys [merged conflicts summary]} (source/compute-merge models snapshot base-snapshot task-id :total total)]
     (if (seq conflicts)
       (let [labels (mapv remote-sync.merge/conflict-label conflicts)]
         (log/infof "Export merge conflict on %d entit(ies)" (count labels))
@@ -760,7 +779,7 @@
           (let [pulled (apply + (vals summary))]
             (load-snapshot! merged-snapshot task-id sync-timestamp
                             :finalize! (fn []
-                                         (t2/update! :model/RemoteSyncObject {:status "synced" :status_changed_at sync-timestamp})
+                                         (remote-sync.db/mark-all-rsos-synced! sync-timestamp)
                                          (remote-sync.task/set-version! task-id version)))
             (log/infof "Exported with merge: folded in %d remote change(s) (added %d, updated %d, removed %d); pushed %d"
                        pulled (:added summary) (:updated summary) (:removed summary) (if empty? 0 pushed-count))
@@ -815,7 +834,7 @@
         (filter (fn [{:keys [model_type model_id]}]
                   (and (not (and (= model_type model-type) (= model_id model-id)))
                        (spec/spec-for-model-type model_type)
-                       (not (t2/exists? :model/RemoteSyncObject :model_type model_type :model_id model_id)))))
+                       (not (remote-sync.db/rso-exists? model_type model_id)))))
         (export-closure model-type model-id)))
 
 (defn- ->sized-chunks
@@ -834,11 +853,14 @@
   Return:
     - [[row entity]] (if no entity, then omit)"
   [{:keys [model_type rows]}]
-  (let [id->row (u/index-by :model_id rows)
-        opts    {:where [:in :id (mapv :model_id rows)] :skip-archived true}]
+  (let [pk-col  (serdes/primary-key model_type)
+        id->row (u/index-by :model_id rows)
+        opts    (merge spec/git-sync-extract-opts
+                       {:filter-column pk-col
+                        :filter-ids    (mapv :model_id rows)})]
     ;; extract-one must run inside the extract-query reduction, while its ResultSet is open
     (into [] (keep (fn [instance]
-                     (when-let [row (id->row (:id instance))]
+                     (when-let [row (id->row (get instance pk-col))]
                        [row (serdes/extract-one model_type opts instance)])))
           (serdes/extract-query model_type opts))))
 
@@ -939,6 +961,14 @@
                  :model_id   model_id
                  :file_path  (:new-path file-info)}]}
 
+      ;; a collection's path is also its contents' directory, so moving the collection moves every
+      ;; descendant's file too; only a full export rewrites them all
+      (and (= "Collection" model_type)
+           (= "update" status)
+           (not (str/blank? file_path))
+           (not= file_path (:new-path file-info)))
+      :remote-sync/incremental-not-possible
+
       ;; rename: update whose stored path differs from new path. Write the
       ;; new file and delete the old one.
       (and (= "update" status)
@@ -981,7 +1011,7 @@
    - {:writes [{:id :model_type :model_id :file_path}] :delete-paths [path] :removed-ids [id]}, or
    - :remote-sync/incremental-not-possible when any row can't go incrementally"
   [snapshot rows]
-  (let [opts          (serdes/storage-base-context)
+  (let [opts          (source/storage-context)
         ;; create/update rows on entity-id models need an entity (extracted per chunk); everything else
         ;; (removed/delete, non-entity-id, bad status) is decided with no entity
         {cu-rows true other-rows false} (group-by #(boolean (and (#{"create" "update"} (:status %))
@@ -1011,7 +1041,7 @@
   []
   (cond-> #{}
     (not (settings/remote-sync-transforms))    (into ["transforms" "python-libraries" "python_libraries"])
-    (not (settings/library-is-remote-synced?)) (conj "snippets")))
+    (not (settings/library-is-remote-synced?)) (into ["snippets" "glossary"])))
 
 (defn- stage-write [commit opts [row entity]]
   (let [path    (or (:file_path row) (source/entity->path opts entity))
@@ -1031,13 +1061,22 @@
   "Stage WriteRows ({:model_type :model_id, optional :id/:file_path}) to `commit`, chunking internally per
   model type so each chunk's entities load in one query with bounded memory. Callers pass a flat seq.
 
+  `on-chunk`, when non-nil, is called once per staged chunk with the cumulative number of rows staged so
+  far — used to drive serialize-phase progress. It must not realize `rows`.
+
   Returns:
    - [{:id :file_path :content_hash}]"
-  [commit opts rows]
-  (->> rows
-       (->sized-chunks)
-       (mapcat #(chunk-stage-writes commit opts %))
-       (doall)))
+  ([commit opts rows] (stage-writes commit opts rows nil))
+  ([commit opts rows on-chunk]
+   (let [staged (volatile! 0)]
+     (->> rows
+          (->sized-chunks)
+          (mapcat (fn [chunk]
+                    (let [res (chunk-stage-writes commit opts chunk)]
+                      (vswap! staged + (count (:rows chunk)))
+                      (when on-chunk (on-chunk @staged))
+                      res)))
+          (doall)))))
 
 (defn- stage-deletes [commit delete-paths]
   (doseq [delete-path delete-paths]
@@ -1046,7 +1085,7 @@
 (defn- exportable-write-rows
   "WriteRows for a full export — every exportable id tagged with its RemoteSyncObject id (untracked deps get :id nil)."
   []
-  (let [rso-id (u/index-by (juxt :model_type :model_id) :id (t2/select [:model/RemoteSyncObject :id :model_type :model_id]))]
+  (let [rso-id (u/index-by (juxt :model_type :model_id) :id (remote-sync.db/rso-keys))]
     (for [[model ids] (spec/exportable-entities)
           id          ids]
       {:model_type model :model_id id :id (rso-id [model id])})))
@@ -1056,8 +1095,7 @@
   `targets`), matching the incremental path; path/hybrid and still-exported rows are kept."
   [exported-rows]
   (let [exported (into #{} (map #(select-keys % [:model_type :model_id])) exported-rows)]
-    (->> (t2/select [:model/RemoteSyncObject :id :model_type :model_id]
-                    :status [:in ["removed" "delete"]])
+    (->> (remote-sync.db/departed-rso-keys)
          (filter #(= :entity-id (:identity (spec/spec-for-model-type (:model_type %)))))
          (remove #(exported (select-keys % [:model_type :model_id])))
          (map :id))))
@@ -1068,24 +1106,11 @@
   scope: the incremental export passes only its write set, a full export passes every RemoteSyncObject id."
   [ids synced sync-timestamp]
   (let [by-id (u/index-by :id synced)]
-    (doseq [id-chunk (partition-all app-db-batch-size ids)
-            :let     [hits (filter by-id id-chunk)]]
-      (t2/update! :model/RemoteSyncObject
-                  {:id [:in (vec id-chunk)]}
-                  (cond-> {:status "synced" :status_changed_at sync-timestamp}
-                    (seq hits)
-                    (assoc :file_path    (into [:case]
-                                               (concat
-                                                (mapcat (fn [id]
-                                                          [[:= :id id] (:file_path (by-id id))])
-                                                        hits)
-                                                [:else :file_path]))
-                           :content_hash (into [:case]
-                                               (concat
-                                                (mapcat (fn [id]
-                                                          [[:= :id id] (:content_hash (by-id id))])
-                                                        hits)
-                                                [:else :content_hash]))))))))
+    (doseq [id-chunk (partition-all app-db-batch-size ids)]
+      (remote-sync.db/mark-rsos-synced! id-chunk (select-keys by-id id-chunk) sync-timestamp))))
+
+(def ^:private export-progress-plan-done 0.33) ; phase 1 (plan) complete / serialize start
+(def ^:private export-progress-serialize 0.66) ; phase 2 (serialize) complete
 
 (defn- full-export!
   "Re-serialize and commit the entire remote-synced set, then reconcile every RemoteSyncObject.
@@ -1094,45 +1119,62 @@
    - {:status :success}
    or throws"
   [snapshot task-id message sync-timestamp]
-  (let [export-rows (exportable-write-rows)]
+  (let [export-rows (vec (exportable-write-rows))]
     (when (empty? export-rows)
       (throw (ex-info "No remote-syncable content available." {})))
-    (remote-sync.task/update-progress! task-id 0.3)
-    (let [opts             (serdes/storage-base-context)
-          [synced version] (commit-staged! snapshot message
-                                           (fn [commit]
-                                             (source.p/replace-all! commit) ; replace the managed dirs wholesale
-                                             (stage-writes commit opts export-rows)))]
-      (t2/with-transaction [_]
-        (when-not (= version :remote-sync/empty-commit)
-          (remote-sync.task/set-version! task-id version))
-        (doseq [removed-ids (partition-all 500 (find-departed-entities export-rows))]
-          (t2/delete! :model/RemoteSyncObject :id [:in removed-ids]))
-        (mark-rows-synced! (t2/select-pks-set :model/RemoteSyncObject) synced sync-timestamp))
-      (if (= version :remote-sync/empty-commit)
-        (do
-          (log/info "Remote sync full export: re-serialized content matches remote; skipped empty commit")
-          {:status :success :outcome {:kind "push-skipped"}})
-        {:status :success
-         :outcome {:kind "pushed" :count (count synced) :branch (settings/remote-sync-branch)}}))))
+    (let [report (remote-sync.task/make-progress-reporter task-id)
+          total  (count export-rows)
+          span   (- export-progress-serialize export-progress-plan-done)]
+      (report export-progress-plan-done {:force? true})
+      (let [opts             (source/storage-context)
+            [synced version] (commit-staged! snapshot message
+                                             (fn [commit]
+                                               (source.p/replace-all! commit) ; replace the managed dirs wholesale
+                                               (let [synced (stage-writes commit opts export-rows
+                                                                          (fn [staged]
+                                                                            (report (+ export-progress-plan-done
+                                                                                       (* span (/ staged total))))))]
+                                                 (report export-progress-serialize {:force? true})
+                                                 synced))
+                                             report)]
+        (t2/with-transaction [_]
+          (when-not (= version :remote-sync/empty-commit)
+            (remote-sync.task/set-version! task-id version))
+          (doseq [removed-ids (partition-all 500 (find-departed-entities export-rows))]
+            (remote-sync.db/delete-rsos! removed-ids))
+          (mark-rows-synced! (remote-sync.db/all-rso-ids) synced sync-timestamp))
+        (if (= version :remote-sync/empty-commit)
+          (do
+            (log/info "Remote sync full export: re-serialized content matches remote; skipped empty commit")
+            {:status :success :outcome {:kind "push-skipped"}})
+          {:status :success
+           :outcome {:kind "pushed" :count (count synced) :branch (settings/remote-sync-branch)}})))))
 
 (defn- incremental-export!
   [plan disabled-files task-id snapshot message sync-timestamp]
   (let [{:keys [writes delete-paths removed-ids]} plan
-        delete-paths (into (vec delete-paths) disabled-files)]
-    (remote-sync.task/update-progress! task-id 0.3)
-    (let [opts             (serdes/storage-base-context)
+        delete-paths (into (vec delete-paths) disabled-files)
+        report       (remote-sync.task/make-progress-reporter task-id)
+        total        (max 1 (count writes))
+        span         (- export-progress-serialize export-progress-plan-done)]
+    (report export-progress-plan-done {:force? true})
+    (let [opts             (source/storage-context)
           [synced version] (commit-staged! snapshot message
                                            (fn [commit]
-                                             (let [synced (stage-writes commit opts writes)]
+                                             (let [synced (stage-writes commit opts writes
+                                                                        (fn [staged]
+                                                                          (report (+ export-progress-plan-done
+                                                                                     (* span (/ staged total))))))]
                                                (stage-deletes commit delete-paths)
-                                               synced)))]
+                                               (report export-progress-serialize {:force? true})
+                                               synced))
+                                           report)]
       (t2/with-transaction [_]
         (when-not (= version :remote-sync/empty-commit)
           (remote-sync.task/set-version! task-id version))
         ;; delete departed rows first, then update RSO metadata — same order as full-export!
         (doseq [removed-ids (partition-all 500 removed-ids)]
-          (t2/delete! :model/RemoteSyncObject :id [:in removed-ids]))
+          (remote-sync.db/delete-rsos! removed-ids))
         (mark-rows-synced! (map :id synced) synced sync-timestamp))
       (if (= version :remote-sync/empty-commit)
         (do (log/info "Remote sync incremental export: nothing changed; skipped empty commit")
@@ -1187,8 +1229,10 @@
                :message   "Cannot merge: the remote branch history was rewritten. Re-import then export, or force the export to overwrite."}
 
               :else
-              (export-merged! src snapshot base-snapshot task-id message sync-timestamp
-                              (spec/extract-entities-for-export)))
+              (let [targets (spec/exportable-entities)]
+                (export-merged! src snapshot base-snapshot task-id message sync-timestamp
+                                (spec/extract-entities-for-export targets)
+                                :total (spec/exportable-entity-count targets))))
 
             diverged? ;; and not merge? option
             {:status    :conflict
@@ -1358,7 +1402,7 @@
   [result task-id & [branch]]
   (let [proceed?
         (t2/with-transaction [_conn]
-          (let [task (t2/select-one :model/RemoteSyncTask :id task-id {:for :update})]
+          (let [task (remote-sync.db/lock-task task-id)]
             (cond
               (nil? task)
               (do (log/warnf "Task %s missing during result handling; skipping" task-id)
@@ -1391,7 +1435,7 @@
   (e.g. `{:branch \"main\"}`, plus `:auto true` for system-triggered syncs); `user-id` is nil for
   system-triggered syncs."
   [topic task-id details user-id]
-  (let [task (t2/select-one :model/RemoteSyncTask task-id)]
+  (let [task (remote-sync.db/task task-id)]
     (events/publish-event! topic
                            {:object  task
                             :details details
@@ -1457,7 +1501,11 @@
     (when (and has-dirty? (not force?) (not merge?))
       (throw (ex-info "There are unsaved changes in the Remote Sync collection which will be overwritten by the import. Force the import to discard these changes."
                       {:status-code 400
-                       :conflicts true})))
+                       :conflicts true
+                       ;; The un-pushed local changes a switch would discard, so the client can name exactly
+                       ;; what would be lost without a second round-trip to /dirty.
+                       :dirty_objects (remote-sync.object/dirty-objects)
+                       :response/keys #{:conflicts :dirty_objects}})))
     (run-async! "import" branch
                 (fn [task-id]
                   (when (branch-changed-since-scheduling? pre-task-branch)
@@ -1543,17 +1591,21 @@
       no-changes
       (if-let [base-snapshot (source.p/snapshot-at source base-version)]
         (serdes/with-cache
-          (if-let [models (seq (spec/extract-entities-for-export))]
-            (assoc (source/preview-merge models snapshot base-snapshot nil) :diverged? true)
-            (assoc no-changes :diverged? true)))
+          (let [targets (spec/exportable-entities)]
+            (if (seq targets)
+              (assoc (source/preview-merge (spec/extract-entities-for-export targets) snapshot base-snapshot nil)
+                     :diverged? true)
+              (assoc no-changes :diverged? true))))
         ;; No merge base — the remote history was rewritten. A merge is impossible, but a force push is
         ;; still offered, so surface what it would discard (every remote entity not identical to ours).
         {:diverged? true :clean? false :reason :history-rewritten
          :conflicts [] :summary {:added 0 :updated 0 :removed 0}
          :force-push-casualties (serdes/with-cache
-                                  (if-let [models (seq (spec/extract-entities-for-export))]
-                                    (source/force-push-casualties-no-base models snapshot)
-                                    {:deleted [] :overwritten []}))}))))
+                                  (let [targets (spec/exportable-entities)]
+                                    (if (seq targets)
+                                      (source/force-push-casualties-no-base
+                                       (spec/extract-entities-for-export targets) snapshot)
+                                      {:deleted [] :overwritten []})))}))))
 
 (defn create-branch!
   "Creates a new remote branch from `base-branch` and switches `remote-sync-branch`

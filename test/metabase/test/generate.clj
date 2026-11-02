@@ -130,7 +130,7 @@
 (s/def ::kind #{"row/create" "row/update" "row/delete"})
 
 ;; * http_action
-(s/def ::template #{{}})
+(s/def ::template #{{:method "GET" :url "https://example.com"}})
 
 ;; * pulse
 (s/def ::row pos-int?)
@@ -395,7 +395,6 @@
        :insert! (fn [sm-db {:keys [schema-opts attrs] :as visit-opts}]
                   (try
                     (first (t2/insert-returning-instances! (:model schema-opts)
-                                                           #_{:clj-kondo/ignore [:deprecated-var]}
                                                            (rsg/spec-gen-assoc-relations
                                                             sm-db
                                                             (assoc visit-opts :visit-val (:spec-gen attrs)))))

@@ -63,9 +63,9 @@
 
 (defmacro with-successful-oidc! [& body]
   `(do
-     (derive :provider/slack-connect :provider/test-successful-oidc)
+     (auth-identity/derive! :provider/slack-connect :provider/test-successful-oidc)
      ~@body
-     (underive :provider/slack-connect :provider/test-successful-oidc)))
+     (auth-identity/underive! :provider/slack-connect :provider/test-successful-oidc)))
 
 ;;; -------------------------------------------------- Prerequisites Tests --------------------------------------------------
 
@@ -303,7 +303,6 @@
                                            site-name "test"]
           (with-successful-oidc!
             ;; client-real-response hits a real Jetty server; handler thread doesn't inherit *local-redefs*.
-            #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
             (with-redefs [auth-identity/login!
                           (fn [_provider _request]
                             {:success? false

@@ -9,6 +9,7 @@
    [metabase.actions.init]
    [metabase.activity-feed.init]
    [metabase.agent-api.init]
+   [metabase.ai-tracing.init]
    [metabase.analytics.init]
    [metabase.api-scope.init]
    [metabase.api.init]
@@ -22,6 +23,7 @@
    [metabase.channel.init]
    [metabase.classloader.init]
    [metabase.cloud-migration.init]
+   [metabase.collections.init]
    [metabase.comments.init]
    [metabase.config.core :as config]
    [metabase.content-verification.init]
@@ -31,6 +33,7 @@
    [metabase.eid-translation.init]
    [metabase.embedding.init]
    [metabase.events.init]
+   [metabase.explorations.init]
    [metabase.geojson.init]
    [metabase.health-inspector.init]
    [metabase.indexed-entities.init]
@@ -41,8 +44,10 @@
    [metabase.login-history.init]
    [metabase.mcp.init]
    [metabase.metabot.init]
+   [metabase.mfa.init]
    [metabase.model-persistence.init]
    [metabase.models.init]
+   [metabase.mq.init]
    [metabase.notification.init]
    [metabase.oauth-server.init]
    [metabase.parameters.init]
@@ -79,13 +84,14 @@
    [metabase.usage-metadata.init]
    [metabase.user-key-value.init]
    [metabase.users.init]
+   [metabase.util.experiment.init]
    [metabase.version.init]
    [metabase.view-log.init]
+   [metabase.warehouse-schema.init]
    [metabase.warehouses.init]
    [metabase.xrays.init]))
 
 ;; load EE init code on system launch if it exists.
 (when (and (not *compile-files*)
            config/ee-available?)
-  #_{:clj-kondo/ignore [:discouraged-var]}
   (require 'metabase-enterprise.core.init))

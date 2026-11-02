@@ -26,7 +26,7 @@
   {:status  404
    :body    "Not found."
    :headers {"Cache-Control"                     "max-age=0, no-cache, must-revalidate, proxy-revalidate"
-             "Content-Security-Policy"           (str (-> (@#'mw.security/content-security-policy-header nil) vals first)
+             "Content-Security-Policy"           (str (-> (@#'mw.security/content-security-policy-header nil false false nil false) vals first)
                                                       " frame-ancestors 'none';")
              "Content-Type"                      "text/plain"
              "Expires"                           "Tue, 03 Jul 2001 06:00:00 GMT"
@@ -88,6 +88,20 @@
             identity
             (fn [e] (throw e)))))))
 
+(deftest ^:parallel check-map-message-is-client-facing-test
+  (testing "a map message is the response body, and its keys stay readable in the ex-data"
+    (let [e (try
+              (api/check false [400 {:message "Nope", :error_code "archived", :errors {:id "bad"}}])
+              (catch ExceptionInfo e e))]
+      (is (=? {:status-code 400, :error_code "archived", :errors {:id "bad"}}
+              (ex-data e)))
+      (is (= {:message "Nope", :error_code "archived", :errors {:id "bad"}}
+             (:body (mock-api-fn (fn [_] (throw e)))))))))
+
+(deftest ^:parallel checkp-errors-are-client-facing-test
+  (is (= {:errors {:name "is bad"}}
+         (:body (mock-api-fn (fn [_] (api/checkp false "name" "is bad")))))))
+
 (methodical/defmethod hawk.approx/=?-diff [java.util.regex.Pattern clojure.lang.Symbol]
   [expected-re sym]
   (hawk.approx/=?-diff expected-re (name sym)))
@@ -107,10 +121,10 @@
 
 (deftest check-functions-publish-events
   ;; setup - derive events so they get dispatched to our test method
-  (derive ::permission-failure-event :metabase/event)
-  (derive :event/write-permission-failure ::permission-failure-event)
-  (derive :event/update-permission-failure ::permission-failure-event)
-  (derive :event/create-permission-failure ::permission-failure-event)
+  (events/derive! ::permission-failure-event :metabase/event)
+  (events/derive! :event/write-permission-failure ::permission-failure-event)
+  (events/derive! :event/update-permission-failure ::permission-failure-event)
+  (events/derive! :event/create-permission-failure ::permission-failure-event)
   (try
     (binding [api/*current-user-id* 1]
       (with-redefs [mi/can-read? (constantly false)
@@ -138,10 +152,10 @@
                      @*events*)))))))
     (finally
       ;; teardown - underive events so they aren't dispatched in other tests
-      (underive ::permission-failure-event :metabase/event)
-      (underive :event/write-permission-failure ::permission-failure-event)
-      (underive :event/update-permission-failure ::permission-failure-event)
-      (underive :event/create-permission-failure ::permission-failure-event))))
+      (events/underive! ::permission-failure-event :metabase/event)
+      (events/underive! :event/write-permission-failure ::permission-failure-event)
+      (events/underive! :event/update-permission-failure ::permission-failure-event)
+      (events/underive! :event/create-permission-failure ::permission-failure-event))))
 
 ;;; ---------------------------------------- query-check tests ----------------------------------------
 

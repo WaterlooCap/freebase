@@ -2,7 +2,6 @@ import { useCallback, useMemo } from "react";
 import { t } from "ttag";
 import * as Yup from "yup";
 
-import type { SdkCollectionId } from "embedding-sdk-bundle/types";
 import { useCreateDashboardMutation } from "metabase/api";
 import FormCollectionPicker from "metabase/common/collections/containers/FormCollectionPicker/FormCollectionPicker";
 import { useInitialCollectionId } from "metabase/common/collections/hooks";
@@ -54,7 +53,7 @@ export interface CreateDashboardProperties {
 
 export interface CreateDashboardFormOwnProps {
   collectionId?: CollectionId | null; // can be used by `getInitialCollectionId`
-  targetCollection?: SdkCollectionId | null;
+  targetCollection?: CollectionId | null;
   onCreate?: (dashboard: Dashboard) => void;
   onCancel?: () => void;
 }
@@ -67,7 +66,6 @@ export function CreateDashboardForm({
 }: CreateDashboardFormOwnProps) {
   const initialCollectionId = useInitialCollectionId({ collectionId });
 
-  // When passing `"root"` it will be resolved to `null`
   const hasTargetCollection = targetCollection !== undefined;
 
   const [handleCreateDashboard] = useCreateDashboardMutation();
@@ -100,15 +98,15 @@ export function CreateDashboardForm({
       {() => (
         <Form as={Stack} gap={0}>
           <FormTextInput
-            labelProps={{ mb: "xs" }}
+            labelProps={{ mb: "xxs" }}
             name="name"
             label={t`Name`}
             placeholder={t`What is the name of your dashboard?`}
             data-autofocus
-            mt="md"
+            mt="lg"
           />
           <FormTextarea
-            labelProps={{ mb: "xs" }}
+            labelProps={{ mb: "xxs" }}
             name="description"
             label={t`Description`}
             placeholder={t`It's optional but oh, so helpful`}
@@ -116,7 +114,7 @@ export function CreateDashboardForm({
             autosize={false}
             minRows={5}
             maxRows={5}
-            my="md"
+            my="lg"
           />
           {!hasTargetCollection && (
             <FormCollectionPicker
@@ -125,7 +123,7 @@ export function CreateDashboardForm({
               entityType="dashboard"
             />
           )}
-          <FormFooter mt="md">
+          <FormFooter mt="lg">
             <FormErrorMessage inline />
             {!!onCancel && (
               <Button type="button" onClick={onCancel}>{t`Cancel`}</Button>

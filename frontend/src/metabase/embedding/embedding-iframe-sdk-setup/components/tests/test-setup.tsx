@@ -14,9 +14,10 @@ import {
   setupUpdateSettingsEndpoint,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, waitFor } from "__support__/ui";
 import type { SdkIframeEmbedSetupModalInitialState } from "metabase/plugins";
-import { createMockState } from "metabase/redux/store/mocks";
+import type { Dashboard } from "metabase-types/api";
 import {
   createMockCollection,
   createMockDashboard,
@@ -39,13 +40,16 @@ export const setup = (options?: {
   hasEmailSetup?: boolean;
   metabotEnabled?: boolean;
   siteUrl?: string;
+  dashboard?: Dashboard;
 }) => {
   const { enterprisePlugins } = options ?? {};
 
   const mockDatabase = createMockDatabase();
-  const mockDashboard = createMockDashboard({
-    enable_embedding: true,
-  });
+  const mockDashboard =
+    options?.dashboard ??
+    createMockDashboard({
+      enable_embedding: true,
+    });
 
   if (enterprisePlugins) {
     enterprisePlugins.forEach((plugin) => {

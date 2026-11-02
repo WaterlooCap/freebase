@@ -16,6 +16,7 @@ const NEXT_CARD = createMockCard({
 
 describe("useHandleMcpDrillThrough", () => {
   beforeEach(() => {
+    // Unjustified type cast. FIXME
     (window as any).metabaseConfig = {
       instanceUrl: "https://metabase.example",
     };
@@ -24,6 +25,7 @@ describe("useHandleMcpDrillThrough", () => {
   });
 
   afterEach(() => {
+    // Unjustified type cast. FIXME
     delete (window as any).metabaseConfig;
   });
 

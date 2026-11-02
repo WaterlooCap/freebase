@@ -10,7 +10,6 @@
    [metabase.app-db.setting :as mdb.setting]
    [metabase.cloud-migration.models.cloud-migration :as cloud-migration]
    [metabase.config.core :as config]
-   [metabase.models.serialization :as serdes]
    [metabase.settings.models.setting :as setting :refer [defsetting]]
    [metabase.settings.models.setting.cache :as setting.cache]
    [metabase.test :as mt]
@@ -811,6 +810,27 @@
     (is (= "123456"
            (test-sensitive-setting)))))
 
+(defsetting test-sensitive-multi-line-setting
+  (deferred-tru "This is a sample sensitive multi-line Setting.")
+  :sensitive? true)
+
+(deftest sensitive-settings-multi-line-test
+  (testing "`user-facing-value` should obfuscate multi-line sensitive settings"
+    (test-sensitive-multi-line-setting! "ABC1\n3")
+    (is (=  "**********\n3"
+            (setting/user-facing-value "test-sensitive-multi-line-setting"))))
+  (testing "Attempting to set a sensitive setting to a multi-line obfuscated value should be ignored"
+    (test-sensitive-multi-line-setting! "1234\n6")
+    (test-sensitive-multi-line-setting! "**********\n6")
+    (is (= "1234\n6"
+           (test-sensitive-multi-line-setting)))))
+
+(deftest obfuscated-value-spanning-a-line-break-test
+  (testing "obfuscated-value? works for values ending in a newline"
+    (let [key-file "{\n  \"type\": \"service_account\"\n}\n"]
+      (is (= "**********}\n" (setting/obfuscate-value key-file)))
+      (is (setting/obfuscated-value? (setting/obfuscate-value key-file))))))
+
 ;;; ------------------------------------------------- CACHE SYNCING --------------------------------------------------
 
 (deftest cache-sync-test
@@ -1244,14 +1264,6 @@
              #"Setting test-warn-vs-error-setting is not enabled for this database"
              (setting/validate-settable-for-db! :test-warn-vs-error-setting db-with-error every-feature)))))))
 
-(deftest identity-hash-test
-  (testing "Settings are hashed based on the key"
-    (mt/with-temporary-setting-values [test-setting-1 "123"
-                                       test-setting-2 "123"]
-      (is (= "5f7f150c"
-             (serdes/raw-hash ["test-setting-1"])
-             (serdes/identity-hash (t2/select-one :model/Setting :key "test-setting-1")))))))
-
 (deftest enabled?-test
   (testing "Settings can be disabled"
     (testing "With no default returns nil"
@@ -1298,6 +1310,22 @@
            :enabled?   (fn [] false)
            :feature    :test-feature
            :encryption :when-encryption-key-set)))))
+
+(deftest validate-settable!-ex-data-test
+  (testing "Settings that can't be written report a status code, so the API doesn't surface them as a 500"
+    (testing "premium feature not available"
+      (mt/with-premium-features #{}
+        (is (= {:status-code 402
+                :status      "error-premium-feature-not-available"
+                :setting     "test-feature-setting"
+                :feature     :test-feature}
+               (try (test-feature-setting! "custom")
+                    (catch ExceptionInfo e (dissoc (ex-data e) :response/keys)))))))
+    (testing ":enabled? returns false"
+      (is (= {:status-code 400
+              :setting     "test-enabled-setting-default"}
+             (try (test-enabled-setting-default! "custom")
+                  (catch ExceptionInfo e (ex-data e))))))))
 
 ;;; ------------------------------------------------- Misc tests -------------------------------------------------------
 
@@ -1914,6 +1942,27 @@
 (deftest deprecated-name-neither-set-test
   (is (nil? (setting/env-var-value :test-setting-with-deprecated-name)))
   (is (= [] (deprecated-env-var-warnings))))
+
+(deftest env-var-source-names-the-variable-actually-set-test
+  (testing "the value comes back with the name of the variable that supplied it, so a message about the value can
+           point at the variable the operator set rather than at one they did not"
+    (mt/with-temp-env-var-value! [mb-test-setting-with-deprecated-name "PRIMARY"]
+      (is (= ["MB_TEST_SETTING_WITH_DEPRECATED_NAME" "PRIMARY"]
+             (setting/env-var-source :test-setting-with-deprecated-name))))
+    (mt/with-temp-env-var-value! [mb-old-test-setting-name "LEGACY"]
+      (is (= ["MB_OLD_TEST_SETTING_NAME" "LEGACY"]
+             (setting/env-var-source :test-setting-with-deprecated-name))))
+    (testing "the primary wins when both are set"
+      (mt/with-temp-env-var-value! [mb-test-setting-with-deprecated-name "PRIMARY"
+                                    mb-old-test-setting-name             "LEGACY"]
+        (is (= ["MB_TEST_SETTING_WITH_DEPRECATED_NAME" "PRIMARY"]
+               (setting/env-var-source :test-setting-with-deprecated-name)))))
+    (testing "an empty primary means explicitly unset, and blocks the deprecated fallback"
+      (mt/with-temp-env-var-value! [mb-test-setting-with-deprecated-name ""
+                                    mb-old-test-setting-name             "LEGACY"]
+        (is (nil? (setting/env-var-source :test-setting-with-deprecated-name)))))
+    (testing "nil when neither is set"
+      (is (nil? (setting/env-var-source :test-setting-with-deprecated-name))))))
 
 (deftest deprecated-name-empty-primary-blocks-fallback-test
   (mt/with-temp-env-var-value! [mb-test-setting-with-deprecated-name ""

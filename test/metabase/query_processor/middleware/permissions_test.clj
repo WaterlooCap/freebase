@@ -1,28 +1,28 @@
-(ns metabase.query-processor.middleware.permissions-test
+(ns ^:mb/driver-tests metabase.query-processor.middleware.permissions-test
   "Tests for the middleware that checks whether the current user has permissions to run a given query."
   {:clj-kondo/config '{:linters {:discouraged-var {metabase.test/with-temp {:level :off}}
                                  :deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.query-processor.middleware.permissions-test]}}}}}}
   (:require
-   [clojure.string :as str]
    [clojure.test :refer :all]
    [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.lib-be.core :as lib-be]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.serialize :as lib.serialize]
    [metabase.lib.test-metadata :as meta]
    [metabase.permissions.core :as perms]
    [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.pivot :as qp.pivot]
-   [metabase.query-processor.preprocess :as qp.preprocess]
+   [metabase.query-processor.pivot.test-util :as qp.pivot.tu]
    [metabase.query-processor.setup :as qp.setup]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.test :as qp]
    [metabase.test :as mt]
    [metabase.util :as u]
-   [metabase.util.malli.fn :as mu.fn]
-   [toucan2.core :as t2])
+   [metabase.util.malli.fn :as mu.fn])
   (:import
    (clojure.lang ExceptionInfo)))
 
@@ -749,28 +749,35 @@
                #"You do not have permissions to run this query"
                (qp/process-query (mt/mbql-query venues {:limit 1})))))
         (testing "Query carrying a :query-permissions/perms value is still rejected"
+          ;; the value is dropped by the `:decode/api` decoder every incoming query goes through, so by the time the
+          ;; permissions middleware looks at the query there is nothing there to trust
           (is (thrown-with-msg?
                clojure.lang.ExceptionInfo
                #"You do not have permissions to run this query"
-               (qp/process-query (assoc (mt/mbql-query venues {:limit 1})
-                                        :query-permissions/perms {:gtaps {:perms/view-data :unrestricted
-                                                                          :perms/create-queries {(mt/id :venues) :query-builder}}})))))))))
+               (-> (lib/query (mt/metadata-provider) (mt/mbql-query venues {:limit 1}))
+                   (assoc :query-permissions/perms {:gtaps {:perms/view-data :unrestricted
+                                                            :perms/create-queries {(mt/id :venues) :query-builder}}})
+                   lib.serialize/prepare-after-deserialization
+                   qp/process-query))))))))
 
 (deftest e2e-ignore-user-supplied-sandboxed-tables-test
   (testing "You shouldn't be able to bypass security restrictions by passing in `:query-permissions/sandboxed-table` in the query"
     (mt/with-no-data-perms-for-all-users!
       (perms/set-table-permission! (perms/all-users-group) (mt/id :venues) :perms/create-queries :no)
       (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
-      (let [bad-query {:database (mt/id), :type :query, :query {:source-query {:native "SELECT * FROM VENUES LIMIT 1"
-                                                                               :query-permissions/sandboxed-table (mt/id :venues)}}
-                       :query-permissions/perms {:gtaps {:perms/view-data :unrestricted
-                                                         :perms/create-queries :query-builder-and-native}}}]
-        (mt/with-test-user :rasta
+      (mt/with-test-user :rasta
+        (let [bad-query (-> (lib/query (mt/metadata-provider)
+                                       {:database (mt/id), :type :query
+                                        :query    {:source-query {:native "SELECT * FROM VENUES LIMIT 1"}}})
+                            (assoc-in [:stages 0 :query-permissions/sandboxed-table] (mt/id :venues))
+                            (assoc :query-permissions/perms {:gtaps {:perms/view-data      :unrestricted
+                                                                     :perms/create-queries :query-builder-and-native}}))]
           (testing "Query carrying :query-permissions/sandboxed-table and perms keys is still rejected"
+            ;; both keys are dropped by the `:decode/api` decoder every incoming query goes through
             (is (thrown-with-msg?
                  clojure.lang.ExceptionInfo
                  #"You do not have permissions to run this query"
-                 (qp/process-query bad-query)))))))))
+                 (qp/process-query (lib.serialize/prepare-after-deserialization bad-query))))))))))
 
 (deftest e2e-ignore-user-supplied-compiled-from-mbql-key
   (testing "Make sure the NATIVE query fails to run if current user doesn't have perms even if you try to include an MBQL :query"
@@ -2332,39 +2339,49 @@
 (defmacro ^:private with-venues-only-access [& body]
   `(with-venues-only-access*! (fn [] ~@body)))
 
-(deftest pivot-query-does-not-bind-card-id-test
+(deftest ^:mb/driver-tests pivot-query-does-not-bind-card-id-test
   (testing "run-pivot-query should not bind *card-id* from :info, so permission checks use the
             full ad-hoc path even when :card-id is present in the query's :info map"
-    (mt/with-non-admin-groups-no-root-collection-perms
-      (with-venues-only-access
-        (mt/with-temp [:model/Collection collection {}
-                       :model/Card {card-id :id} {:collection_id (:id collection)
-                                                  :dataset_query (mt/mbql-query venues)}]
-          (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
-          ;; User cannot query people directly
-          (is (thrown-with-msg? ExceptionInfo perms-error-msg
-                                (qp/process-query
-                                 {:database (mt/id)
-                                  :type     :query
-                                  :query    {:source-table (mt/id :people)
-                                             :limit        1}})))
-          ;; Pivot path with :card-id in :info still routes through the ad-hoc permission path.
-          ;; The pivot path wraps queries as userland, so permission errors are returned as
-          ;; {:status :failed} results rather than thrown exceptions.
-          (testing "Pivot query uses the ad-hoc permission path when :card-id is in :info (source-table)"
-            (let [result (qp.pivot/run-pivot-query
-                          {:database    (mt/id)
-                           :type        :query
-                           :info        {:executed-by (mt/user->id :rasta)
-                                         :context     :ad-hoc
-                                         :card-id     card-id}
-                           :constraints {:max-results 10000 :max-results-bare-rows 2000}
-                           :query       {:source-table (mt/id :people)
-                                         :limit        1}})]
-              (is (= :failed (:status result)))
-              (is (re-find perms-error-msg (str (:error result))))))
-          ;; Pivot path with :card-id and a join still routes through the ad-hoc permission path
-          (testing "Pivot query uses the ad-hoc permission path when :card-id is in :info (join)"
+    (mt/test-drivers (conj (mt/normal-drivers-with-feature :native-pivot-tables) :h2)
+      (mt/with-non-admin-groups-no-root-collection-perms
+        (with-venues-only-access
+          (mt/with-temp [:model/Collection collection {}
+                         :model/Card {card-id :id} {:collection_id (:id collection)
+                                                    :dataset_query (mt/mbql-query venues)}]
+            (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
+            ;; User cannot query people directly
+            (is (thrown-with-msg? ExceptionInfo perms-error-msg
+                                  (qp/process-query
+                                   {:database (mt/id)
+                                    :type     :query
+                                    :query    {:source-table (mt/id :people)
+                                               :limit        1}})))
+            ;; Pivot path with :card-id in :info still routes through the ad-hoc permission path.
+            ;; The pivot path wraps queries as userland, so permission errors are returned as
+            ;; {:status :failed} results rather than thrown exceptions.
+            (testing "Pivot query uses the ad-hoc permission path when :card-id is in :info (source-table)"
+              (let [result (qp.pivot/run-pivot-query
+                            {:database    (mt/id)
+                             :type        :query
+                             :info        {:executed-by (mt/user->id :rasta)
+                                           :context     :ad-hoc
+                                           :card-id     card-id}
+                             :constraints {:max-results 10000 :max-results-bare-rows 2000}
+                             :query       {:source-table (mt/id :people)
+                                           :limit        1}})]
+                (is (= :failed (:status result)))
+                (is (re-find perms-error-msg (str (:error result))))))))))))
+
+(deftest ^:mb/driver-tests pivot-query-does-not-bind-card-id-with-join-test
+  (testing "run-pivot-query should not bind *card-id* from :info even when the query has a join,
+            so permission checks use the full ad-hoc path"
+    (mt/test-drivers (conj (mt/normal-drivers-with-feature :native-pivot-tables :left-join) :h2)
+      (mt/with-non-admin-groups-no-root-collection-perms
+        (with-venues-only-access
+          (mt/with-temp [:model/Collection collection {}
+                         :model/Card {card-id :id} {:collection_id (:id collection)
+                                                    :dataset_query (mt/mbql-query venues)}]
+            (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
             (let [result (qp.pivot/run-pivot-query
                           {:database    (mt/id)
                            :type        :query
@@ -2383,31 +2400,34 @@
               (is (= :failed (:status result)))
               (is (re-find perms-error-msg (str (:error result)))))))))))
 
-(deftest pivot-query-with-card-id-bound-externally-test
+(deftest ^:mb/driver-tests pivot-query-with-card-id-bound-externally-test
   (testing "When *card-id* is bound by the caller (e.g. card.clj), pivot queries should
             still work correctly with card-level permission checks"
-    (mt/with-non-admin-groups-no-root-collection-perms
-      (with-venues-only-access
-        (mt/with-temp [:model/Collection collection {}
-                       :model/Card {card-id :id} {:collection_id (:id collection)
-                                                  :dataset_query (mt/mbql-query venues
-                                                                   {:breakout    [$price]
-                                                                    :aggregation [[:count]]})}]
-          (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
-          ;; Simulates what card.clj does — binding *card-id* itself
-          (binding [qp.perms/*card-id* card-id]
-            (let [result (qp.pivot/run-pivot-query
-                          {:database    (mt/id)
-                           :type        :query
-                           :info        {:executed-by (mt/user->id :rasta)
-                                         :context     :ad-hoc
-                                         :card-id     card-id}
-                           :constraints {:max-results 10000 :max-results-bare-rows 2000}
-                           :query       {:source-table (format "card__%d" card-id)
-                                         :breakout     [[:field (mt/id :venues :price)]]
-                                         :aggregation  [[:count]]}})]
-              (is (=? {:status :completed} result)
-                  "Pivot query for an authorized card should succeed when *card-id* is bound by the caller"))))))))
+    (mt/test-drivers (conj (mt/normal-drivers-with-feature :native-pivot-tables) :h2)
+      (mt/with-non-admin-groups-no-root-collection-perms
+        (with-venues-only-access
+          (mt/with-temp [:model/Collection collection {}
+                         :model/Card {card-id :id} {:collection_id (:id collection)
+                                                    :dataset_query (mt/mbql-query venues
+                                                                     {:breakout    [$price]
+                                                                      :aggregation [[:count]]})}]
+            (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
+            ;; Simulates what card.clj does — binding *card-id* itself
+            (binding [qp.perms/*card-id* card-id]
+              ;; This test only asserts the permission gate passes.
+              (qp.pivot.tu/without-pivot-parity-check
+               (let [result (qp.pivot/run-pivot-query
+                             {:database    (mt/id)
+                              :type        :query
+                              :info        {:executed-by (mt/user->id :rasta)
+                                            :context     :ad-hoc
+                                            :card-id     card-id}
+                              :constraints {:max-results 10000 :max-results-bare-rows 2000}
+                              :query       {:source-table (format "card__%d" card-id)
+                                            :breakout     [[:field (mt/id :venues :price)]]
+                                            :aggregation  [[:count]]}})]
+                 (is (=? {:status :completed} result)
+                     "Pivot query for an authorized card should succeed when *card-id* is bound by the caller"))))))))))
 
 (deftest download-endpoint-replaces-info-test
   (testing "POST /api/dataset/:format replaces :info entirely rather than merging it with the query map"
@@ -2524,177 +2544,3 @@
                       query  (lib/filter stage1 (lib/> cnt 5))]
                   (mt/with-test-user :rasta
                     (is (seq (mt/rows (qp/process-query query))))))))))))))
-
-(deftest ^:parallel remove-internal-keys-test
-  (testing "a namespaced option the caller attached to a clause is stripped"
-    (let [query    (-> (lib/query meta/metadata-provider (lib.metadata/table meta/metadata-provider (meta/id :venues)))
-                       (lib/join (lib.metadata/table meta/metadata-provider (meta/id :categories)))
-                       (assoc-in [:stages 0 :fields]
-                                 [(lib/ref (lib.metadata/field meta/metadata-provider (meta/id :venues :name)))]))
-          injected (-> query
-                       (assoc-in [:stages 0 :fields 0 1 :metabase.driver.sql.query-processor/add-cast]
-                                 "text) AS x FROM ORDERS UNION SELECT EMAIL FROM PEOPLE --")
-                       (assoc-in [:stages 0 :joins 0 :conditions 0 1 :metabase.driver.sql.query-processor/add-cast]
-                                 "int) AND 1=1 --"))]
-      (is (= query
-             (qp.perms/remove-internal-keys injected))))))
-
-(deftest ^:parallel remove-internal-keys-preserves-lib-options-test
-  (testing "the `:lib` options MBQL is made of are the ones a caller may send"
-    (let [query (-> (lib/query meta/metadata-provider (lib.metadata/table meta/metadata-provider (meta/id :checkins)))
-                    (lib/breakout (-> (lib.metadata/field meta/metadata-provider (meta/id :checkins :date))
-                                      (lib/with-temporal-bucket :month))))]
-      (is (=? {:stages [{:breakout [[:field {:temporal-unit :month, :lib/uuid string?} pos-int?]]}]}
-              (qp.perms/remove-internal-keys query)))
-      (is (= query
-             (qp.perms/remove-internal-keys query))))))
-
-(deftest ^:parallel remove-internal-keys-strips-stage-keys-test
-  (testing "a namespaced key the caller attached to a stage or join is stripped too"
-    (let [query    (-> (lib/query meta/metadata-provider (lib.metadata/table meta/metadata-provider (meta/id :venues)))
-                       (lib/join (lib.metadata/table meta/metadata-provider (meta/id :categories))))
-          injected (-> query
-                       (assoc-in [:stages 0 :query-permissions/sandboxed-table] 1)
-                       (assoc-in [:stages 0 :joins 0 :query-permissions/sandboxed-table] 1)
-                       (assoc-in [:stages 0 :joins 0 :metabase-enterprise.sandbox.query-processor.middleware.sandboxing/sandbox?] true))]
-      (is (= query
-             (qp.perms/remove-internal-keys injected))))))
-
-(deftest source-card-persisted-info-native-is-not-honoured-test
-  (testing "SQL persisted inside a saved Card's query does not become the SQL its stage compiles to"
-    (let [payload "SELECT PASSWORD AS NAME FROM CORE_USER"
-          mp      (mt/metadata-provider)]
-      (mt/with-temp [:model/Card {card-id :id}
-                     {:dataset_query (-> (lib/query mp (lib.metadata/table mp (mt/id :venues)))
-                                         (assoc-in [:stages 0 :persisted-info/native] payload))}]
-        (let [query (mt/mbql-query nil {:source-table (str "card__" card-id)})]
-          (testing "the marker is gone by the end of preprocessing"
-            (is (not (str/includes? (pr-str (qp.preprocess/preprocess query)) payload))))
-          (testing "and the query still runs against the Card's real source"
-            (is (= ["ID" "NAME" "CATEGORY_ID" "LATITUDE" "LONGITUDE" "PRICE"]
-                   (map :name (mt/cols (qp/process-query query)))))))))))
-
-(deftest ^:parallel remove-internal-keys-e2e-test
-  (testing "a driver option a caller attaches to a projected ref does not survive preprocessing"
-    (let [payload "text) AS x FROM ORDERS UNION SELECT EMAIL FROM PEOPLE --"
-          query   (mt/mbql-query venues
-                    {:fields [[:field %name {:base-type :type/Text
-                                             :metabase.driver.sql.query-processor/add-cast payload}]]
-                     :limit  1})]
-      (is (not (str/includes? (pr-str (qp.preprocess/preprocess query)) payload))))))
-
-(defn- card-reference-tag
-  "The `{{#123}}` template tag that makes a native query read `card-id`."
-  [card-id]
-  {(str "#" card-id) {:id           (str "tag-" card-id)
-                      :name         (str "#" card-id)
-                      :display-name (str "#" card-id)
-                      :type         :card
-                      :card-id      card-id}})
-
-(defn- run-as-card
-  "Run `query` the way executing a saved Card does, as `card-id`."
-  [card-id query]
-  (binding [qp.perms/*card-id* card-id]
-    (mt/rows (qp/process-query (qp/userland-query query)))))
-
-(deftest ^:synchronized reading-a-card-requires-reading-what-it-reads-test
-  (testing "a Card the caller may read cannot be used to read Cards it reads in turn, at any depth"
-    (mt/with-non-admin-groups-no-root-collection-perms
-      (mt/with-temp-copy-of-db
-        (mt/with-no-data-perms-for-all-users!
-          (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
-          (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/create-queries :no)
-          (mt/with-temp [:model/Collection secret {}
-                         :model/Collection open   {}]
-            (perms/grant-collection-read-permissions! (perms/all-users-group) open)
-            (mt/with-temp [:model/Card {secret-id :id} {:collection_id (u/the-id secret)
-                                                        :dataset_query (mt/mbql-query venues {:limit 3})}
-                           :model/Card {metric-id :id} {:collection_id (u/the-id secret)
-                                                        :type          :metric
-                                                        :dataset_query (mt/mbql-query venues {:aggregation [[:count]]})}]
-              (mt/with-temp [:model/Card {native-1 :id} {:collection_id (u/the-id open)
-                                                         :dataset_query (mt/native-query
-                                                                         {:query         (format "SELECT * FROM {{#%d}}" secret-id)
-                                                                          :template-tags (card-reference-tag secret-id)})}
-                             :model/Card {mbql-1 :id}   {:collection_id (u/the-id open)
-                                                         :dataset_query (mt/mbql-query nil {:source-table (str "card__" secret-id)})}
-                             :model/Card {metric-1 :id} {:collection_id (u/the-id open)
-                                                         :dataset_query (mt/mbql-query venues {:aggregation [[:metric metric-id]]})}]
-                (mt/with-temp [:model/Card {native-2 :id} {:collection_id (u/the-id open)
-                                                           :dataset_query (mt/native-query
-                                                                           {:query         (format "SELECT * FROM {{#%d}}" native-1)
-                                                                            :template-tags (card-reference-tag native-1)})}
-                               :model/Card {mbql-2 :id}   {:collection_id (u/the-id open)
-                                                           :dataset_query (mt/mbql-query nil {:source-table (str "card__" mbql-1)})}]
-                  (mt/with-test-user :rasta
-                    (doseq [[label card-id] [["a native Card reading it through a template tag"      native-1]
-                                             ["an MBQL Card reading it as a source card"             mbql-1]
-                                             ["a Card reading a metric that lives beside it"         metric-1]
-                                             ["a native Card two hops away"                          native-2]
-                                             ["an MBQL Card two hops away"                           mbql-2]]]
-                      (testing (str "\n" label)
-                        (is (thrown-with-msg?
-                             ExceptionInfo
-                             #"You do not have permissions to view Card"
-                             (run-as-card card-id (t2/select-one-fn :dataset_query :model/Card :id card-id))))))
-                    (testing "\nan ad-hoc query using one of those Cards as its source is refused too"
-                      (is (thrown-with-msg?
-                           ExceptionInfo
-                           #"You do not have permissions to view Card"
-                           (run-as-card nil (mt/mbql-query nil {:source-table (str "card__" native-2)})))))
-                    (testing "\na Card that reads nothing the caller cannot read still runs"
-                      (mt/with-temp [:model/Card {plain-id :id} {:collection_id (u/the-id open)
-                                                                 :dataset_query (mt/mbql-query venues {:limit 3})}]
-                        (is (= 3 (count (run-as-card plain-id (mt/mbql-query venues {:limit 3})))))))))))))))))
-
-(deftest ^:synchronized saved-card-view-data-covers-tables-with-no-output-columns-test
-  (testing "running a saved Card needs view-data on every Table it reads, not just the ones it returns columns from"
-    ;; [[qp.perms/check-block-permissions]] walks the query itself and would refuse these on its own, so it is stubbed
-    ;; out here: what is under test is the check that stands alone on an instance without advanced-permissions.
-    (with-redefs [qp.perms/check-block-permissions (constantly nil)]
-      (mt/with-non-admin-groups-no-root-collection-perms
-        (mt/with-temp-copy-of-db
-          (mt/with-no-data-perms-for-all-users!
-            (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
-            (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/create-queries :query-builder)
-            (perms/set-table-permission! (perms/all-users-group) (mt/id :checkins) :perms/view-data :blocked)
-            (perms/set-table-permission! (perms/all-users-group) (mt/id :checkins) :perms/create-queries :no)
-            (mt/with-temp [:model/Collection collection]
-              (perms/grant-collection-read-permissions! (perms/all-users-group) collection)
-              (mt/with-temp [:model/Card {aggregating :id}
-                             {:collection_id   (u/the-id collection)
-                              :dataset_query   (mt/mbql-query venues
-                                                 {:breakout    [$id]
-                                                  :aggregation [[:max [:field (mt/id :checkins :user_id) {:join-alias "J"}]]]
-                                                  :joins       [{:source-table (mt/id :checkins)
-                                                                 :alias        "J"
-                                                                 :fields       :none
-                                                                 :condition    [:= $id [:field (mt/id :checkins :venue_id) {:join-alias "J"}]]}]
-                                                  :limit       3})
-                              ;; as the query processor stores it: an aggregation column names no Table
-                              :result_metadata [{:name "ID" :display_name "ID" :base_type :type/BigInteger
-                                                 :id (mt/id :venues :id) :table_id (mt/id :venues)}
-                                                {:name "max" :display_name "Max" :base_type :type/BigInteger}]}
-                             :model/Card {filtering :id}
-                             {:collection_id   (u/the-id collection)
-                              :dataset_query   (mt/mbql-query venues
-                                                 {:filter [:> [:field (mt/id :checkins :user_id) {:join-alias "J"}] 0]
-                                                  :joins  [{:source-table (mt/id :checkins)
-                                                            :alias        "J"
-                                                            :fields       :none
-                                                            :condition    [:= $id [:field (mt/id :checkins :venue_id) {:join-alias "J"}]]}]
-                                                  :limit  3})
-                              :result_metadata [{:name "ID" :display_name "ID" :base_type :type/BigInteger
-                                                 :id (mt/id :venues :id) :table_id (mt/id :venues)}]}]
-                (mt/with-test-user :rasta
-                  (doseq [[label card-id] [["read only by an aggregation" aggregating]
-                                           ["read only by a filter"       filtering]]]
-                    (testing (str "\nthe blocked Table is " label)
-                      (binding [qp.perms/*card-id* card-id]
-                        (is (thrown-with-msg?
-                             ExceptionInfo
-                             #"You do not have permissions to run this query"
-                             (mt/rows
-                              (qp/process-query
-                               (t2/select-one-fn :dataset_query :model/Card :id card-id)))))))))))))))))

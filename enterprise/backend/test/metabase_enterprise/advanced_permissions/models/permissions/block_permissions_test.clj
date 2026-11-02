@@ -138,7 +138,6 @@
               new-graph     (assoc-in current-graph
                                       [:groups group-id (mt/id)]
                                       {:view-data :blocked :create-queries :query-builder-and-native})]
-          ;; the graph is checked by the endpoint's body schema, so this comes back as a request validation error
           (is (=? {:specific-errors {:groups [#"Invalid DB permissions: If you have write access for native queries.*"]}}
                   (mt/with-premium-features #{:advanced-permissions}
                     (mt/user-http-request :crowberto :put 400 "permissions/graph" new-graph)))))))))

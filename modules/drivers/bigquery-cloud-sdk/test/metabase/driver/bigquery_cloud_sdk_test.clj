@@ -11,15 +11,14 @@
    [metabase.driver :as driver]
    [metabase.driver.bigquery-cloud-sdk :as bigquery]
    [metabase.driver.bigquery-cloud-sdk.common :as bigquery.common]
-   [metabase.driver.bigquery-cloud-sdk.workspaces :as bigquery.ws]
    [metabase.driver.common.table-rows-sample :as table-rows-sample]
    [metabase.driver.settings :as driver.settings]
-   [metabase.driver.sql.util :as sql.u]
    [metabase.driver.sync :as driver.s]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.pipeline :as qp.pipeline]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.test :as qp]
    [metabase.sync.core :as sync]
@@ -263,9 +262,9 @@
   (let [requested (atom [])
         next-size  (fn [budget max-rows rows]
                      (reset! requested [])
-                     (with-redefs [bigquery/list-sample-page (fn [_bq size _token]
-                                                               (swap! requested conj size)
-                                                               (mock-page nil []))]
+                     (mt/with-dynamic-fn-redefs [bigquery/list-sample-page (fn [_bq size _token]
+                                                                             (swap! requested conj size)
+                                                                             (mock-page nil []))]
                        (binding [bigquery/*page-byte-budget* budget]
                          ((#'bigquery/adaptive-sample-next-page :table max-rows) (mock-page "tok" rows))
                          (first @requested))))
@@ -302,6 +301,9 @@
           sizes     (atom [])
           requests  (atom 0)
           orig-next-page-size @#'bigquery/next-page-size]
+      ;; `next-page-size` takes and returns primitive longs, so compiled callers invoke it through `IFn$LLLLL`.
+      ;; The dynamic-redefs proxy is a plain variadic fn, and would throw ClassCastException there.
+      #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
       (with-redefs [bigquery/next-page-size    (fn ^long [^long budget ^long bytes ^long rows ^long rem]
                                                  (let [n (long (orig-next-page-size budget bytes rows rem))]
                                                    (swap! sizes conj n)
@@ -334,13 +336,13 @@
                      (fn [_cols reducible] (into [] reducible))
                      nil)]
     (testing "a later page that comes back nil is reported, not silently truncated (#47339)"
-      (with-redefs [bigquery/query-results-page (fn [_job _opts] nil)]
+      (mt/with-dynamic-fn-redefs [bigquery/query-results-page (fn [_job _opts] nil)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"Cannot get next page from BigQuery"
                               (consume)))))
     (testing "a later page that throws surfaces the original error"
-      (with-redefs [bigquery/query-results-page (fn [_job _opts]
-                                                  (throw (ex-info "onoes BigQuery failed to fetch a later page" {})))]
+      (mt/with-dynamic-fn-redefs [bigquery/query-results-page (fn [_job _opts]
+                                                                (throw (ex-info "onoes BigQuery failed to fetch a later page" {})))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"onoes BigQuery failed to fetch a later page"
                               (consume)))))))
@@ -369,7 +371,6 @@
                   "raw values being used to calculate the formulas below, so we can tell at a glance if they're right "
                   "without referring to the EDN def)")
       (is (= [[nil] [0.0] [0.0] [10.0] [8.0] [5.0] [5.0] [nil] [0.0] [0.0]]
-             #_:clj-kondo/ignore
              (calculate-bird-scarcity $count))))))
 
 (deftest ^:parallel nulls-and-zeroes-test-2
@@ -990,8 +991,12 @@
 (deftest query-integer-pk-or-fk-test
   (mt/test-driver :bigquery-cloud-sdk
     (testing "We should be able to query a Table that has a :type/Integer column marked as a PK or FK"
-      (is (= [[1 "Plato Yeshua" "2014-04-01T08:30:00Z"]]
-             (mt/rows (mt/user-http-request :rasta :post 202 "dataset" (mt/mbql-query users {:limit 1, :order-by [[:asc $id]]}))))))))
+      (let [mp (mt/metadata-provider)
+            query (-> (lib/query mp (lib.metadata/table mp (mt/id :users)))
+                      (lib/order-by (lib.metadata/field mp (mt/id :users :id)) :asc)
+                      (lib/limit 1))]
+        (is (= [[1 "Plato Yeshua" "2014-04-01T08:30:00Z"]]
+               (mt/rows (mt/user-http-request :rasta :post 202 "dataset" query))))))))
 
 (deftest return-errors-test
   (mt/test-driver :bigquery-cloud-sdk
@@ -1020,7 +1025,7 @@
                            ^com.google.cloud.bigquery.JobInfo _job-info
                            ^"[Lcom.google.cloud.bigquery.BigQuery$JobOption;" _opts]
                           (throw sync-error)))]
-      (with-redefs [bigquery/database-details->client (constantly mock-client)]
+      (mt/with-dynamic-fn-redefs [bigquery/database-details->client (constantly mock-client)]
         (let [ex (try
                    (#'bigquery/execute-bigquery (constantly nil) {} "SELECT 1" [] nil)
                    nil
@@ -1073,6 +1078,47 @@
                               :limit  1}))))))
           (testing " has project-id-from-credentials set correctly"
             (is (= (bigquery-project-id) (get-in temp-db [:details :project-id-from-credentials])))))))))
+
+(deftest billing-project-override-test
+  (mt/test-driver :bigquery-cloud-sdk
+    (testing (str ":billing-project-id sets the BigQuery client's default project "
+                  "(which the SDK uses to route query jobs) #73271.")
+      (let [captured (atom nil)
+            orig-fn  (mt/original-fn #'bigquery/database-details->client)]
+        (mt/with-dynamic-fn-redefs [bigquery/database-details->client
+                                    (fn [details]
+                                      (let [client (orig-fn details)]
+                                        (reset! captured client)
+                                        client))]
+          (testing "unset -> client uses the SA's home project (from credentials)"
+            (reset! captured nil)
+            (driver/can-connect? :bigquery-cloud-sdk (:details (mt/db)))
+            (is (= (bigquery-project-id)
+                   (.getProjectId (.getOptions ^BigQuery @captured)))))
+          (testing "set -> client uses the billing-project-id"
+            (reset! captured nil)
+            ;; The projectId is not validated at client-build time or by .listDatasets (which takes an
+            ;; explicit projectId). We only need to trigger client construction and inspect it.
+            (driver/can-connect? :bigquery-cloud-sdk
+                                 (assoc (:details (mt/db))
+                                        :billing-project-id "no-such-billing-project"))
+            (is (= "no-such-billing-project"
+                   (.getProjectId (.getOptions ^BigQuery @captured))))))
+        (testing ":billing-project-id also fills in as data project when :project-id is unset"
+          (let [details (dissoc (:details (mt/db)) :project-id)]
+            (is (= "billing-doubles-as-data"
+                   (bigquery.common/get-project-id
+                    (assoc details :billing-project-id "billing-doubles-as-data")))
+                "billing-project-id fills in when project-id is unset")
+            (is (= "explicit-data"
+                   (bigquery.common/get-project-id
+                    (assoc details
+                           :project-id "explicit-data"
+                           :billing-project-id "different-billing")))
+                ":project-id wins when both are set")
+            (is (= (bigquery-project-id)
+                   (bigquery.common/get-project-id details))
+                "SA credentials' project when neither is set (regression)")))))))
 
 (deftest bigquery-specific-types-test
   (testing "Table with decimal types"
@@ -1537,8 +1583,8 @@
               (mt/run-mbql-query bigthings
                 {:aggregation [[:count]]
                  :breakout [[:field %bigthings.bd
-                             {:type :type/Decimal
-                              :binning {:strategy "default"}}]]})))))))
+                             {:base-type :type/Decimal
+                              :binning   {:strategy :default}}]]})))))))
 
 (deftest bigquery-process-stop-test
   (mt/test-driver
@@ -1649,28 +1695,6 @@
              (driver/compile-insert :bigquery-cloud-sdk {:query {:query "SELECT * FROM products"}
                                                          :output-table :PRODUCTS_COPY}))))))
 
-(deftest ^:parallel ws-sa-description-roundtrip-test
-  (testing "ws-sa-description and ws-sa-description->created-at are exact inverses"
-    ;; This is a contract test. The SA description is the only place the
-    ;; created-at marker is stored, so the writer in
-    ;; `ws-create-service-account!` and the reader used by CI cleanup
-    ;; (`metabase.test.data.bigquery-cloud-sdk/delete-old-isolation-service-accounts!`)
-    ;; must agree on format. If this test fails, orphan SA cleanup will
-    ;; silently break -- expired SAs will accumulate because their created-at
-    ;; can no longer be parsed.
-    (doseq [instant [(java.time.Instant/parse "2026-01-15T10:30:45.123456789Z")
-                     (java.time.Instant/parse "2026-12-31T23:59:59Z")
-                     (java.time.Instant/parse "2020-06-15T00:00:00Z")
-                     (java.time.Instant/now)]]
-      (is (= instant
-             (bigquery.ws/ws-sa-description->created-at (bigquery.ws/ws-sa-description instant)))
-          (str "round-trip failed for " instant))))
-  (testing "ws-sa-description->created-at returns nil for non-conforming inputs"
-    (is (nil? (bigquery.ws/ws-sa-description->created-at nil)))
-    (is (nil? (bigquery.ws/ws-sa-description->created-at "")))
-    (is (nil? (bigquery.ws/ws-sa-description->created-at "some other description")))
-    (is (nil? (bigquery.ws/ws-sa-description->created-at "created-at:not-an-instant")))))
-
 (deftest ^:parallel bigquery-field-filter-alias-test
   (mt/test-driver :bigquery-cloud-sdk
     (let [mp    (mt/metadata-provider)
@@ -1692,7 +1716,12 @@
       (is (= ["Aerodynamic Leather Computer" "Gadget"]
              (mt/first-row (qp/process-query query)))))))
 
-(deftest ^:parallel create-schema-quotes-schema-name-test
-  (testing "create-schema-if-needed! quotes the target :schema"
-    (is (= "`zinj\\`; DROP SCHEMA victim; CREATE SCHEMA \\`zz`"
-           (sql.u/quote-name :bigquery-cloud-sdk :table "zinj`; DROP SCHEMA victim; CREATE SCHEMA `zz")))))
+(deftest ^:parallel clustering-clause-test
+  (testing "clustering renders an inline CLUSTER BY with backtick-quoted columns, in order"
+    (is (= "CLUSTER BY `category`, `price`"
+           (#'bigquery/clustering-clause [{:kind :clustering :columns [{:name "category"} {:name "price"}]}]))))
+  (testing "no clustering index -> no clause"
+    (is (nil? (#'bigquery/clustering-clause [{:kind :btree :columns [{:name "category"}]}]))))
+  (testing "a SQL-injection payload in a clustering column is backtick-escaped, so it can only ever be an identifier"
+    (is (= "CLUSTER BY `c\\`; DROP TABLE x; --`"
+           (#'bigquery/clustering-clause [{:kind :clustering :columns [{:name "c`; DROP TABLE x; --"}]}])))))

@@ -13,6 +13,7 @@
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sql.query-processor.util :as sql.qp.u]
    [metabase.driver.sql.util :as sql.u]
+   [metabase.lib.options :as lib.options]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.honey-sql-2 :as h2x]
@@ -31,10 +32,6 @@
    [java.util Arrays UUID]))
 ;; (set! *warn-on-reflection* true) ;; isn't enabled because of Arrays/toString call
 
-;; ClickHouse applies string-literal escape rules to quoted identifiers, so a backslash escapes the next character --
-;; including the backtick HoneySQL closes an identifier with. The stock `:mysql` dialect doubles backticks but passes
-;; backslashes through, which leaves the closing backtick escapable and the identifier able to break out into raw SQL.
-;; Register a ClickHouse dialect that doubles backslashes first, so each is a literal by the time the backtick lands.
 (sql/register-dialect!
  ::clickhouse
  (update (sql/get-dialect :mysql) :quote
@@ -83,16 +80,16 @@
   #{:week :month :quarter :year})
 
 (defmethod sql.qp/->honeysql [:clickhouse :field]
-  [driver [_ _id-or-name opts :as clause]]
+  [driver clause]
   ;; MBQL preserves a column's `:effective-type` through temporal truncation, but ClickHouse's
   ;; `toStartOfWeek`/`Month`/`Quarter`/`Year` return `Date`, not `DateTime`. When such a ref reaches an
   ;; outer stage, downgrade a DateTime-derived effective type to `:type/Date` so `in-report-timezone`
   ;; doesn't wrap a `Date` in `toTimeZone` (ClickHouse rejects that with Code 43). See #79648.
-  (let [{:keys [inherited-temporal-unit effective-type base-type]} opts
+  (let [{:keys [inherited-temporal-unit effective-type base-type]} (lib.options/options clause)
         clause (cond-> clause
                  (and (contains? date-granular-truncation-units inherited-temporal-unit)
                       (isa? (or effective-type base-type) :type/DateTime))
-                 (update 2 assoc :effective-type :type/Date :base-type :type/Date))]
+                 (lib.options/update-options assoc :effective-type :type/Date :base-type :type/Date))]
     ((get-method sql.qp/->honeysql [:sql :field]) driver clause)))
 
 (defn- in-report-timezone
@@ -231,7 +228,7 @@
 ;;; ------------------------------------------------------------------------------------
 
 (defmethod sql.qp/->honeysql [:clickhouse :convert-timezone]
-  [driver [_ arg target-timezone source-timezone]]
+  [driver [_ _opts arg target-timezone source-timezone]]
   (let [expr          (sql.qp/->honeysql driver (cond-> arg (string? arg) u.date/parse))
         with-tz-info? (or (sql.qp.u/field-with-tz? arg)
                           (h2x/is-of-type? expr #"(?:nullable\(|lowcardinality\()?(datetime64\(\d, {0,1}'.*|datetime\(.*)"))
@@ -304,10 +301,10 @@
   (driver-api/is-clause? :interval expr))
 
 (defmethod sql.qp/->honeysql [:clickhouse :+]
-  [driver [_ & args]]
+  [driver [_ _opts & args]]
   (if (some interval? args)
     (if-let [[field intervals] (u/pick-first (complement interval?) args)]
-      (reduce (fn [hsql-form [_ amount unit]]
+      (reduce (fn [hsql-form [_ _opts amount unit]]
                 (sql.qp/add-interval-honeysql-form driver hsql-form amount unit))
               (sql.qp/->honeysql driver field)
               intervals)
@@ -315,13 +312,10 @@
     (into [:+] (args->float64 args))))
 
 (defmethod sql.qp/->honeysql [:clickhouse :log]
-  [driver [_ field]]
+  [driver [_ _opts field]]
   [:'log10 (sql.qp/->honeysql driver field)])
 
 (defn- format-quantile
-  "Emit ClickHouse's parametric aggregate `quantile(<p>)(<field>)`. Both arguments are formatted through
-  `sql/format-expr`, so a value spliced into either slot from a source card is quoted or parameterized instead of
-  being written verbatim as SQL."
   [_fn [p field]]
   (let [[p-sql & p-args]         (sql/format-expr p {:nested true})
         [field-sql & field-args] (sql/format-expr field {:nested true})]
@@ -332,17 +326,15 @@
 (sql/register-fn! ::quantile #'format-quantile)
 
 (defmethod sql.qp/->honeysql [:clickhouse :percentile]
-  [driver [_ field p]]
+  [driver [_ _opts field p]]
   [::quantile (sql.qp/->honeysql driver p) (sql.qp/->honeysql driver field)])
 
 (defmethod sql.qp/->honeysql [:clickhouse :regex-match-first]
-  [driver [_ arg pattern]]
-  ;; compile the pattern through ->honeysql so a non-string pattern (e.g. a stored [:raw ...] form spliced in from a
-  ;; source card) is rejected at multimethod dispatch instead of being emitted verbatim as SQL.
+  [driver [_ _opts arg pattern]]
   [:'extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern)])
 
 (defmethod sql.qp/->honeysql [:clickhouse :split-part]
-  [driver [_ text divider position]]
+  [driver [_ _opts text divider position]]
   (let [position (sql.qp/->honeysql driver position)]
     [:case
      [:< position 1]
@@ -353,7 +345,7 @@
       [:'toInt64 position]]]))
 
 (defmethod sql.qp/->honeysql [:clickhouse :text]
-  [driver [_ value]]
+  [driver [_ _opts value]]
   (h2x/maybe-cast "TEXT" (sql.qp/->honeysql driver value)))
 
 (defmethod sql.qp/date-dbtype :clickhouse
@@ -361,16 +353,16 @@
   :Date32)
 
 (defmethod sql.qp/->honeysql [:clickhouse :stddev]
-  [driver [_ field]]
+  [driver [_ _opts field]]
   [:'stddevPop (sql.qp/->honeysql driver field)])
 
 (defmethod sql.qp/->honeysql [:clickhouse :median]
-  [driver [_ field]]
+  [driver [_ _opts field]]
   [:'median (sql.qp/->honeysql driver field)])
 
 ;; Substring does not work for Enums, so we need to cast to String
 (defmethod sql.qp/->honeysql [:clickhouse :substring]
-  [driver [_ arg start length]]
+  [driver [_ _opts arg start length]]
   (let [str [:'toString (sql.qp/->honeysql driver arg)]]
     (if length
       [:'substring str
@@ -380,7 +372,7 @@
        (sql.qp/->honeysql driver start)])))
 
 (defmethod sql.qp/->honeysql [:clickhouse :var]
-  [driver [_ field]]
+  [driver [_ _opts field]]
   [:'varPop (sql.qp/->honeysql driver field)])
 
 (defmethod sql.qp/float-dbtype :clickhouse
@@ -398,7 +390,7 @@
 
 (defmethod sql.qp/->honeysql [:clickhouse :value]
   [driver value]
-  (let [[_ value {base-type :base_type}] value]
+  (let [[_ {:keys [base-type]} value] value]
     (when (some? value)
       (sql.qp/check-value-literal driver value)
       (condp #(isa? %2 %1) base-type
@@ -406,20 +398,21 @@
         (sql.qp/->honeysql driver value)))))
 
 (defn- text-val? [value]
-  (let [[qual valuevalue fieldinfo] value]
+  (let [[qual opts valuevalue] value]
     (and (isa? qual :value)
-         (isa? (:base_type fieldinfo) :type/Text)
+         (isa? (:base-type opts) :type/Text)
          (nil? valuevalue))))
 
 (defn- uuid-comp? [field value]
-  (let [[qual valuevalue fieldinfo] value]
+  (let [[qual val-opts valuevalue] value
+        [_ field-opts] field]
     (and (isa? qual :value)
-         (isa? (:base_type fieldinfo) :type/UUID)
-         (isa? (:base-type (nth field 2)) :type/UUID)
+         (isa? (:base-type val-opts) :type/UUID)
+         (isa? (:base-type field-opts) :type/UUID)
          (string? valuevalue))))
 
 (defmethod sql.qp/->honeysql [:clickhouse :=]
-  [driver [op field value]]
+  [driver [_ _opts field value :as clause]]
   (let [hsql-field (sql.qp/->honeysql driver field)
         hsql-value (sql.qp/->honeysql driver value)]
     (cond
@@ -436,10 +429,10 @@
         [:= hsql-field hsql-value]
         false)
 
-      :else ((get-method sql.qp/->honeysql [:sql :=]) driver [op field value]))))
+      :else ((get-method sql.qp/->honeysql [:sql :=]) driver clause))))
 
 (defmethod sql.qp/->honeysql [:clickhouse :!=]
-  [driver [op field value]]
+  [driver [_ _opts field value :as clause]]
   (let [hsql-field (sql.qp/->honeysql driver field)
         hsql-value (sql.qp/->honeysql driver value)]
     (cond
@@ -454,7 +447,7 @@
          [:isNull hsql-field]]
         true)
 
-      :else ((get-method sql.qp/->honeysql [:sql :!=]) driver [op field value]))))
+      :else ((get-method sql.qp/->honeysql [:sql :!=]) driver clause))))
 
 ;; I do not know why the tests expect nil counts for empty results
 ;; but that's how it is :-)
@@ -464,20 +457,36 @@
 ;; metabase.query-processor.count-where-test
 ;; metabase.query-processor.share-test
 (defmethod sql.qp/->honeysql [:clickhouse :count-where]
-  [driver [_ pred]]
+  [driver [_ _opts pred]]
   [:case
    [:> [:'count] 0]
    [:sum [:case (sql.qp/->honeysql driver pred) 1 :else 0]]
    :else nil])
 
 (defmethod sql.qp/->honeysql [:clickhouse :sum-where]
-  [driver [_ field pred]]
+  [driver [_ _opts field pred]]
   [:sum [:case (sql.qp/->honeysql driver pred) (sql.qp/->honeysql driver field)
          :else 0]])
 
+(defn- format-rows-between-unbounded
+  [_clause _args]
+  ["ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"])
+
+(sql/register-clause! ::rows-between-unbounded #'format-rows-between-unbounded nil)
+
+(defmethod sql.qp/->honeysql [:clickhouse :offset]
+  [driver [_offset _opts expr n]]
+  (sql.qp/window-aggregation-over-rows
+   driver
+   (let [[f n] (if (pos? n)
+                 [:'leadInFrame n]
+                 [:'lagInFrame (- n)])
+         expr-hsql (sql.qp/->honeysql driver expr)]
+     (-> [f [:'toNullable expr-hsql] [:inline n]]
+         (h2x/with-database-type-info (h2x/database-type expr-hsql))))
+   {::rows-between-unbounded []}))
+
 (def ^:private clickhouse-interval-units
-  "Allow-list of the temporal-interval units ClickHouse's `INTERVAL` accepts. The unit is interpolated into `[:raw …]`,
-  which does no escaping, so it must be checked against this closed set before `(name unit)` is emitted."
   #{:millisecond :second :minute :hour :day :week :month :quarter :year})
 
 (defmethod sql.qp/add-interval-honeysql-form :clickhouse
@@ -489,42 +498,42 @@
       type-info (h2x/with-type-info type-info))))
 
 (defn- clickhouse-string-fn
-  [fn-name field value options]
-  (let [[_ _ {:keys [base-type]}] field
+  [fn-name field value opts]
+  (let [[_ {:keys [base-type]} _] field
         hsql-field (cond->> (sql.qp/->honeysql :clickhouse field)
                      (= base-type :type/UUID) (conj [:'toString]))
         hsql-value (sql.qp/->honeysql :clickhouse value)]
-    (if (get options :case-sensitive true)
+    (if (get opts :case-sensitive true)
       [fn-name hsql-field hsql-value]
       [fn-name [:'lowerUTF8 hsql-field] [:'lowerUTF8 hsql-value]])))
 
 (defmethod sql.qp/->honeysql [:clickhouse :starts-with]
-  [_ [_ field value options]]
+  [_ [_ opts field value]]
   (let [starts-with (clickhouse-version/with-min 23 8
                       (constantly :'startsWithUTF8)
                       (constantly :'startsWith))]
-    (clickhouse-string-fn starts-with field value options)))
+    (clickhouse-string-fn starts-with field value opts)))
 
 (defmethod sql.qp/->honeysql [:clickhouse :ends-with]
-  [_ [_ field value options]]
+  [_ [_ opts field value]]
   (let [ends-with (clickhouse-version/with-min 23 8
                     (constantly :'endsWithUTF8)
                     (constantly :'endsWith))]
-    (clickhouse-string-fn ends-with field value options)))
+    (clickhouse-string-fn ends-with field value opts)))
 
 (defmethod sql.qp/->honeysql [:clickhouse :contains]
-  [_ [_ field value options]]
-  (let [[_ _ {:keys [base-type]}] field
+  [_ [_ opts field value]]
+  (let [[_ {:keys [base-type]} _] field
         hsql-field (cond->> (sql.qp/->honeysql :clickhouse field)
                      (= base-type :type/UUID) (conj [:'toString]))
         hsql-value (sql.qp/->honeysql :clickhouse value)
-        position-fn (if (get options :case-sensitive true)
+        position-fn (if (get opts :case-sensitive true)
                       :'positionUTF8
                       :'positionCaseInsensitiveUTF8)]
     [:> [position-fn hsql-field hsql-value] 0]))
 
 (defmethod sql.qp/->honeysql [:clickhouse :datetime-diff]
-  [driver [_ x y unit]]
+  [driver [_ _opts x y unit]]
   (let [x (sql.qp/->honeysql driver x)
         y (sql.qp/->honeysql driver y)]
     (case unit
@@ -665,6 +674,10 @@
         (.getString rs i)
         ;; _
         :else (.getObject rs i)))))
+
+(defmethod sql.qp/inline-value [:clickhouse String]
+  [_driver ^String s]
+  (sql.u/quote-literal s :backslashes))
 
 (defmethod sql.qp/inline-value [:clickhouse LocalDate]
   [_ t]

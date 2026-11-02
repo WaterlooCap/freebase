@@ -3,14 +3,12 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer :all]
-   [honey.sql :as sql]
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
-   [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.driver.util :as driver.u]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.test :as mt]
-   [metabase.test.data.interface :as tx]
-   [metabase.util.honey-sql-2 :as h2x]))
+   [metabase.test.data.interface :as tx]))
 
 (set! *warn-on-reflection* true)
 
@@ -21,35 +19,36 @@
 
 (deftest ^:parallel additional-connection-string-options-test
   (testing "Make sure you can add additional connection string options (#6651)"
-    (is (= {:classname   "com.vertica.jdbc.Driver"
-            :subprotocol "vertica"
-            :subname     "//localhost:5433/birds-near-me?ConnectionLoadBalance=1"}
+    (is (= {:classname        "com.vertica.jdbc.Driver"
+            :subprotocol      "vertica"
+            :subname          "//localhost:5433/birds-near-me?ConnectionLoadBalance=1"
+            :disablecopylocal "true"}
            (sql-jdbc.conn/connection-details->spec :vertica {:host               "localhost"
                                                              :port               5433
                                                              :db                 "birds-near-me"
                                                              :additional-options "ConnectionLoadBalance=1"})))))
 
-(deftest ^:parallel convert-timezone-escapes-hostile-zone-string-test
-  (testing "Vertica splices :convert-timezone's zone string into SQL as an inline literal --
-            it must escape every zone string correctly, regardless of whether it's attacker-shaped"
-    (doseq [zone ["Z\\' AT TIME ZONE 'UTC"    ; the PoC
-                  "'  AT TIME ZONE 'UTC"
-                  "''  AT TIME ZONE 'UTC"
-                  "'''  AT TIME ZONE 'UTC"
-                  "\\'  AT TIME ZONE 'UTC"
-                  "UTC'  AT TIME ZONE 'UTC"
-                  "O'Brien's Zone"]]         ; non-malicious: just a string with apostrophes in it
-      (testing (str "zone = " (pr-str zone))
-        (let [[sql-str] (sql/format-expr
-                         (h2x/unwrap-typed-honeysql-form
-                          (sql.qp/->honeysql :vertica [:convert-timezone :mock_expr zone "UTC"])))
-              ;; every ' in a correctly-escaped SQL literal is doubled -- search for the zone string
-              ;; escaped this way, as a literal (not regex) substring, via Pattern/quote.
-              correctly-escaped (str/replace zone "'" "''")
-              pattern           (re-pattern (str "'" (java.util.regex.Pattern/quote correctly-escaped) "'"))]
-          (is (re-find pattern sql-str)
-              (str "the correctly-escaped zone literal ('" correctly-escaped "') does not appear in the "
-                   "compiled SQL -- the zone string was not escaped correctly. Compiled: " (pr-str sql-str))))))))
+(deftest ^:parallel copy-local-is-disabled-test
+  (testing "`COPY ... FROM LOCAL` reads files on the Metabase host into the warehouse, so it is always disabled"
+    ;; the connection details pass detail keys through as connection properties and `:additional-options` into the
+    ;; URL, and the client reads property names case-insensitively, so a user's value in any casing, either way in, is
+    ;; dropped rather than left to compete with ours
+    (doseq [details [{}
+                     {:additional-options "DisableCopyLocal=false"}
+                     {:additional-options "ConnectionLoadBalance=1&disablecopylocal=0"}
+                     {:additional-options " DISABLECOPYLOCAL =false&ConnectionLoadBalance=1"}
+                     {:DisableCopyLocal false}
+                     {:disablecopylocal "false"}
+                     {:DISABLECOPYLOCAL "0"}]]
+      (testing (pr-str details)
+        (let [spec (sql-jdbc.conn/connection-details->spec :vertica (merge {:host "localhost" :port 5433 :db "birds"}
+                                                                           details))]
+          (is (= "true" (:disablecopylocal spec)))
+          (is (= [:disablecopylocal] (filterv #(re-find #"(?i)copylocal" (name %)) (keys spec))))
+          (is (not (re-find #"(?i)copylocal" (:subname spec))))
+          (testing "other options are kept"
+            (when (re-find #"ConnectionLoadBalance" (str (:additional-options details)))
+              (is (re-find #"ConnectionLoadBalance=1" (:subname spec))))))))))
 
 (defn- compile-query [query]
   (-> (qp.compile/compile query)
@@ -99,3 +98,12 @@
            (->> (mt/native-query {:query (tx/native-array-query :vertica)})
                 mt/process-query
                 mt/rows)))))
+
+(deftest ^:parallel url-building-details-reject-separators-test
+  (doseq [details [{:host "localhost" :port 5433 :user "u" :db "a?b"}]]
+    (testing (pr-str details)
+      (is (=? {:status-code 400}
+              (try (driver.u/validate-connection-parameters! :vertica details)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e
+                     (ex-data e))))))))

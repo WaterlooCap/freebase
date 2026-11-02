@@ -33,10 +33,7 @@ import {
 } from "metabase/utils/dashboard_grid";
 import LegendS from "metabase/visualizations/components/Legend.module.css";
 import { VisualizerModal } from "metabase/visualizer/components/VisualizerModal";
-import {
-  isVisualizerDashboardCard,
-  isVisualizerSupportedVisualization,
-} from "metabase/visualizer/utils";
+import { isVisualizerSupportedVisualization } from "metabase/visualizer/utils";
 import type {
   BaseDashboardCard,
   Card,
@@ -46,6 +43,7 @@ import type {
   DashboardTabId,
   VisualizerVizDefinition,
 } from "metabase-types/api";
+import { isVisualizerDashboardCard } from "metabase-types/guards/dashboard";
 
 import type { SetDashCardAttributesOpts } from "../actions";
 import {
@@ -145,7 +143,7 @@ type DashboardGridContext = {
   | "isEditingParameter"
   | "isFullscreen"
   | "clickBehaviorSidebarDashcard"
-  | "getClickActionMode"
+  | "clickActionMode"
   | "navigateToNewCardFromDashboard"
   | "downloadsEnabled"
   | "autoScrollToDashcardId"
@@ -342,6 +340,7 @@ class DashboardGridInner extends Component<
     isEditing = this.props.isEditing,
     selectedTabId = this.props.selectedTabId,
   ) => {
+    // Unjustified type cast. FIXME
     return getVisibleCards(
       cards,
       visibleCardIds,
@@ -364,6 +363,7 @@ class DashboardGridInner extends Component<
   getRowHeight() {
     const { width } = this.props;
 
+    // Unjustified type cast. FIXME
     const contentViewportElement = this.context as any;
     const hasScroll =
       contentViewportElement?.clientHeight <
@@ -724,7 +724,7 @@ const DashboardGrid = forwardRef<
     isEditingParameter = false,
     isFullscreen,
     clickBehaviorSidebarDashcard,
-    getClickActionMode,
+    clickActionMode,
     navigateToNewCardFromDashboard,
     downloadsEnabled,
     autoScrollToDashcardId,
@@ -748,7 +748,7 @@ const DashboardGrid = forwardRef<
       isEditingParameter={isEditingParameter}
       isFullscreen={isFullscreen}
       clickBehaviorSidebarDashcard={clickBehaviorSidebarDashcard}
-      getClickActionMode={getClickActionMode}
+      clickActionMode={clickActionMode}
       navigateToNewCardFromDashboard={navigateToNewCardFromDashboard}
       downloadsEnabled={downloadsEnabled}
       autoScrollToDashcardId={autoScrollToDashcardId}
@@ -766,6 +766,7 @@ const DashboardGrid = forwardRef<
   );
 });
 
+// Unjustified type cast. FIXME
 export const DashboardGridConnected = _.compose(
   ExplicitSize(),
   connector,

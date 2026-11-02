@@ -103,6 +103,7 @@ export const sdk = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(refreshTokenAsync.rejected, (state, action) => {
+    // Unjustified type cast. FIXME
     const error = action.error as Error;
     state.initStatus = { status: "error", error };
   });
@@ -116,6 +117,7 @@ export const sdk = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(initAuth.rejected, (state, action) => {
+    // Unjustified type cast. FIXME
     const error = action.error as Error;
     state.initStatus = { status: "error", error };
   });
@@ -129,6 +131,7 @@ export const sdk = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(initGuestEmbed.rejected, (state, action) => {
+    // Unjustified type cast. FIXME
     const error = action.error as Error;
     state.initStatus = { status: "error", error };
   });

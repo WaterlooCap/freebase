@@ -65,16 +65,13 @@
 (api.macros/defendpoint :post
   "/upload-dictionary"
   "Upload a CSV of content translations"
-  ;; `:max-file-size` is enforced by the multipart middleware *while the body is being streamed*, so an oversized
-  ;; upload is aborted before it is ever written to disk -- the in-handler `:size` check below runs only after the
-  ;; body has already been parsed to a temp file, and the middleware runs ahead of `check-superuser`.
   {:multipart {:max-file-size (long max-content-translation-dictionary-size-bytes)
                :max-file-count 1}}
   [_route_params
    _query-params
-   {{:keys [tempfile size]} :file} :- [:map
+   {{:keys [tempfile size]} :file} :- [:map {:closed true}
                                        [:file
-                                        [:map
+                                        [:map {:closed true}
                                          [:filename :string]
                                          [:size     :int]
                                          [:tempfile (ms/InstanceOfClass java.io.File)]]]]]
@@ -93,9 +90,9 @@
 #_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/dictionary/:token"
   "Fetch the content translation dictionary via a JSON Web Token signed with the `embedding-secret-key`."
-  [{:keys [token]} :- [:map
+  [{:keys [token]} :- [:map {:closed true}
                        [:token ms/NonBlankString]]
-   {:keys [locale]} :- [:map [:locale {:optional true} [:maybe :string]]]]
+   {:keys [locale]} :- [:map {:closed true} [:locale {:optional true} [:maybe :string]]]]
   ;; this will error if bad
   (embedding.jwt/unsign token)
   (if locale
@@ -105,7 +102,7 @@
 (api.macros/defendpoint :get "/dictionary" :- DictionaryResponse
   "Fetch the content translation dictionary for authenticated users (auth-based embedding flows)."
   [_route-params
-   {:keys [locale]} :- [:map [:locale :string]]]
+   {:keys [locale]} :- [:map {:closed true} [:locale :string]]]
   (api/check api/*current-user-id* 401 "Unauthenticated")
   {:data (ct/get-translations (i18n/normalized-locale-string (str/trim locale)))})
 

@@ -3,10 +3,10 @@ import type React from "react";
 import { useRef, useState } from "react";
 import { t } from "ttag";
 
-import { SettingHeader } from "metabase/admin/settings/components/SettingHeader";
-import { useAdminSetting } from "metabase/api/utils";
 import { SetByEnvVar } from "metabase/common/components/SetByEnvVar";
 import CS from "metabase/css/core/index.css";
+import { useAdminSetting } from "metabase/settings";
+import { SettingHeader } from "metabase/settings-components";
 import { Box, Button, Flex, Icon, Paper, Text } from "metabase/ui";
 import type { EnterpriseSettingKey } from "metabase-types/api";
 
@@ -47,6 +47,7 @@ export function ImageUploadWidget({
 
       const reader = new FileReader();
       reader.onload = async (readerEvent) => {
+        // Unjustified type cast. FIXME
         const dataUri = readerEvent.target?.result as string;
         if (!(await isFileIntact(dataUri))) {
           setErrorMessage(
@@ -108,7 +109,7 @@ export function ImageUploadWidget({
                 <PreviewImage src={imageSource} aria-label={t`Image preview`} />
               )}
             </Flex>
-            <Flex p="lg" gap="md" direction="column" justify="center" w="100%">
+            <Flex p="xl" gap="lg" direction="column" justify="center" w="100%">
               <Flex w="100%" align="center">
                 <Button
                   className={CS.flexNoShrink}
@@ -124,7 +125,7 @@ export function ImageUploadWidget({
                   accept="image/jpeg,image/png,image/svg+xml"
                   multiple={false}
                 />
-                <Text ml="lg" truncate="end">
+                <Text ml="xl" truncate="end">
                   {isDefaultImage
                     ? t`No file chosen`
                     : fileName
@@ -136,7 +137,7 @@ export function ImageUploadWidget({
                     leftSection={<Icon name="close" />}
                     variant="subtle"
                     c="text-primary"
-                    ml="md"
+                    ml="lg"
                     size="compact-md"
                     onClick={handleRemove}
                     aria-label={t`Remove custom illustration`}

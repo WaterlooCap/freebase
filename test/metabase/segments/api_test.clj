@@ -30,8 +30,7 @@
       (update :definition map?)))
 
 (defn- mbql4-segment-definition
-  "Create a legacy MBQL4 segment definition. A full query, not a bare fragment: a fragment has no `:database`, so it
-  cannot be validated as a query and is no longer accepted."
+  "Create a legacy MBQL4 segment definition"
   [table-id field-id value]
   {:database (t2/select-one-fn :db_id :model/Table :id table-id)
    :type     :query
@@ -65,25 +64,17 @@
       (is (= "You don't have permissions to do that."
              (mt/user-http-request :rasta :post 403 "segment"
                                    {:name       "abc"
-                                    :table_id   (mt/id :users)
-                                    :definition (mbql4-segment-definition (mt/id :users) (mt/id :users :name) "cans")}))))))
+                                    :definition (mbql4-segment-definition (mt/id :users) (mt/id :users :id) 20)}))))))
 
 (deftest create-segment-input-validation-test
   (testing "POST /api/segment"
     (is (=? {:errors {:name "value must be a non-blank string."}}
             (mt/user-http-request :crowberto :post 400 "segment" {})))
-    (is (=? {:errors {:table_id "value must be an integer greater than zero."}}
-            (mt/user-http-request :crowberto :post 400 "segment" {:name "abc"})))
-    (is (=? {:errors {:table_id "value must be an integer greater than zero."}}
-            (mt/user-http-request :crowberto :post 400 "segment" {:name     "abc"
-                                                                  :table_id "foobar"})))
     (is (=? {:errors {:definition "value must be a valid MBQL query with a source table and filters."}}
-            (mt/user-http-request :crowberto :post 400 "segment" {:name     "abc"
-                                                                  :table_id 123})))
+            (mt/user-http-request :crowberto :post 400 "segment" {:name "abc"})))
     (testing "a non-map definition is rejected while decoding, so the body is the message rather than :errors"
       (is (=? "value must be a valid MBQL query."
               (mt/user-http-request :crowberto :post 400 "segment" {:name       "abc"
-                                                                    :table_id   123
                                                                     :definition "foobar"}))))))
 
 (deftest create-segment-test
@@ -108,9 +99,18 @@
                                         :show_in_getting_started false
                                         :caveats                 nil
                                         :points_of_interest      nil
-                                        :table_id                (mt/id :users)
                                         :definition              (definition-fn (mt/id :users :id) 20)})
                  segment-response))))))
+
+(deftest create-segment-derives-table-id-test
+  (testing "POST /api/segment derives table_id from the definition"
+    (doseq [[format-name definition-fn] {"MBQL4" (partial mbql4-segment-definition (mt/id :users))
+                                         "MBQL5" (partial mbql5-segment-definition (mt/id :users))}]
+      (testing format-name
+        (is (=? {:table_id (mt/id :users)}
+                (mt/user-http-request :crowberto :post 200 "segment"
+                                      {:name       "A Segment"
+                                       :definition (definition-fn (mt/id :users :id) 20)})))))))
 
 ;; ## PUT /api/segment
 
@@ -137,6 +137,24 @@
             (mt/user-http-request :crowberto :put 400 "segment/1" {:name             "abc"
                                                                    :revision_message "123"
                                                                    :definition       "foobar"})))))
+
+(deftest update-definition-table-test
+  (testing "PUT /api/segment/:id"
+    (testing "an updated definition must still be a valid MBQL query with a source table (enforced by the schema)"
+      (mt/with-temp [:model/Segment {:keys [id]} {:table_id   (mt/id :users)
+                                                  :definition (mbql4-segment-definition (mt/id :users) (mt/id :users :name) "cans")}]
+        (is (=? {:errors {:definition {:stages string?}}}
+                (mt/user-http-request :crowberto :put 400 (str "segment/" id)
+                                      {:revision_message "no more source table"
+                                       :definition       {}})))))
+    (testing "a definition that moves the Segment to another table keeps table_id in sync"
+      (mt/with-temp [:model/Segment {:keys [id]} {:table_id   (mt/id :users)
+                                                  :definition (mbql4-segment-definition (mt/id :users) (mt/id :users :name) "cans")}]
+        (mt/user-http-request :crowberto :put 200 (str "segment/" id)
+                              {:revision_message "move to venues"
+                               :definition       (mbql4-segment-definition (mt/id :venues) (mt/id :venues :name) "cans")})
+        (is (= (mt/id :venues)
+               (t2/select-one-fn :table_id :model/Segment :id id)))))))
 
 (deftest update-test
   (testing "PUT /api/segment/:id"
@@ -165,7 +183,6 @@
                        :show_in_getting_started false
                        :caveats                 nil
                        :points_of_interest      nil
-                       :table_id                (mt/id :users)
                        :revision_message        "I got me some revisions"
                        :definition              (eq-fn (mt/id :users :name) "cans")})
                      segment-response))))))))

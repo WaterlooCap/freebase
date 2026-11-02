@@ -5,6 +5,14 @@
 
 (set! *warn-on-reflection* true)
 
+(def chart-types
+  "Display types the chart tools can produce, as model-facing strings. The main
+  and document chart tool enums derive from this list; the Slackbot query tool
+  has its own smaller enum."
+  ["table" "bar" "line" "pie" "sunburst" "treemap" "boxplot" "area" "combo"
+   "row" "pivot" "scatter" "waterfall" "sankey" "scalar"
+   "smartscalar" "gauge" "progress" "funnel" "object" "map"])
+
 (def ^:dynamic *memory-atom*
   "Dynamic memory atom bound for tools that need access to agent state."
   nil)
@@ -25,6 +33,13 @@
   (when *memory-atom*
     @*memory-atom*))
 
+(defn current-conversation-id
+  "The current conversation's id (a UUID string) from agent memory, or nil outside a
+  conversation-backed run. Tools use it to record which conversation an entity they
+  create came from (e.g. `save_entity` stamps it onto the saved card)."
+  []
+  (:conversation-id (current-memory)))
+
 (defn current-queries-state
   "Returns the current queries state map from agent memory."
   []
@@ -34,6 +49,14 @@
   "Returns the current charts state map from agent memory."
   []
   (get-in (current-memory) [:state :charts] {}))
+
+(defn current-client-ids
+  "Ids of the queries and charts seeded from this request's viewing context, as opposed to
+  written by the agent's own tools. A refusal to present one of these is a real access attempt
+  and gets the audited treatment; see `metabase.metabot.tools.shared.content-store`. Request
+  local: the conversation `:state` the client round-trips carries no provenance."
+  []
+  (get (current-memory) :client-ids #{}))
 
 (defn current-chart-configs-state
   "Returns the current chart-configs state map from agent memory.
@@ -45,11 +68,6 @@
   "Returns the current agent context from memory."
   []
   (get (current-memory) :context))
-
-(defn inline-viz-capable?
-  "True when the current profile should render visualizations inline."
-  []
-  (= *profile-id* :nlq))
 
 (defn with-memory
   "Helper for debugging memory-bound tools when needed."

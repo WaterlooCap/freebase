@@ -16,20 +16,22 @@
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.premium-features.core :as premium-features]
    [metabase.query-processor.error-type :as qp.error-type]
+   ;; the legacy QP pipeline still conveys the metadata provider via the ambient store; no MBQL 5 path yet
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
-   [metabase.system.core :as system]
    [metabase.util :as u]
    [metabase.util.http :as u.http]
    [metabase.util.i18n :refer [deferred-tru trs]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.util.malli.schema :as ms]
-   [metabase.util.performance :refer [mapv empty? some]])
+   [metabase.util.performance :refer [mapv empty? some]]
+   [metabase.warehouses.schema :as warehouses.schema]
+   [ring.util.codec :as codec])
   (:import
    (java.io ByteArrayInputStream)
    (java.security KeyFactory KeyStore PrivateKey)
    (java.security.cert Certificate CertificateFactory X509Certificate)
    (java.security.spec PKCS8EncodedKeySpec)
+   (java.util.function BiConsumer IntUnaryOperator ObjIntConsumer Supplier)
    (javax.net SocketFactory)
    (javax.net.ssl KeyManagerFactory SSLContext TrustManagerFactory X509TrustManager)))
 
@@ -233,6 +235,63 @@
         (when (some #(not (u.http/host-allowed-for-network-policy? policy %)) hosts)
           (throw (blocked-network-address-exception)))))))
 
+(defn- fold-case
+  "`s` with each code point folded the way `String/equalsIgnoreCase` compares it: upper case, then lower case."
+  ^String [^String s]
+  (-> (.codePoints s)
+      (.map (reify IntUnaryOperator (applyAsInt [_ cp] (Character/toUpperCase cp))))
+      (.map (reify IntUnaryOperator (applyAsInt [_ cp] (Character/toLowerCase cp))))
+      (.collect (reify Supplier (get [_] (StringBuilder.)))
+                (reify ObjIntConsumer (accept [_ sb cp] (.appendCodePoint ^StringBuilder sb cp)))
+                (reify BiConsumer (accept [_ a b] (.append ^StringBuilder a ^CharSequence b))))
+      (str)))
+
+(defn- normalize-connection-parameter
+  "Normalize `s` for matching against [[driver/disallowed-connection-parameters]]: percent escapes decoded once, case
+  folded the way `equalsIgnoreCase` does, and `_ . - +` and whitespace removed."
+  [s]
+  ;; (?U) makes \s match Unicode whitespace too
+  (-> (codec/percent-decode (str s)) fold-case (str/replace #"(?U)[_.\-+\s]" "")))
+
+(defn disallowed-connection-parameter
+  "The first name in [[driver/disallowed-connection-parameters]] that the string `s` contains, after both are
+  normalized by [[normalize-connection-parameter]], or nil when it contains none."
+  [driver s]
+  (let [s (normalize-connection-parameter s)]
+    (some #(when (str/includes? s (normalize-connection-parameter %)) %)
+          (driver/disallowed-connection-parameters driver))))
+
+(def ^:private url-separators
+  "Characters that end a URL-building detail's part of a connection URL and start a client parameter."
+  [\? \& \; \#])
+
+(defn- validate-url-building-details!
+  [driver details]
+  (doseq [k     (driver/url-building-detail-keys driver)
+          :let  [v (get details k)]
+          ;; some clients percent-decode the URL once before splitting off its parameters, so an encoded separator is
+          ;; refused too
+          :when (and (some? v) (some (set url-separators) (codec/percent-decode (str v))))]
+    (throw (ex-info (str "Connection detail " (name k) " may not contain " (str/join " " url-separators))
+                    {:status-code 400, :detail k}))))
+
+(defn validate-connection-parameters!
+  "Throw a 400 if `details` set a connection parameter named in [[driver/disallowed-connection-parameters]], either in
+  `:additional-options` or as a detail key, or if a value of one of the [[driver/url-building-detail-keys]] contains a
+  URL separator. Returns nil when the details are acceptable.
+
+  Reads the details a user supplied rather than the connection spec built from them: the spec also carries properties
+  Metabase sets itself, which are not the user's to have chosen. An auth provider's response is merged into the details
+  as well (see [[driver/incorporate-auth-provider-details]]), so check the details again once it has been."
+  [driver details]
+  (letfn [(refuse! [where match]
+            (throw (ex-info (str "Potentially dangerous keys in " where) {:status-code 400, :disallowed-key match})))]
+    (when-let [match (some->> (:additional-options details) (disallowed-connection-parameter driver))]
+      (refuse! "additional options" match))
+    (when-let [match (some #(disallowed-connection-parameter driver (if (keyword? %) (name %) %)) (keys details))]
+      (refuse! "connection details" match)))
+  (validate-url-building-details! driver details))
+
 (defn can-connect-with-details?
   "Check whether we can connect to a database with `driver` and `details-map` and perform a basic query such as `SELECT
   1`. Specify optional param `throw-exceptions` if you want to handle any exceptions thrown yourself (e.g., so you
@@ -294,13 +353,10 @@
 
   (This is cached for a second, so as to avoid repeated application DB calls if this function is called several times
   over the duration of a single API request or sync operation.)"
-  [database-or-id :- [:or
-                      {:error/message "Database or ID"}
-                      [:map
-                       [:engine [:or :keyword :string]]]
-                      [:map
-                       [:id ::lib.schema.id/database]]
-                      ::lib.schema.id/database]]
+  [database-or-id :- [:maybe [:or
+                              {:error/message "Database or ID"}
+                              ::lib.schema.id/database
+                              ::warehouses.schema/database-or-metadata]]]
   (if-let [driver (:engine database-or-id)]
     ;; ensure we get the driver as a keyword (sometimes it's a String)
     (keyword driver)
@@ -349,14 +405,10 @@
                     [driver feature (mdb/unique-identifier) (:id database) (:updated-at database)])))))
 
 ;;; this can get called in post-select which doesn't always have ID
-(mu/defn ensure-lib-database :- [:map
-                                 [:lib/type [:= :metadata/database]]]
+(mu/defn ensure-lib-database :- [:map [:lib/type [:= :metadata/database]]]
   "Ensures the database is in Lib metadata format (SnakeHatingMap with kebab-case keys).
    If passed a Toucan2 instance, converts it. If already Lib metadata, returns as-is."
-  [database :- [:or
-                [:map
-                 [:lib/type [:= :metadata/database]]]
-                (ms/InstanceOf :model/Database)]]
+  [database :- ::warehouses.schema/database-or-metadata]
   (if-not (:lib/type database)
     (lib-be/instance->metadata database :metadata/database)
     database))
@@ -372,12 +424,7 @@
   and move on for now."
   [driver   :- :keyword
    feature  :- :keyword
-   database :- [:maybe
-                [:or
-                 ;; this can get called with an incomplete object in post-select
-                 [:map
-                  [:lib/type [:= :metadata/database]]]
-                 (ms/InstanceOf :model/Database)]]]
+   database :- [:maybe ::warehouses.schema/database-or-metadata]]
   (let [database (some-> database ensure-lib-database)
         f        (if *memoize-supports?* memoized-supports?* supports?*)]
     (f driver feature database)))
@@ -426,11 +473,7 @@
 (mu/defn features
   "Return a set of all features supported by `driver` with respect to `database`."
   [driver   :- :keyword
-   database :- [:or
-                ;; this can get called in post-select which doesn't always have ID
-                [:map
-                 [:lib/type [:= :metadata/database]]]
-                (ms/InstanceOf :model/Database)]]
+   database :- ::warehouses.schema/database-or-metadata]
   (let [database (ensure-lib-database database)]
     (if *memoize-supports?*
       (memoized-features* driver database)
@@ -482,13 +525,13 @@
      (-> {:name (str prop-name "-value")
           :type "textFile"
           :treat-before-posting "base64"
-          :visible-if {(keyword (str prop-name "-options")) "uploaded"}}
+          :visible-if {(str prop-name "-options") "uploaded"}}
          (dissoc :secret-kind))
      {:name (str prop-name "-path")
       :type "string"
       :display-name (trs "File path")
       :placeholder (:placeholder conn-prop)
-      :visible-if {(keyword (str prop-name "-options")) "local"}}]))
+      :visible-if {(str prop-name "-options") "local"}}]))
 
 (defn- ->str
   "Turns `x` into a String. If `x` a keyword, then `name` is used. Otherwise, `str` is called on it."
@@ -559,14 +602,14 @@
       :type "text"
       :placeholder placeholder
       :description (trs "Comma separated names of {0} that should appear in Metabase" (u/lower-case-en disp-name))
-      :visible-if  {(keyword type-prop-nm) "inclusion"}
+      :visible-if  {type-prop-nm "inclusion"}
       :helper-text (trs "You can use patterns like \"auth*\" to match multiple {0}" (u/lower-case-en disp-name))
       :required true}
      {:name (str prop-name "-patterns")
       :type "text"
       :placeholder placeholder
       :description (trs "Comma separated names of {0} that should NOT appear in Metabase" (u/lower-case-en disp-name))
-      :visible-if  {(keyword type-prop-nm) "exclusion"}
+      :visible-if  {type-prop-nm "exclusion"}
       :helper-text (trs "You can use patterns like \"auth*\" to match multiple {0}" (u/lower-case-en disp-name))
       :required true}]))
 
@@ -696,6 +739,19 @@
 
     [conn-prop]))
 
+(defn- strip-hidden-when-hosted
+  "Return `prop` with any option tagged `:hidden-when-hosted` removed. Recurses into group fields."
+  [prop]
+  (cond
+    (= :group (:type prop))
+    (update prop :fields #(mapv strip-hidden-when-hosted %))
+
+    (seq (:options prop))
+    (update prop :options #(filterv (complement :hidden-when-hosted) %))
+
+    :else
+    prop))
+
 (defn connection-props-server->client
   "Transforms `conn-props` for the given `driver` from their server side definition into a client side definition.
 
@@ -707,7 +763,8 @@
    if one was provided."
   {:added "0.42.0"}
   [driver conn-props]
-  (let [final-props (into [] (mapcat process-connection-prop) conn-props)
+  (let [hosted-filter (if (premium-features/is-hosted?) strip-hidden-when-hosted identity)
+        final-props   (into [] (comp (mapcat process-connection-prop) (map hosted-filter)) conn-props)
         ;; Build complete props-by-name map including nested fields from groups
         props-by-name (collect-all-props-by-name final-props)]
     ;; now, traverse the visible-if-edges and update all visible-if entries with their full set of "transitive"
@@ -932,99 +989,6 @@
         (auth-provider/fetch-auth auth-provider database-id db-details)
         db-details))
      db-details)))
-
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                        Workspace Isolation Utilities                                           |
-;;; +----------------------------------------------------------------------------------------------------------------+
-
-(defn- instance-uuid-slug
-  "Create a slug from the site UUID, taking the first character of each section."
-  [site-uuid-string]
-  (->> (str/split site-uuid-string #"-")
-       (map first)
-       (apply str)))
-
-;; WARNING: Do NOT change this prefix. It is baked into existing workspace schemas in production databases.
-;; Changing it would require extreme care for backwards compatibility. If you need to match against this
-;; prefix, use [[workspace-isolated-schema?]] or [[workspace-isolated-schema-clause]] rather than hardcoding it.
-(def ^:private workspace-isolated-prefix "mb__isolation_")
-;; Escaped for SQL LIKE: underscores are wildcards, so we escape them with backslash.
-;; The default escape character works across all supported app-database engines (H2, Postgres, MySQL, MariaDB),
-;; so an explicit ESCAPE clause is not necessary.
-(def ^:private workspace-isolated-like-pattern
-  (str (str/replace workspace-isolated-prefix "_" "\\_") "%"))
-
-(defn workspace-isolated-schema?
-  "Returns true if the given schema name belongs to a workspace isolation namespace."
-  [schema-name]
-  (and (some? schema-name)
-       (str/starts-with? schema-name workspace-isolated-prefix)))
-
-(defn workspace-isolated-schema-clause
-  "Returns a HoneySQL [:like column pattern] clause that matches workspace isolation schemas.
-   `column` is typically `:schema`."
-  [column]
-  [:like column workspace-isolated-like-pattern])
-
-(defn workspace-isolation-namespace-name
-  "Generate namespace/database name for workspace isolation following mb__isolation_<slug>_<workspace-id> pattern.
-  Uses 'namespace' as the generic term that maps to 'schema' in Postgres, 'database' in ClickHouse, etc."
-  [workspace]
-  (assert (some? (:id workspace)) "Workspace must have an :id")
-  (let [instance-slug      (instance-uuid-slug (str (system/site-uuid)))
-        clean-workspace-id (str/replace (str (:id workspace)) #"[^a-zA-Z0-9]" "_")]
-    (format "%s%s_%s" workspace-isolated-prefix instance-slug clean-workspace-id)))
-
-(defn workspace-isolation-user-name
-  "Generate username for workspace isolation."
-  [workspace]
-  (let [instance-slug (instance-uuid-slug (str (system/site-uuid)))]
-    (format "%s%s_%s" workspace-isolated-prefix instance-slug (:id workspace))))
-
-(def ^:private workspace-password-char-sets
-  "Character sets for password generation. Cycles through these to ensure representation from each."
-  ["ABCDEFGHJKLMNPQRSTUVWXYZ"
-   "abcdefghjkmnpqrstuvwxyz"
-   "123456789"
-   "!#$%&*+-="])
-
-(defn random-workspace-password
-  "Generate a random password suitable for most database engines.
-   Ensures the password contains characters from all sets (uppercase, lowercase, digits, special)
-   by cycling through the character sets. Result is shuffled for randomness."
-  []
-  (->> (cycle workspace-password-char-sets)
-       (take (+ 32 (rand-int 32)))
-       (map rand-nth)
-       shuffle
-       (apply str)))
-
-(defn- redact-msg
-  "Replace all `secrets` in `msg` with `****`."
-  [msg secrets]
-  (reduce (fn [s secret] (str/replace s secret "****")) (or msg "") secrets))
-
-(defn scrub-exceptions
-  "Scrub `secrets` from the exception message and cause chain of `t`. Returns a new
-   exception with every occurrence of each secret replaced by `****`. Use this to prevent
-   credentials embedded in DDL SQL from leaking into logs via exception messages."
-  [^Throwable t secrets]
-  (let [msg   (redact-msg (ex-message t) secrets)
-        cause (some-> (.getCause t) (scrub-exceptions secrets))]
-    (cond
-      (instance? clojure.lang.ExceptionInfo t)
-      (ex-info msg (ex-data t) cause)
-
-      (instance? java.sql.SQLException t)
-      (let [^java.sql.SQLException sql-ex t
-            next-ex (some-> (.getNextException sql-ex) (scrub-exceptions secrets))]
-        (doto (java.sql.SQLException. msg (.getSQLState sql-ex) (.getErrorCode sql-ex) cause)
-          (.setStackTrace (.getStackTrace t))
-          (cond-> next-ex (.setNextException next-ex))))
-
-      :else
-      (doto (Exception. msg cause)
-        (.setStackTrace (.getStackTrace t))))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                           Macaw parsing helpers                                                |

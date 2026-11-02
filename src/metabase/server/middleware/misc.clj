@@ -81,7 +81,7 @@
                (or (nil? user-agent) ((complement str/includes?) user-agent "HealthChecker")))
       ;; `origin` already carries a scheme; the `*-host` headers normally don't, so prepend the scheme the proxy
       ;; terminated TLS with -- otherwise `normalize-site-url` defaults to `http://` and a TLS-terminating proxy ends
-      ;; up advertising `http://` auth/discovery URLs over an `https` origin, breaking MCP OAuth. Only
+      ;; up advertising `http://` auth/discovery URLs over an `https` origin, breaking MCP OAuth (BOT-1617). Only
       ;; prepend when the host is scheme-less; a scheme-bearing host passes through untouched.
       (when-let [site-url (or origin
                               (when-let [host (or x-forwarded-host host)]

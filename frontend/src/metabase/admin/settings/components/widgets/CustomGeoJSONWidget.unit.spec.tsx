@@ -9,9 +9,9 @@ import {
   setupSettingsEndpoints,
   setupUpdateSettingEndpoint,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen, waitFor, within } from "__support__/ui";
 import { UndoListing } from "metabase/common/components/UndoListing";
-import { createMockSettingsState } from "metabase/redux/store/mocks";
 import type {
   CustomGeoJSONMap,
   CustomGeoJSONSetting,
@@ -200,6 +200,7 @@ describe("CustomGeoJSONWIdget", () => {
     const puts = await findRequests("PUT");
     const { body } = puts[0];
     const testMapEntry = Object.values(body.value).find(
+      // Unjustified type cast. FIXME
       (item) => (item as CustomGeoJSONMap).name === "Test Two",
     );
     expect(testMapEntry).toEqual({
@@ -263,6 +264,7 @@ describe("CustomGeoJSONWIdget", () => {
     const puts = await findRequests("PUT");
     const { body } = puts[0];
     const testMapEntry = Object.values(body.value).find(
+      // Unjustified type cast. FIXME
       (item) => (item as CustomGeoJSONMap).name === "Test Edit",
     );
     expect(testMapEntry).toEqual({

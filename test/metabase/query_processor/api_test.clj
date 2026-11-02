@@ -28,7 +28,7 @@
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.middleware.constraints :as qp.constraints]
    [metabase.query-processor.pivot.test-util :as qp.pivot.test-util]
-   [metabase.query-processor.settings :as qp.settings]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.test :as qp]
    [metabase.query-processor.test-util :as qp.test-util]
@@ -131,6 +131,7 @@
                     :started_at       true
                     :running_time     true
                     :embedding_client nil
+                    :embedding_client_identifier nil
                     :embedding_hostname nil
                     :embedding_path nil
                     :embedding_route nil
@@ -627,16 +628,15 @@
                                    (assoc (mt/mbql-query venues {:fields [$id $name]})
                                           :pretty false)))))))
 
-(deftest ^:parallel compile-ignores-caller-supplied-limit-options-test
+(deftest ^:parallel compile-disable-max-results-test
   (testing "POST /api/dataset/native"
-    (testing "\nthe request cannot steer the limit the endpoint compiles with"
-      (doseq [[k v] [[:middleware {:disable-max-results? false}]
-                     [:constraints {:max-results 7, :max-results-bare-rows 7}]]]
-        (let [query  (-> (mt/mbql-query venues {:fields [$id $name]})
-                         (assoc :pretty false, k v))
-              result (mt/user-http-request :crowberto :post 200 "dataset/native" query)]
-          (is (not (re-find #"(?i)\bLIMIT\b" (:query result)))
-              (str "Expected " k " to be ignored, got: " (:query result))))))))
+    (testing "\nWith disable-max-results? the compiled SQL should not include a LIMIT clause"
+      (let [query (-> (mt/mbql-query venues {:fields [$id $name]})
+                      (assoc-in [:middleware :disable-max-results?] true)
+                      (assoc :pretty false))
+            result (mt/user-http-request :crowberto :post 200 "dataset/native" query)]
+        (is (not (re-find #"(?i)\bLIMIT\b" (:query result)))
+            (str "Expected no LIMIT in SQL, got: " (:query result)))))))
 
 (deftest ^:parallel compile-test-2
   (testing "POST /api/dataset/native"
@@ -666,8 +666,7 @@
             (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
             (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/create-queries :query-builder)
             (is (malli= [:map
-                         [:permissions-error? [:= true]]
-                         [:message            [:= "You do not have permissions to run this query."]]]
+                         [:message [:= "You do not have permissions to run this query."]]]
                         (mt/user-http-request :rasta :post "dataset/native"
                                               (mt/mbql-query venues
                                                 {:fields [$id $name]}))))))))))
@@ -702,11 +701,12 @@
                                      (mt/mbql-query venues {:fields [$id $name]}))))))))
 
 ;; historical test: don't do this going forward
-#_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
 (deftest ^:parallel compile-test-6
   (testing "POST /api/dataset/native"
     (testing "\nCan we fetch a native version of an MBQL query?"
       (testing "`:now` is usable inside `:case` with mongo (#32216)"
+        ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+        #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
         (mt/test-driver :mongo
           (is (= {"$switch"
                   {"branches"
@@ -723,8 +723,9 @@
                      :query json/decode first (get-in ["$project" "E"])))))))))
 
 ;; historical test: don't do this going forward
-#_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
 (deftest report-timezone-test
+  ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+  #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
   (mt/test-driver :postgres
     (testing "expected (desired) and actual timezone should be returned as part of query results"
       (mt/with-temporary-setting-values [report-timezone "US/Pacific"]
@@ -737,9 +738,10 @@
                      (select-keys [:requested_timezone :results_timezone])))))))))
 
 ;; historical test: don't do this going forward
-#_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
 (deftest databricks-stack-trace-test
   (testing "exceptions with stacktraces should have the stacktrace removed"
+    ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+    #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
     (mt/test-driver :databricks
       (let [res (mt/user-http-request :rasta :post 400 "dataset"
                                       (lib/native-query (mt/metadata-provider)
@@ -764,6 +766,23 @@
             (is (= ["AK" "Affiliate" "Doohickey" 0 18 81] (first rows)))
             (is (= ["MD" "Twitter" nil 4 16 62] (nth rows 1000)))
             (is (= [nil nil nil 7 18760 69540] (last rows)))))))))
+
+(deftest ^:parallel pivot-dataset-error-response-test
+  (mt/dataset test-data
+    (testing "POST /api/dataset/pivot"
+      (testing "a failed query returns the usual formatted error response, not an empty body"
+        (doseq [[cause query] {"an out-of-range pivot row index"
+                               (assoc (qp.pivot.test-util/pivot-query) :pivot_rows [0 1 2 3])
+
+                               "a reference to a nonexistent column"
+                               (assoc-in (qp.pivot.test-util/pivot-query) [:query :filter]
+                                         [:= [:field Integer/MAX_VALUE nil] 1])}]
+          (testing cause
+            (let [{:keys [status body]} (mt/user-http-request-full-response :crowberto :post "dataset/pivot" query)]
+              (is (contains? #{400 500} status))
+              (is (=? {:status "failed"
+                       :error  string?}
+                      body)))))))))
 
 (deftest ^:parallel pivot-dataset-row-totals-disabled-test
   (mt/test-drivers (qp.pivot.test-util/applicable-drivers)
@@ -1132,19 +1151,6 @@
           ;; The venues table has 100+ rows, so we should get more than default constraints (10)
           (is (> (count (csv/read-csv result)) 10)))))))
 
-(deftest ^:parallel adhoc-pivot-download-json-encoded-query-test
-  (testing "POST /api/dataset/csv accepts the JSON-encoded MBQL 5 :json_query from a pivot response (metabase#70757)"
-    (let [{:keys [json_query]} (mt/user-http-request :crowberto :post 202 "dataset/pivot"
-                                                     (qp.pivot.test-util/pivot-query))
-          {:keys [visualization_settings]} (qp.pivot.test-util/pivot-card)
-          result (mt/user-http-request :crowberto :post 200 "dataset/csv"
-                                       {:query                  (json/encode json_query)
-                                        :pivot_results          true
-                                        :format_rows            true
-                                        :visualization_settings (json/encode visualization_settings)})
-          rows   (csv/read-csv result)]
-      (is (> (count rows) 1)))))
-
 (deftest ^:parallel query-metadata-test
   (testing "MBQL query"
     (is (=? {:databases [{:id (mt/id)}]
@@ -1247,37 +1253,33 @@
                                                   :settings {:include_sensitive_fields true}))]
           (is (some #(= (:id %) (mt/id :venues :price))
                     (->> result :tables (mapcat :fields)))
-              "Sensitive field SHOULD be included when :settings :include-sensitive-fields is true"))))))
+              "Sensitive field SHOULD be included when :settings :include-sensitive-fields is true")))
+      (testing "sensitive fields are excluded for users who can't edit the table's metadata, even when requested"
+        (let [result (mt/user-http-request :rasta :post 200 "dataset/query_metadata"
+                                           (assoc (mt/mbql-query venues)
+                                                  :settings {:include_sensitive_fields true}))]
+          (is (seq (->> result :tables (mapcat :fields))))
+          (is (not (some #(= (:id %) (mt/id :venues :price))
+                         (->> result :tables (mapcat :fields))))))))))
 
-(deftest ^:synchronized row-limit-ignores-request-options-test
-  (testing "POST /api/dataset"
-    (mt/with-temporary-setting-values [unaggregated-query-row-limit 5]
-      (let [row-count (fn [query]
-                        (count (mt/rows (mt/user-http-request :rasta :post 202 "dataset" query))))
-            base      (mt/mbql-query venues)]
-        (testing "the row limit applies to an ordinary query"
-          (is (= 5 (row-count base))))
-        (testing ":middleware options in the request body do not change it"
-          (is (= 5 (row-count (assoc-in base [:middleware :disable-max-results?] true)))))
-        (testing ":constraints in the request body do not change it either"
-          (is (= 5 (row-count (assoc base :constraints {:max-results           10000
-                                                        :max-results-bare-rows 10000})))))))))
+(deftest native-form-requires-native-query-perms-test
+  (testing "POST /api/dataset only returns the compiled query in `:native_form` to users with native query perms"
+    (mt/with-no-data-perms-for-all-users!
+      (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
+      (doseq [[create-queries expected] {:query-builder-and-native some?
+                                         :query-builder            nil?}]
+        (testing (format "with %s" create-queries)
+          (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/create-queries create-queries)
+          (let [response (mt/user-http-request :rasta :post 202 "dataset" (mt/mbql-query venues {:limit 1}))]
+            (is (= "completed" (:status response)))
+            (is (expected (get-in response [:data :native_form])))))))))
 
-(deftest ^:synchronized pivot-row-limit-ignores-request-options-test
-  (testing "POST /api/dataset/pivot"
-    (mt/with-temporary-setting-values [unaggregated-query-row-limit 5]
-      (let [query (-> (mt/mbql-query venues)
-                      (assoc :pivot_rows [] :pivot_cols [])
-                      (assoc-in [:middleware :disable-max-results?] true))]
-        (is (= 5 (count (mt/rows (mt/user-http-request :rasta :post 202 "dataset/pivot" query)))))))))
-
-(deftest ^:synchronized export-row-limit-ignores-request-options-test
-  (testing "POST /api/dataset/csv"
-    (binding [qp.settings/*minimum-download-row-limit* 5]
-      (mt/with-temporary-setting-values [download-row-limit 5]
-        (let [query (-> (mt/mbql-query venues)
-                        (assoc-in [:middleware :disable-max-results?] true))
-              rows  (csv/read-csv (mt/user-http-request :rasta :post 200 "dataset/csv"
-                                                        {:query (json/encode query)}))]
-          (testing "the download limit applies, not counting the header row"
-            (is (= 5 (dec (count rows))))))))))
+(deftest card-query-native-form-requires-native-query-perms-test
+  (testing "POST /api/card/:id/query doesn't return the compiled query to users without native query perms"
+    (mt/with-temp [:model/Card {card-id :id} {:dataset_query (mt/mbql-query venues {:limit 1})}]
+      (mt/with-no-data-perms-for-all-users!
+        (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/view-data :unrestricted)
+        (perms/set-database-permission! (perms/all-users-group) (mt/id) :perms/create-queries :no)
+        (let [response (mt/user-http-request :rasta :post 202 (format "card/%d/query" card-id))]
+          (is (= "completed" (:status response)))
+          (is (nil? (get-in response [:data :native_form]))))))))

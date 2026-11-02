@@ -20,8 +20,7 @@
   "Normalizes the (primarily table/column) name passed in.
   Should return a value that matches the name listed in the appdb."
   [driver name-str]
-  (let [;; quoting the empty string yields the dialect's delimiters -- `` for backtick dialects, "" for ANSI ones
-        quote-char (when-let [quote-fn (:quote (sql/get-dialect (sql.qp/quote-style driver)))]
+  (let [quote-char (when-let [quote-fn (:quote (sql/get-dialect (sql.qp/quote-style driver)))]
                      (first (quote-fn "")))]
     (if (and (= (first name-str) quote-char)
              (= (last name-str) quote-char))

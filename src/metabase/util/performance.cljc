@@ -2,7 +2,7 @@
   "Functions and utilities for faster processing. This namespace is compatible with both Clojure and ClojureScript.
   However, some functions are either not only available in CLJS, or offer passthrough non-improved functions."
   (:refer-clojure :exclude [reduce mapv run! some every? concat select-keys update-keys empty? not-empty doseq for
-                            first second update-vals get-in #?(:cljs clj->js)])
+                            first second update-vals get-in str #?(:cljs clj->js)])
   #?(:clj (:require
            [net.cgrand.macrovich :as macros])
      :cljs (:require
@@ -349,6 +349,15 @@
        (mapv (fn [_] (mapv #(.next ^Iterator %) its))
              (first coll-of-colls)))))
 
+(defn dropv
+  "Like `clojure.core/drop`, but always returns a vector, and calls `clojure.core/subvec` when invoked on vectors (so,
+  it is very cheap, but shares the structure with original vector, see its docstring)."
+  ([n] (drop n))
+  ([n coll]
+   (cond (vector? coll) (if (> (count coll) n) (subvec coll n) [])
+         (nil? coll)    []
+         :else          (into [] (drop n) coll))))
+
 (defn select-keys
   "Drop-in replacement for `clojure.walk/select-keys`, but much more efficient."
   [m keyseq]
@@ -367,7 +376,6 @@
   (cond (nil? m) {}
         ;; Fallback for non-editable collections where transients aren't supported.
         (not (editable? m))
-        #_{:clj-kondo/ignore [:discouraged-var]}
         (clojure.core/update-keys m f)
         :else (-> (reduce-kv (fn [acc k v]
                                (let [k' (f k)]
@@ -388,7 +396,6 @@
   (cond (nil? coll) {}
         ;; Fallback for non-editable collections where transients aren't supported.
         (not (editable? coll))
-        #_{:clj-kondo/ignore [:discouraged-var]}
         (clojure.core/update-vals coll f)
         :else (-> (reduce-kv (fn [acc k v]
                                (let [v' (f v)]
@@ -576,6 +583,36 @@
            (add-original-meta form))
        form))
    m))
+
+(defn str
+  "More efficient implementation of `clojure.core/str` because it has more non-variadic arities. Optimization is
+  Clojure-only, on other platforms it reverts back to `clojure.core/str`."
+  (^String [] "")
+  (^String [^Object a]
+   #?(:clj (if (nil? a) "" (.toString a))
+      :default (clojure.core/str a)))
+  (^String [^Object a, ^Object b]
+   #?(:clj (if (nil? a)
+             (str b)
+             (if (nil? b)
+               (.toString a)
+               (.concat (.toString a) (.toString b))))
+      :default (clojure.core/str a b)))
+  (^String [a b c]
+   #?(:clj (let [sb (StringBuilder.)]
+             (.append sb (str a))
+             (.append sb (str b))
+             (.append sb (str c))
+             (.toString sb))
+      :default (clojure.core/str a b c)))
+  (^String [a b c & more]
+   #?(:clj (let [sb (StringBuilder.)]
+             (.append sb (str a))
+             (.append sb (str b))
+             (.append sb (str c))
+             (run! #(.append sb (str %)) more)
+             (.toString sb))
+      :default (apply clojure.core/str a b c more))))
 
 ;;;; Faster clj->js implementation
 

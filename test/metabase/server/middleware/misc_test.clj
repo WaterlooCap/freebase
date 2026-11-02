@@ -81,7 +81,7 @@
 
 (deftest maybe-set-site-url-forwarded-proto-test
   (with-fresh-instance!
-    (testing "scheme-less `*-host` headers get the scheme from `X-Forwarded-Proto`"
+    (testing "scheme-less `*-host` headers get the scheme from `X-Forwarded-Proto` (BOT-1617)"
       (doseq [host-header ["X-Forwarded-Host" "Host"]]
         (testing host-header
           (mt/with-temporary-setting-values [site-url nil]

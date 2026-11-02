@@ -5,9 +5,8 @@ import {
   setupCollectionByIdEndpoint,
   setupUpdateCollectionEndpoint,
 } from "__support__/server-mocks";
-import { createMockEntitiesState } from "__support__/store";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
-import { createMockState } from "metabase/redux/store/mocks";
 import type { Collection, CollectionItem } from "metabase-types/api";
 import {
   createMockCollection,
@@ -32,6 +31,7 @@ function setup(collection: Collection | CollectionItem) {
   const onClose = jest.fn();
   const onSave = jest.fn();
 
+  // Unjustified type cast. FIXME
   setupUpdateCollectionEndpoint(collection as Collection);
   setupCollectionByIdEndpoint({
     collections: [parentCollection, itemParentCollection],
@@ -44,11 +44,7 @@ function setup(collection: Collection | CollectionItem) {
       onSave={onSave}
     />,
     {
-      storeInitialState: createMockState({
-        entities: createMockEntitiesState({
-          collections: [parentCollection, itemParentCollection],
-        }),
-      }),
+      storeInitialState: createMockState({}),
     },
   );
 
@@ -94,6 +90,7 @@ describe("EditCollectionModal", () => {
       id: 2,
       model: "collection",
       name: "Collection item",
+      // Unjustified type cast. FIXME
       collection_id: itemParentCollection.id as number,
     });
     const { onSave } = setup(collectionItem);

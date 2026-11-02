@@ -5,26 +5,24 @@ import {
   RelatedSettingsSection,
   getModularEmbeddingRelatedSettingItems,
 } from "metabase/admin/components/RelatedSettingsSection";
-import { SettingsPageWrapper } from "metabase/admin/components/SettingsSection";
 import { NewEmbedButton } from "metabase/admin/settings/components/EmbeddingSettings/NewEmbedButton/NewEmbedButton";
 import { UpsellDevInstances } from "metabase/admin/upsells";
 import { ExternalLink } from "metabase/common/components/ExternalLink";
-import {
-  useDocsUrl,
-  useHasTokenFeature,
-  useSetting,
-} from "metabase/common/hooks";
+import { useDocsUrl, useHasTokenFeature } from "metabase/common/hooks";
+import { PLUGIN_CONTENT_TRANSLATION } from "metabase/content-translation/plugins";
 import {
   PLUGIN_ADMIN_SETTINGS,
-  PLUGIN_CONTENT_TRANSLATION,
   PLUGIN_EMBEDDING_SDK,
   PLUGIN_IS_EE_BUILD,
 } from "metabase/plugins";
+import { useSetting } from "metabase/settings";
+import { SettingsPageWrapper } from "metabase/settings-components";
 import { Box, Group, Icon, Stack, Text } from "metabase/ui";
 
 import { EmbeddingSdkSettings } from "../EmbeddingSdkSettings/EmbeddingSdkSettings";
 import S from "../EmbeddingSettings.module.css";
 import { EmbeddingSettingsCard } from "../EmbeddingSettingsCard";
+import { SdkReact18Alert } from "../SdkReact18Alert/SdkReact18Alert";
 import { SharedCombinedEmbeddingSettings } from "../SharedCombinedEmbeddingSettings";
 
 function EmbeddingSettingsPageWrapper({ children }: PropsWithChildren) {
@@ -34,6 +32,8 @@ function EmbeddingSettingsPageWrapper({ children }: PropsWithChildren) {
 
   return (
     <SettingsPageWrapper title={t`Embedding settings`}>
+      <SdkReact18Alert />
+
       {children}
 
       <RelatedSettingsSection
@@ -90,8 +90,8 @@ function EmbeddingSettingsEE() {
       <PLUGIN_CONTENT_TRANSLATION.ContentTranslationConfiguration />
 
       {isReactSdkFeatureAvailable && isHosted && (
-        <Box py="lg" px="xl" className={S.SectionCard}>
-          <Stack gap="xs">
+        <Box py="xl" px="xxl" className={S.SectionCard}>
+          <Stack gap="xxs">
             <Text
               htmlFor="version-pinning"
               component="label"

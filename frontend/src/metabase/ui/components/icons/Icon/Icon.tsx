@@ -48,12 +48,13 @@ export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
   }: IconProps,
   ref,
 ) {
-  const IconComponent = (Icons[name] ?? Icons["unknown"]).component;
+  const IconComponent = Icons[name] ?? Icons["unknown"];
 
   // Box forwards `color` as a raw SVG presentation attribute, so palette keys
   // like "core-yellow-saturated" don't render — only valid CSS color strings do.
   // Resolve known palette keys to their `--mb-color-*` CSS variables.
   if ("color" in restProps) {
+    // Unjustified type cast. FIXME
     restProps.color = resolveIconColor(restProps.color) as ColorName;
   }
 

@@ -8,6 +8,7 @@
    [metabase-enterprise.semantic-search.index :as semantic.index]
    [metabase-enterprise.semantic-search.index-metadata :as semantic.index-metadata]
    [metabase-enterprise.semantic-search.test-util :as semantic.tu]
+   [metabase.llm.settings :as llm.settings]
    [metabase.test :as mt]
    [metabase.util.json :as json]
    [next.jdbc :as jdbc]
@@ -42,7 +43,12 @@
     (is (= :permanent (semantic.dlq/categorize-error (NullPointerException. "NPE")))))
   (testing "Default to transient"
     (is (= :transient (semantic.dlq/categorize-error (RuntimeException. "Unknown error"))))
-    (is (= :transient (semantic.dlq/categorize-error (Exception. "Generic exception"))))))
+    (is (= :transient (semantic.dlq/categorize-error (Exception. "Generic exception")))))
+  (testing "an embedding endpoint the network policy refuses is a configuration problem, not a passing one"
+    (is (= :permanent (semantic.dlq/categorize-error
+                       (try (llm.settings/rethrow-if-llm-network-policy-error! (ex-info "blocked" {:ssrf true})
+                                                                               "https://embed.example/v1")
+                            (catch Exception e e)))))))
 
 (deftest dlq-table-creation-test
   (testing "DLQ table creation and existence checks"
@@ -121,6 +127,38 @@
             (is (= "gate1" (:gate_id (first results))))
             (is (= 2 (:retry_count (first results))))
             (is (= t2 (:error_gated_at (first results))))))))))
+
+(deftest dlq-entry-upsert-schema-qualified-test
+  (testing "the conflict predicate references the target by bare name when the DLQ table is schema-qualified
+            (app-db mode); a qualified reference would not resolve inside ON CONFLICT DO UPDATE"
+    (let [pgvector       (semantic.env/get-pgvector-datasource!)
+          schema         (str "dlq_test_schema_" (System/nanoTime))
+          index-metadata (assoc (semantic.tu/unique-index-metadata)
+                                :schema schema
+                                :index-table-qualifier (str schema ".%s"))
+          index-id       42]
+      (try
+        (jdbc/execute! pgvector [(str "CREATE SCHEMA " schema)])
+        (semantic.dlq/create-dlq-table-if-not-exists! pgvector index-metadata index-id)
+        (let [t1    (ts "2025-01-01T10:00:00Z")
+              t2    (ts "2025-01-01T11:00:00Z")
+              entry (fn [gated-at retry]
+                      [{:gate_id           "gate1"
+                        :retry_count       retry
+                        :attempt_at        t1
+                        :last_attempted_at t2
+                        :error_gated_at    gated-at}])]
+          (is (= 1 (semantic.dlq/add-entries! pgvector index-metadata index-id (entry t1 0))))
+          (is (= 1 (semantic.dlq/add-entries! pgvector index-metadata index-id (entry t2 2)))
+              "the conflict-update path must work against a schema-qualified table")
+          (let [table-name (semantic.dlq/dlq-table-name-kw index-metadata index-id)
+                [row]      (jdbc/execute! pgvector
+                                          (sql/format {:select [:*] :from [table-name]} :quoted true)
+                                          {:builder-fn jdbc.rs/as-unqualified-lower-maps})]
+            (is (= 2 (:retry_count row)))
+            (is (= t2 (:error_gated_at row)))))
+        (finally
+          (jdbc/execute! pgvector [(str "DROP SCHEMA IF EXISTS " schema " CASCADE")]))))))
 
 (deftest dlq-poll-test
   (let [pgvector       (semantic.env/get-pgvector-datasource!)

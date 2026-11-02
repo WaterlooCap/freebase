@@ -33,8 +33,8 @@ export const ExperienceCard = () => {
     !isSsoEnabledAndConfigured && !hasAuthToSelect(experience);
 
   return (
-    <Card p="md">
-      <Stack gap="md">
+    <Card p="lg">
+      <Stack gap="lg">
         <Text size="lg" fw="bold">
           {t`Select your embed experience`}
         </Text>
@@ -43,17 +43,18 @@ export const ExperienceCard = () => {
           value={experience}
           onChange={(experience) =>
             handleEmbedExperienceChange(
+              // Unjustified type cast. FIXME
               experience as SdkIframeEmbedSetupExperience,
             )
           }
         >
-          <Stack gap="md">
+          <Stack gap="lg">
             {experiences.map((experience) => (
               <Radio
                 key={experience.value}
                 value={experience.value}
                 label={
-                  <Flex gap="xs" align="center">
+                  <Flex gap="xxs" align="center">
                     {experience.title}
                   </Flex>
                 }

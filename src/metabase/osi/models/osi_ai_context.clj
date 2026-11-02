@@ -18,6 +18,8 @@
    [metabase.entity-retrieval.mirror :as mirror]
    [metabase.models.interface :as mi]
    [metabase.models.serialization :as serdes]
+   [metabase.osi.db :as osi.db]
+   [metabase.osi.schema]
    [metabase.util :as u]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))
@@ -124,10 +126,6 @@
 
 (defmethod serdes/entity-id "OsiAiContext" [_ _] nil)
 
-(defmethod serdes/hash-fields :model/OsiAiContext
-  [_model]
-  [:entity_type :entity_local_id])
-
 (defmethod serdes/generate-path "OsiAiContext" [_ {:keys [entity_type entity_local_id]}]
   (conj (vec (entity-parent-path entity_type entity_local_id))
         {:model "OsiAiContext" :id "ai_context"}))
@@ -149,9 +147,7 @@
 ;; parent path on import, and `entity_type` is read back from the parent segment's model.
 (defmethod serdes/make-spec "OsiAiContext" [_model-name _opts]
   {:copy      [:ai_context]
-   :transform {:created_at      (serdes/date)
-               :updated_at      (serdes/date)
-               :entity_type     {:export (constantly ::serdes/skip)
+   :transform {:entity_type     {:export (constantly ::serdes/skip)
                                  :import-with-context
                                  (fn [current _ _] (:entity_type (parent-path->entity (pop (serdes/path current)))))}
                :entity_local_id {::serdes/fk true
@@ -159,7 +155,7 @@
                                  :import-with-context
                                  (fn [current _ _] (:entity_local_id (parent-path->entity (pop (serdes/path current)))))}}})
 
-(defmethod serdes/dependencies "OsiAiContext"
+(defmethod serdes/deserialization-dependencies "OsiAiContext"
   [entity]
   ;; Depend on the entity this row describes (its parent path), so it imports after that entity exists.
   [(vec (pop (serdes/path entity)))])
@@ -168,16 +164,11 @@
   [path]
   ;; Resolve the parent path back to a local entity, then find this row by its (entity_type, local-id) key.
   (when-let [{:keys [entity_type entity_local_id]} (parent-path->entity (pop path))]
-    (t2/select-one :model/OsiAiContext
-                   :entity_type (entity-retrieval/normalize-entity-type entity_type)
-                   :entity_local_id entity_local_id)))
+    (osi.db/ai-context (entity-retrieval/normalize-entity-type entity_type) entity_local_id)))
 
 (defmethod serdes/load-update! "OsiAiContext"
   [_model-name ingested local]
   ;; The default keys updates on (first (primary-keys)), which for this compound key is just :entity_type —
   ;; so it would address the wrong rows. Update by the full (entity_type, entity_local_id) key.
-  (t2/update! :model/OsiAiContext
-              :entity_type (:entity_type local) :entity_local_id (:entity_local_id local)
-              ingested)
-  (t2/select-one :model/OsiAiContext
-                 :entity_type (:entity_type local) :entity_local_id (:entity_local_id local)))
+  (osi.db/update-ai-context! (:entity_type local) (:entity_local_id local) (update ingested :ai_context ->ai-context))
+  (osi.db/ai-context (:entity_type local) (:entity_local_id local)))

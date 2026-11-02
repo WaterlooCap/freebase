@@ -3,6 +3,7 @@
    [clojure.string :as str]
    [java-time.api :as t]
    [metabase.appearance.core :as appearance]
+   [metabase.premium-features.core :as premium-features]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.util :as u]
    [metabase.util.encryption :as encryption]
@@ -54,10 +55,6 @@
   :getter     (fn []
                 (try
                   (some-> (setting/get-value-of-type :string :site-url) normalize-site-url)
-                  ;; An unparseable stored value returns nil. This used to re-open the header-derivation window in
-                  ;; [[metabase.server.middleware.misc/maybe-set-site-url*]] to anyone on a live instance; that
-                  ;; middleware now requires either a pre-setup instance or an authenticated superuser, so a nil here
-                  ;; can no longer be repointed by an unauthenticated request.
                   (catch clojure.lang.ExceptionInfo e
                     (log/errorf "site-url is invalid; returning nil for now. Will be reset on next request: %s" (ex-message e)))))
   :setter     (fn [new-value]
@@ -146,4 +143,36 @@
   :export?    false
   :setter     :none
   :getter     encryption/default-encryption-enabled?
+  :doc        false)
+
+(defn- env-path-allowlist
+  "The allowlist of paths for `setting-name`, read from its env var only. `NONE` allows no path. With nothing set,
+  hosted instances allow only `/tmp` and self-hosted ones allow every path."
+  [setting-name]
+  (if-let [raw (setting/env-var-value setting-name)]
+    (let [paths (into [] (comp (map str/trim) (remove str/blank?)) (str/split raw #","))]
+      (if (= paths ["NONE"]) [] paths))
+    (if (premium-features/is-hosted?) ["/tmp"] ["/"])))
+
+(defsetting readable-paths
+  (deferred-tru (str "Comma-separated allowlist of directories Metabase may read files from, e.g. for database "
+                     "secrets given as a local file path. Use NONE to allow no paths. Defaults to /tmp on Metabase "
+                     "Cloud and / (every path) when self-hosted."))
+  :type       :csv
+  :encryption :no
+  :visibility :internal
+  :export?    false
+  :setter     :none
+  :getter     #(env-path-allowlist :readable-paths)
+  :doc        false)
+
+(defsetting writable-paths
+  (deferred-tru (str "Comma-separated allowlist of directories Metabase may write files to. Use NONE to allow no "
+                     "paths. Defaults to /tmp on Metabase Cloud and / (every path) when self-hosted."))
+  :type       :csv
+  :encryption :no
+  :visibility :internal
+  :export?    false
+  :setter     :none
+  :getter     #(env-path-allowlist :writable-paths)
   :doc        false)

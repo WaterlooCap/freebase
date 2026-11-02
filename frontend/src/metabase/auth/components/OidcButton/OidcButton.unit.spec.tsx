@@ -1,4 +1,4 @@
-import "metabase/plugins/builtin";
+import "metabase/auth/plugins";
 import { mockSettings } from "__support__/settings";
 import { renderWithProviders, screen } from "__support__/ui";
 import { createMockState } from "metabase/redux/store/mocks";

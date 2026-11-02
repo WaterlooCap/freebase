@@ -14,16 +14,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { t } from "ttag";
+import { msgid, ngettext, t } from "ttag";
 import _ from "underscore";
 
 import { ErrorMessage } from "metabase/common/components/ErrorMessage";
 import { ExplicitSize } from "metabase/common/components/ExplicitSize";
 import { ExternalLink } from "metabase/common/components/ExternalLink";
-import {
-  memoize,
-  useMemoizedCallback,
-} from "metabase/common/hooks/use-memoized-callback";
+import { useMemoizedCallback } from "metabase/common/hooks/use-memoized-callback";
+import { useNumberFormatter } from "metabase/common/hooks/use-number-formatter";
+import { getRowCountMessage } from "metabase/common/utils/get-row-count-message";
 import { useTranslateContent } from "metabase/content-translation/hooks";
 import DashboardS from "metabase/css/dashboard.module.css";
 import { DataGrid, type DataGridStylesProps } from "metabase/data-grid";
@@ -43,25 +42,28 @@ import type {
   PlainCellFormatter,
   RowIdColumnOptions,
 } from "metabase/data-grid/types";
-import { withMantineTheme } from "metabase/hoc/MantineTheme";
 import { useDispatch } from "metabase/redux";
 import { setUIControls } from "metabase/redux/query-builder";
 import { Flex, type MantineTheme } from "metabase/ui";
 import { getScrollBarSize } from "metabase/utils/dom";
-import { formatValue } from "metabase/visualizations/lib/formatting";
+import { normalizeNewLines } from "metabase/utils/formatting";
+import { memoize } from "metabase/utils/memoize";
+import { formatValue } from "metabase/value-formatting";
+import { createPlainCellFormatter } from "metabase/visualizations/lib/plain-cell-formatter";
+import type {
+  ClickActionsMode,
+  VisualizationProps,
+} from "metabase/visualizations/types";
 import {
+  getColumnExtent,
   getTableCellClickedObject,
   getTableClickedObjectRowData,
   getTableHeaderClickedObject,
-} from "metabase/visualizations/lib/table";
-import { getColumnExtent } from "metabase/visualizations/lib/utils";
-import type {
-  QueryClickActionsMode,
-  VisualizationProps,
-} from "metabase/visualizations/types";
+} from "metabase/viz-core";
 import type { ClickObject, OrderByDirection } from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
-import { isFK, isID, isPK } from "metabase-lib/v1/types/utils/isa";
+import { HARD_ROW_LIMIT } from "metabase-lib/v1/queries/utils";
+import { isFK, isID, isPK, isString } from "metabase-lib/v1/types/utils/isa";
 import type {
   ColumnSettings,
   DatasetColumn,
@@ -70,6 +72,12 @@ import type {
   VisualizationSettings,
 } from "metabase-types/api";
 
+import {
+  getHighlightedTableCellKey,
+  getHighlightedTableCells,
+} from "../../visualizations/Table/get-highlighted-table-cells";
+
+import { withMantineTheme } from "./MantineTheme";
 import S from "./TableInteractive.module.css";
 import { TableInteractiveContextProvider } from "./TableInteractiveContext";
 import {
@@ -80,6 +88,15 @@ import { MiniBarCell } from "./cells/MiniBarCell";
 import { useResetWidthsOnColumnsChange } from "./hooks/use-reset-widths-on-columns-change";
 import { getInfoPopoversDisabled } from "./utils/get-info-popovers-disabled";
 import { tableThemeToDataGridTheme } from "./utils/table-theme-to-data-grid-theme";
+
+const getHighlightCellClassName = (
+  isHighlightingActive: boolean,
+  isHighlighted: boolean,
+) =>
+  cx({
+    [S.highlightedCell]: isHighlightingActive && isHighlighted,
+    [S.dimmedCell]: isHighlightingActive && !isHighlighted,
+  });
 
 const shouldWrap = (
   settings: VisualizationSettings,
@@ -106,8 +123,9 @@ interface TableProps extends VisualizationProps {
   rowIndexToPkMap?: Record<number, string>;
   isPivoted?: boolean;
   hasMetadataPopovers?: boolean;
+  hasColumnReordering?: boolean;
   question: Question;
-  mode: QueryClickActionsMode;
+  mode?: ClickActionsMode;
   scrollToColumn?: number;
   scrollToLastColumn?: boolean;
   theme: MantineTheme;
@@ -158,6 +176,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
     question,
     clicked,
     hasMetadataPopovers = true,
+    hasColumnReordering = false,
     mode,
     theme,
     scrollToColumn,
@@ -178,6 +197,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
     zoomedRowIndex,
     onZoomRow,
     tableFooterExtraButtons,
+    highlighted,
   }: TableProps,
   ref: Ref<HTMLDivElement>,
 ) {
@@ -190,6 +210,19 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
   const tc = useTranslateContent();
 
   const { rows, cols } = data;
+
+  const highlightedCellKeys = useMemo(() => {
+    const highlightedCells = getHighlightedTableCells(
+      series,
+      data,
+      highlighted,
+      isPivoted,
+    );
+
+    return new Set(highlightedCells.map(getHighlightedTableCellKey));
+  }, [series, data, highlighted, isPivoted]);
+
+  const isHighlightingActive = highlightedCellKeys.size > 0;
 
   const getColumnSortDirection = useMemo(() => {
     if (!isClientSideSortingEnabled) {
@@ -259,7 +292,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
 
           const value = tc(untranslatedValue);
 
-          return formatValue(value, {
+          const formattedValue = formatValue(value, {
             ...columnSettings,
             type: "cell",
             jsx: true,
@@ -267,22 +300,17 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
             clicked,
             collapseNewlines: !wrap,
           });
+
+          return wrap ? normalizeNewLines(formattedValue) : formattedValue;
         },
       );
 
       const plain: PlainCellFormatter<RowValue> = memoize(
-        (untranslatedValue, rowIndex) => {
-          const clicked = getCellClickedObject(columnIndex, rowIndex);
-          const value = tc(untranslatedValue);
-
-          return String(
-            formatValue(value, {
-              ...columnSettings,
-              type: "cell",
-              clicked,
-            }),
-          );
-        },
+        createPlainCellFormatter({
+          columnSettings,
+          translate: tc,
+          getClicked: (rowIndex) => getCellClickedObject(columnIndex, rowIndex),
+        }),
       );
 
       return {
@@ -317,6 +345,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
       );
       const clicked = getCellClickedObject(columnIndex, rowIndex);
 
+      // Unjustified type cast. FIXME
       const isLink = (formattedValue as any)?.type === ExternalLink;
       if (getIsCellClickable(clicked) && !isLink) {
         onVisualizationClick?.({
@@ -446,32 +475,32 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
   const handleAddColumnButtonClick = useMemo(() => {
     if (
       !question ||
-      !mode?.clickActions ||
+      !mode?.hasColumnShortcutActions ||
       !onVisualizationClick ||
       isPivoted
     ) {
       return undefined;
     }
 
-    for (const action of mode.clickActions) {
-      const res = action({
-        question,
-        clicked: {
-          columnShortcuts: true,
-          extraData: {
-            isRawTable,
-          },
+    const hasActions = mode.hasColumnShortcutActions({
+      question,
+      clicked: {
+        columnShortcuts: true,
+        extraData: {
+          isRawTable,
         },
-      });
-      if (res?.length > 0) {
-        return (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
-          onVisualizationClick({
-            columnShortcuts: true,
-            element: e.currentTarget,
-          });
-        };
-      }
+      },
+    });
+    if (!hasActions) {
+      return undefined;
     }
+
+    return (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
+      onVisualizationClick({
+        columnShortcuts: true,
+        element: e.currentTarget,
+      });
+    };
   }, [isRawTable, mode, onVisualizationClick, question, isPivoted]);
 
   const columnsOptions: ColumnOptions<RowValues, RowValue>[] = useMemo(() => {
@@ -482,7 +511,8 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
       const isMinibar = columnSettings["show_mini_bar"];
       const cellVariant = getBodyCellVariant(col);
       const isImage = columnSettings["view_as"] === "image";
-      const headerVariant = mode != null || isDashboard ? "light" : "outline";
+      const headerVariant =
+        hasColumnReordering || isDashboard ? "light" : "outline";
       const getBackgroundColor = memoize(
         (value: RowValue, rowIndex: number) =>
           settings["table._cell_background_getter"]?.(
@@ -518,17 +548,27 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
         name: translatedColumnName,
         accessorFn: (row: RowValues) => row[columnIndex],
         cellVariant,
-        getCellClassName: (value) =>
-          cx("test-TableInteractive-cellWrapper", {
-            [S.pivotedFirstColumn]: columnIndex === 0 && isPivoted,
-            [S.bodyCellWithImage]: isImage,
-            "test-Table-ID": value != null && isID(col),
-            "test-Table-FK": value != null && isFK(col),
-            "test-TableInteractive-cellWrapper--firstColumn": columnIndex === 0,
-            "test-TableInteractive-cellWrapper--lastColumn":
-              columnIndex === cols.length - 1,
-            "test-TableInteractive-emptyCell": value == null,
-          }),
+        getCellClassName: (value, rowIndex) =>
+          cx(
+            "test-TableInteractive-cellWrapper",
+            {
+              [S.pivotedFirstColumn]: columnIndex === 0 && isPivoted,
+              [S.bodyCellWithImage]: isImage,
+              "test-Table-ID": value != null && isID(col),
+              "test-Table-FK": value != null && isFK(col),
+              "test-TableInteractive-cellWrapper--firstColumn":
+                columnIndex === 0,
+              "test-TableInteractive-cellWrapper--lastColumn":
+                columnIndex === cols.length - 1,
+              "test-TableInteractive-emptyCell": value == null,
+            },
+            getHighlightCellClassName(
+              isHighlightingActive,
+              highlightedCellKeys.has(
+                getHighlightedTableCellKey({ rowIndex, columnIndex }),
+              ),
+            ),
+          ),
         header: () => {
           return (
             <HeaderCellWithColumnInfo
@@ -552,6 +592,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
         align,
         wrap,
         sortDirection,
+        sortingFn: isString(col) ? "alphanumeric" : undefined,
         enableResizing: true,
         getBackgroundColor,
         formatter: formatter.rich,
@@ -566,6 +607,9 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
           const value = getValue();
           const backgroundColor = getBackgroundColor(value, row?.index);
           const columnExtent = getColumnExtent(cols, rows, columnIndex);
+          const isHighlighted = highlightedCellKeys.has(
+            getHighlightedTableCellKey({ rowIndex: row.index, columnIndex }),
+          );
 
           return (
             <MiniBarCell
@@ -577,6 +621,10 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
               formatter={formatter.rich}
               extent={columnExtent}
               columnSettings={columnSettings}
+              className={getHighlightCellClassName(
+                isHighlightingActive,
+                isHighlighted,
+              )}
             />
           );
         };
@@ -588,7 +636,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
     theme,
     data,
     question,
-    mode,
+    hasColumnReordering,
     renderTableHeader,
     cols,
     getColumnSortDirection,
@@ -600,6 +648,8 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
     tableTheme,
     isDashboard,
     tc,
+    highlightedCellKeys,
+    isHighlightingActive,
   ]);
 
   const handleColumnResize = useCallback(
@@ -709,6 +759,31 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
     return isDashcardViewTable || isEmbeddingSdk ? width : undefined;
   }, [isDashcardViewTable, isEmbeddingSdk, width]);
 
+  const formatNumber = useNumberFormatter();
+
+  const formatRowsCountMessage = useCallback(
+    (total: number) =>
+      data.rows_truncated != null
+        ? getRowCountMessage(
+            { data: { rows_truncated: data.rows_truncated }, row_count: total },
+            formatNumber,
+          )
+        : ngettext(
+            msgid`${formatNumber(total)} row`,
+            `${formatNumber(total)} rows`,
+            total,
+          ),
+    [data.rows_truncated, formatNumber],
+  );
+
+  const formatPaginationMessage = useCallback(
+    ({ start, end, total }: { start: number; end: number; total: number }) =>
+      total >= HARD_ROW_LIMIT
+        ? t`Rows ${start + 1}-${end + 1} of first ${formatNumber(total)}`
+        : t`Rows ${start + 1}-${end + 1} of ${formatNumber(total)}`,
+    [formatNumber],
+  );
+
   const pinnedLeftColumnsCount = useMemo<number | undefined>(() => {
     if (isPivoted || !settings["table.freeze_columns"]) {
       return undefined;
@@ -809,7 +884,7 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
   }
 
   const isColumnReorderingDisabled =
-    (isDashboard || mode == null || isRawTable) && !isSettings;
+    (isDashboard || !hasColumnReordering || isRawTable) && !isSettings;
 
   return (
     <TableInteractiveContextProvider value={tableInteractiveContextValue}>
@@ -821,7 +896,8 @@ export const TableInteractiveInner = forwardRef(function TableInteractiveInner(
           {...tableProps}
           styles={dataGridStyles}
           showRowsCount={isDashboard}
-          rowsTruncated={data.rows_truncated}
+          formatRowsCountMessage={formatRowsCountMessage}
+          formatPaginationMessage={formatPaginationMessage}
           isColumnReorderingDisabled={isColumnReorderingDisabled}
           emptyState={emptyState}
           zoomedRowIndex={zoomedRowIndex}

@@ -17,10 +17,12 @@
    [metabase.driver.mysql]
    [metabase.driver.postgres]
    [metabase.embedding.settings :as embed.settings]
+   [metabase.embeddings.startup :as embeddings.startup]
    [metabase.events.core :as events]
    [metabase.initialization-status.core :as init-status]
    [metabase.llm.startup :as llm.startup]
    [metabase.logger.core :as logger]
+   [metabase.metrics.core :as metrics]
    [metabase.notification.core :as notification]
    [metabase.permissions.core :as perms]
    [metabase.plugins.core :as plugins]
@@ -105,6 +107,7 @@
   []
   (log/info "Metabase Shutting Down ...")
   (queue/stop-listeners!)
+  (startup/run-shutdown-logic!)
   (task/stop-scheduler!)
   (server/stop-web-server!)
   (tracing/shutdown!)
@@ -190,6 +193,7 @@
   (tracing/init!)
   ;; load any plugins as needed
   (plugins/load-plugins!)
+  (embeddings.startup/ensure-in-process-provider!)
   (init-status/set-progress! 0.3)
   (setting/validate-settings-formatting!)
   ;; startup database.  validates connection & runs any necessary migrations
@@ -228,6 +232,13 @@
       (setup/clear-token!))
     (init-status/set-progress! 0.7)
     (reconcile-sample-database!)
+    ;; Sample-content metrics are inserted via raw SQL and so never trigger Card after-insert hooks.
+    ;; Not critical to startup: log and carry on if it fails rather than aborting initialization.
+    (when-let [sample-db-id (sample-data/sample-database-id)]
+      (try
+        (metrics/sync-metric-dimensions-for-database! sample-db-id)
+        (catch Throwable e
+          (log/error e "Error syncing metric dimensions for the Sample Database"))))
     (init-status/set-progress! 0.8))
   (ensure-audit-db-installed!)
   (notification/seed-notification!)
@@ -279,7 +290,7 @@
     (when (config/config-bool :mb-jetty-join)
       (.join (server/instance)))
     (catch Throwable e
-      (log/errorf "Metabase Initialization FAILED: %s" (ex-message e))
+      (log/error e "Metabase Initialization FAILED")
       (System/exit 1))))
 
 (defn- run-cmd [cmd init-fn args]
@@ -293,6 +304,8 @@
     (when (not-empty mb-trace-str)
       (log/warn "WARNING: You have enabled namespace tracing, which could log sensitive information like db passwords.")
       (doseq [namespace (map symbol (str/split mb-trace-str #",\s*"))]
+        ;; tracing namespaces are supplied by the user at runtime
+        #_{:clj-kondo/ignore [:metabase/modules]}
         (try (require namespace)
              (catch Throwable _
                (throw (ex-info "A namespace you specified with MB_NS_TRACE could not be required" {:namespace namespace}))))

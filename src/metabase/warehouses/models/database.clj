@@ -16,18 +16,21 @@
    [metabase.models.serialization :as serdes]
    [metabase.permissions.core :as perms]
    [metabase.premium-features.core :as premium-features :refer [defenterprise]]
-   ;; Trying to use metabase.search would cause a circular reference ;_;
+   [metabase.search.core :as search]
    [metabase.search.spec :as search.spec]
    [metabase.secrets.core :as secret]
    [metabase.settings.core :as setting]
    [metabase.sync.schedules :as sync.schedules]
+   [metabase.sync.task.sync-databases-trigger :as sync-databases-trigger]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.quick-task :as quick-task]
+   [metabase.warehouses.db :as warehouses.db]
    [metabase.warehouses.provider-detection :as provider-detection]
+   [metabase.warehouses.schema]
    [metabase.warehouses.settings :as warehouses.settings]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
@@ -99,7 +102,7 @@
        :private  true} db-id->router-db-id
   (mdb/memoize-for-application-db
    (fn [db-id]
-     (t2/select-one-fn :router_database_id :model/Database :id db-id))))
+     (warehouses.db/router-database-id db-id))))
 
 (defmethod mi/can-read? :model/Database
   ;; Check if user can see this database's metadata.
@@ -161,21 +164,11 @@
   [_db-id]
   (mi/superuser?))
 
-(defenterprise reconcile-workspace-database-refs-before-delete!
-  "Hook called from the `:model/Database` before-delete. In workspaces mode this refuses
-   the delete (409) if any non-`:unprovisioned` `workspace_database` rows reference `db-id`,
-   and explicitly removes any `:unprovisioned` rows so the FK RESTRICT is satisfied. OSS
-   implementation is a no-op — fresh OSS installs have no workspace_database table, and
-   feature-off EE instances have nothing to reconcile."
-  metabase-enterprise.workspaces.models.workspace-database
-  [_db-id]
-  nil)
-
 (defenterprise mark-transforms-stale-on-database-delete!
   "Hook called from the `:model/Database` before-delete. Transforms whose `source_database_id`
    is about to be SET NULL by the FK action survive the delete (so the analyst can read the
    SQL/Python and rebuild against a new DB), but their dependency-analysis findings need to
-   be re-run so they surface on `/data-studio/dependency-diagnostics/broken`. OSS is a no-op
+   be re-run so they surface on `/monitor/dependency-diagnostics/broken`. OSS is a no-op
    (no dependencies module)."
   metabase-enterprise.dependencies.events
   [_db-id]
@@ -195,7 +188,7 @@
         (not is_attached_dwh)))
   ([_model pk]
    (and (can-write? pk)
-        (not (:is_attached_dwh (t2/select-one :model/Database :id pk))))))
+        (not (:is_attached_dwh (warehouses.db/database pk))))))
 
 (mu/defmethod mi/visible-filter-clause :model/Database
   [_model column-or-exp user-info permission-mapping]
@@ -247,9 +240,8 @@
   "(Re)schedule sync operation tasks for `database`. (Existing scheduled tasks will be deleted first.)"
   [database]
   (try
-    ;; this is done this way to avoid circular dependencies
     (when (should-auto-sync? database)
-      ((requiring-resolve 'metabase.sync.task.sync-databases/check-and-schedule-tasks-for-db!) database))
+      (sync-databases-trigger/check-and-schedule-tasks-for-db! database))
     (catch Throwable e
       (log/errorf "Error scheduling tasks for DB: %s" (ex-message e)))))
 
@@ -266,7 +258,7 @@
                                   (let [keys-remaining (-> test-details keys set)
                                         [_ removed _] (data/diff keys-remaining (-> details keys set))]
                                     (log/infof "Successfully connected, migrating to: %s" (pr-str {:keys keys-remaining :keys-removed removed}))
-                                    (t2/update! :model/Database (:id database) {:details test-details})
+                                    (warehouses.db/set-database-details! (:id database) test-details)
                                     test-details)
                                   (recur tail))
                                 ;; if we go through the list and we can't fine a working detail to test, keep original value
@@ -325,7 +317,7 @@
                  (log/info (u/format-color :blue "Provider detection: updating database {:id %d} from '%s' to '%s'"
                                            (:id database)
                                            (:provider_name database) provider))
-                 (t2/update! :model/Database (:id database) {:provider_name provider})
+                 (warehouses.db/set-database-provider-name! (:id database) provider)
                  (catch Throwable provider-e
                    (log/warnf "Error during provider detection for database {:id %d}: %s" (:id database) (ex-message provider-e)))))))
          (when (driver.conn/database-write-data-details lib-db)
@@ -352,15 +344,9 @@
   instances with 3k+ databases exist in the wild, and realizing every Database row (including details decryption)
   just to pick one per engine would defeat the point."
   []
-  (let [ids (map :id (t2/query {:select   [[:%min.id :id]]
-                                :from     [(t2/table-name :model/Database)]
-                                :where    [:and
-                                           [:= :is_audit false]
-                                           [:= :is_sample false]
-                                           [:= :router_database_id nil]]
-                                :group-by [:engine]}))]
+  (let [ids (map :id (warehouses.db/health-check-candidate-ids))]
     (when (seq ids)
-      (t2/select :model/Database :id [:in ids]))))
+      (warehouses.db/databases ids))))
 
 (defn check-health!
   "Health checks databases connected to metabase asynchronously using a thread pool. Only one database per unique
@@ -377,7 +363,7 @@
   "Unschedule any currently pending sync operation tasks for `database`."
   [database]
   (try
-    ((requiring-resolve 'metabase.sync.task.sync-databases/unschedule-tasks-for-db!) database)
+    (sync-databases-trigger/unschedule-tasks-for-db! database)
     (catch Throwable e
       (log/errorf "Error unscheduling tasks for DB: %s" (ex-message e)))))
 
@@ -420,6 +406,7 @@
     (cond-> database
       ;; TODO - this is only really needed for API responses. This should be a `hydrate` thing instead!
       (and driver
+           (:id database)
            (driver.impl/registered? driver))
       (assoc :features (driver.u/features driver (t2.realize/realize database)))
 
@@ -434,45 +421,17 @@
   {:pre [(pos-int? database-id)]}
   ;; Field has `define-before-delete` deleting children, but we'll delete them all at once because they refer same
   ;; database - iteratively, deleting those that no one depends on first
-  (let [table-ids-query ^:allow-subquery {:from   [(t2/table-name :model/Table)]
-                                          :select [:id]
-                                          :where  [:= :db_id database-id]}]
-    ;; Avoid issuing the DELETE when no Fields exist. Keep this check non-locking: locking an empty range on MySQL
-    ;; recreates the contention this guard avoids. A concurrent sync can race this check, but the foreign keys preserve
-    ;; integrity by rejecting the Database deletion if it introduces nested Fields after the transaction snapshot.
-    (when (t2/exists? :model/Field :table_id [:in table-ids-query])
-      (let [no-children-clause (if (= (mdb/db-type) :mysql)
-                                 ;; double-wrapped subquery to work around the MySQL restriction on selecting from the
-                                 ;; DELETE target
-                                 [:not-in :id ^:allow-subquery
-                                  {:select [:parent_id]
-                                   :from   [[^:allow-subquery
-                                             {:select [:parent_id]
-                                              :from   [(t2/table-name :model/Field)]
-                                              :where  [:and
-                                                       [:not= :parent_id nil]
-                                                       [:in :table_id table-ids-query]]}
-                                             :parent_fields]]}]
-                                 [:not [:exists ^:allow-subquery
-                                        {:select [1]
-                                         :from   [[(t2/table-name :model/Field) :child_field]]
-                                         :where  [:= :child_field.parent_id :metabase_field.id]}]])]
-        (loop []
-          (let [deleted (t2/query-one
-                         {:delete-from (t2/table-name :model/Field)
-                          :where       [:and
-                                        [:in :table_id table-ids-query]
-                                        no-children-clause]})]
-            (when (pos? deleted)
-              (recur))))))))
+  ;; Avoid issuing the DELETE when no Fields exist. Keep this check non-locking: locking an empty range on MySQL
+  ;; recreates the contention this guard avoids. A concurrent sync can race this check, but the foreign keys preserve
+  ;; integrity by rejecting the Database deletion if it introduces nested Fields after the transaction snapshot.
+  (when (warehouses.db/fields-exist-for-database? database-id)
+    (loop []
+      (let [deleted (warehouses.db/delete-childless-fields-for-database! database-id)]
+        (when (pos? deleted)
+          (recur))))))
 
 (t2/define-before-delete :model/Database
   [{id :id, driver :engine, :as database}]
-  ;; Reconcile workspace_database rows first: the FK is RESTRICT, so :unprovisioned
-  ;; rows must be cleaned up explicitly, and non-:unprovisioned rows must refuse the delete.
-  ;; Runs before any other cleanup so we don't partially unwind sync tasks / secrets
-  ;; / fields for a Database whose deletion is about to be refused.
-  (reconcile-workspace-database-refs-before-delete! id)
   ;; Mark transforms with this DB as source as stale so dependency-diagnostics re-analyzes
   ;; them after the row's gone. Must run BEFORE the FK SET NULL fires (which happens when
   ;; the database row is deleted below) so we can still resolve the affected transforms by
@@ -486,19 +445,13 @@
         (partition-all 1000)
         ;; mysql and h2 both do not support `returning`, so we do the correct thing for postgres and
         ;; then some sad version for those two
-        (t2/reducible-query (if (= :postgres (mdb/db-type))
-                              {:delete-from (t2/table-name :model/Card)
-                               :where       [:= :database_id id]
-                               :returning   [:id]}
-                              {:from   [(t2/table-name :model/Card)]
-                               :select [:id]
-                               :where  [:= :database_id id]})))
+        (if (= :postgres (mdb/db-type))
+          (warehouses.db/delete-cards-for-database-returning-ids-reducible id)
+          (warehouses.db/card-ids-for-database-reducible id)))
        (run! (fn [batch]
-               ;; damn circular deps
-               ((requiring-resolve 'metabase.search.core/delete!) :model/Card (map (comp str :id) batch)))))
+               (search/delete! :model/Card (map (comp str :id) batch)))))
   (when (not= :postgres (mdb/db-type))
-    (t2/query {:delete-from (t2/table-name :model/Card)
-               :where       [:= :database_id id]}))
+    (warehouses.db/delete-cards-for-database! id))
   (try
     (driver/notify-database-updated driver database)
     (catch Throwable e
@@ -508,7 +461,7 @@
   "This function maintains the invariant that only one database can have uploads_enabled=true."
   [db]
   (when (:uploads_enabled db)
-    (t2/update! :model/Database :uploads_enabled true {:uploads_enabled false :uploads_table_prefix nil :uploads_schema_name nil}))
+    (warehouses.db/disable-uploads-for-all-databases!))
   db)
 
 (defn- assert-router-database-id-not-mutated!
@@ -538,9 +491,10 @@
   (and (:is_audit database)
        (every? #(empty? (get database %)) details-keys)))
 
-(defn- validate-connection-hosts!
-  "Refuse to store details pointing at a private/internal network address. Enforcing this on the model, and not just on
-  the endpoints that test a connection, covers the routes that write a Database without ever testing it: serialization
+(defn- validate-connection-details!
+  "Refuse to store details pointing at a private/internal network address, or setting a connection parameter the driver
+  disallows (see [[driver/disallowed-connection-parameters]]). Enforcing this on the model, and not just on the
+  endpoints that test a connection, covers the routes that write a Database without ever testing it: serialization
   import, config-file provisioning, and destination databases.
 
   `keys-to-check` names which of [[details-keys]] to look at. An overlay is checked the way
@@ -555,8 +509,11 @@
         (doseq [k     keys-to-check
                 :let  [details (get database k)]
                 :when (map? details)]
-          (driver.u/validate-connection-hosts! engine (cond->> details
-                                                        (not= k :details) (merge (:details database)))))))))
+          (let [details (cond->> details
+                          (not= k :details) (merge (:details database)))]
+            (driver.u/validate-connection-hosts! engine details)
+            (when (driver.impl/registered? engine)
+              (driver.u/validate-connection-parameters! engine details))))))))
 
 (t2/define-before-update :model/Database
   [database]
@@ -567,11 +524,11 @@
     ;; driver. Otherwise validate only the ones being written, so an unrelated update to a grandfathered database does
     ;; not start failing. Either way the candidate is the merge, since an overlay is resolved against the `:details`
     ;; it accompanies rather than on its own.
-    (validate-connection-hosts! (or (:engine changes) (:engine original))
-                                (merge original changes)
-                                (if (contains? changes :engine)
-                                  details-keys
-                                  (filterv #(contains? changes %) details-keys))))
+    (validate-connection-details! (or (:engine changes) (:engine original))
+                                  (merge original changes)
+                                  (if (contains? changes :engine)
+                                    details-keys
+                                    (filterv #(contains? changes %) details-keys))))
   ;; Note: the "sample database may not be edited" policy is enforced at the API layer
   ;; ([[metabase.warehouses-rest.api]] PUT /:id), so internally-derived updates - e.g. the sample
   ;; database engine migration in [[metabase.sample-data.impl]] - can change the engine here.
@@ -629,7 +586,7 @@
 
 (t2/define-before-insert :model/Database
   [{:keys [details initial_sync_status engine], :as database}]
-  (validate-connection-hosts! engine database details-keys)
+  (validate-connection-details! engine database details-keys)
   (-> (merge {:is_full_sync true
               :is_on_demand false}
              database)
@@ -639,10 +596,6 @@
       secret/handle-incoming-client-secrets!
       maybe-disable-uploads-for-all-dbs!
       infer-db-schedules))
-
-(defmethod serdes/hash-fields :model/Database
-  [_database]
-  [:name :engine])
 
 (defmethod mi/exclude-internal-content-hsql :model/Database
   [_model & {:keys [table-alias]}]
@@ -656,7 +609,7 @@
   "Return the `Tables` associated with this `Database`."
   [{:keys [id]}]
   ;; TODO - do we want to include tables that should be `:hidden`?
-  (t2/select :model/Table :db_id id :active true {:order-by [[:%lower.display_name :asc]]}))
+  (warehouses.db/active-tables-for-database id))
 
 (methodical/defmethod t2/batched-hydrate [:model/Database :tables]
   "Batch hydrate `Tables` for the given `Database`."
@@ -665,19 +618,16 @@
    databases k
    #(group-by :db_id
               ;; TODO - do we want to include tables that should be `:hidden`?
-              (t2/select :model/Table
-                         :db_id  [:in (map :id databases)]
-                         :active true
-                         {:order-by [[:db_id :asc] [:%lower.display_name :asc]]}))
+              (warehouses.db/active-tables-for-databases (map :id databases)))
    :id
    {:default []}))
 
 (defn pk-fields
   "Return all the primary key `Fields` associated with this `database`."
   [{:keys [id]}]
-  (let [table-ids (t2/select-pks-set 'Table, :db_id id, :active true)]
+  (let [table-ids (warehouses.db/active-table-ids-for-database id)]
     (when (seq table-ids)
-      (t2/select 'Field, :table_id [:in table-ids], :semantic_type (mdb/isa :type/PK)))))
+      (warehouses.db/pk-fields-for-tables table-ids))))
 
 ;;; -------------------------------------------------- JSON Encoder --------------------------------------------------
 
@@ -687,9 +637,11 @@
   driver can't be clearly determined, this simply returns the default set (driver.u/default-sensitive-fields)."
   [database]
   (if (and (some? database) (not-empty database))
-    (let [driver (driver.u/database->driver database)]
+    (let [driver (if-let [engine (:engine database)]
+                   (keyword engine)
+                   (driver.u/database->driver (:id database)))]
       (if (some? driver)
-        (driver.u/sensitive-fields (driver.u/database->driver database))
+        (driver.u/sensitive-fields driver)
         driver.u/default-sensitive-fields))
     driver.u/default-sensitive-fields))
 
@@ -741,23 +693,26 @@
 ;;; ------------------------------------------------ Serialization ----------------------------------------------------
 (defmethod serdes/make-spec "Database"
   [_model-name _opts]
-  ;; Connection `details` are never exported: they hold warehouse credentials in plaintext, and serialized
-  ;; archives are not a safe place for secrets. Import is unconditional so existing archives still load.
+  ;; Connection details are never exported. Import is unconditional.
   (let [details-transform {:export-with-context (fn [_current _ _details] ::serdes/skip)
                            :import              identity}]
     {:copy      [:auto_run_queries :cache_field_values_schedule :caveats :dbms_version
-                 :description :engine :is_audit :is_attached_dwh :is_full_sync :is_on_demand :is_sample :is_stub
+                 :description :engine :is_audit :is_attached_dwh :is_full_sync :is_on_demand :is_stub
                  :metadata_sync_schedule :name :points_of_interest :provider_name :refingerprint :settings :timezone :uploads_enabled
                  :uploads_schema_name :uploads_table_prefix]
      :skip      [;; deprecated field
                  :cache_ttl]
-     :transform {:created_at          (serdes/date)
-                 :details             details-transform
+     :transform {:details             details-transform
                  :write_data_details  details-transform
                  :admin_details       details-transform
                  :creator_id          (serdes/fk :model/User)
                  :router_database_id  (serdes/fk :model/Database)
-                 :initial_sync_status {:export identity :import (constantly "complete")}}
+                 :initial_sync_status {:export identity :import (constantly "complete")}
+                 ;; Never trust an archive's `is_sample`: the real Sample Database is excluded from export
+                 ;; ([[warehouses.db/databases-for-serdes-reducible]]), so any incoming `is_sample true` is forged --
+                 ;; and marking an imported row as the sample DB would let it ride sample-only code paths. Import false.
+                 :is_sample           {:export-with-context (fn [_current _ _is-sample] ::serdes/skip)
+                                       :import              (constantly false)}}
      :defaults  {:auto_run_queries true
                  :is_attached_dwh  false
                  :is_audit         false
@@ -774,15 +729,8 @@
   false)
 
 (defmethod serdes/extract-query "Database"
-  [model-name {:keys [where]}]
-  (t2/reducible-select (keyword "model" model-name)
-                       {:where (cond-> [:and
-                                        (or where true)
-                                        [:= :router_database_id nil]
-                                        ;; never export the sample database, regardless of its driver
-                                        [:not= :is_sample true]]
-                                 (not *include-h2-in-extract?*)
-                                 (conj [:not= :engine "h2"]))}))
+  [_model-name {:keys [filter-column filter-ids]}]
+  (warehouses.db/databases-for-serdes-reducible filter-column filter-ids (boolean *include-h2-in-extract?*)))
 
 (defmethod serdes/entity-id "Database"
   [_ {:keys [name]}]
@@ -794,7 +742,7 @@
 
 (defmethod serdes/load-find-local "Database"
   [[{:keys [id]}]]
-  (t2/select-one :model/Database :name id))
+  (warehouses.db/database-by-name id))
 
 (defmethod serdes/storage-path "Database" [{:keys [name]} _]
   ;; directory for the database with same-named file inside.
@@ -807,40 +755,33 @@
     (throw (ex-info "h2 is not supported for serialization import"
                     {:engine (:engine ingested) :name (:name ingested)}))))
 
+(defn assert-sqlite-not-hosted!
+  "Refuse to import a SQLite Database on a hosted instance. SQLite is blocked as a warehouse on Metabase Cloud (only
+  the bundled Sample Database, which serdes never exports, is allowed); serialization import is the one write path
+  that never tests the connection, so without this an archive could persist a SQLite row whose attacker-chosen `:db`
+  path is later opened by sync. Mirrors [[assert-not-h2!]]. Self-hosted instances import SQLite normally."
+  [ingested]
+  (when (and (= :sqlite (keyword (:engine ingested)))
+             (premium-features/is-hosted?))
+    (throw (ex-info "SQLite is not available as a data warehouse on Metabase Cloud."
+                    {:engine (:engine ingested) :name (:name ingested) :status-code 400}))))
+
 (defmethod serdes/load-one! "Database"
   [ingested maybe-local]
   (assert-not-h2! ingested)
+  (assert-sqlite-not-hosted! ingested)
   (serdes/default-load-one! (cond-> ingested
                               (:details ingested)            (update :details driver/sanitize-db-details)
                               (:write_data_details ingested) (update :write_data_details driver/sanitize-db-details)
                               (:admin_details ingested)      (update :admin_details driver/sanitize-db-details))
                             maybe-local))
 
-(def ^:private metadata-export-perms
-  {:perms/view-data      :unrestricted
-   :perms/create-queries :query-builder})
-
-(defmethod serdes/metadata-query :model/Database
-  [model opts]
-  (t2/reducible-query {:select [:id :name :engine]
-                       :from   [[(t2/table-name model) :db]]
-                       :where  (serdes/metadata-query-filter model :db opts)}))
-
-(defmethod serdes/metadata-query-filter :model/Database
-  [_model alias {:keys [user-info database-ids]}]
-  (cond-> [:and
-           [:= (u/qualified-key alias :is_audit) false]
-           [:= (u/qualified-key alias :router_database_id) nil]
-           [:in (u/qualified-key alias :id)
-            (perms/visible-database-filter-select user-info metadata-export-perms)]]
-    (seq database-ids) (conj [:in (u/qualified-key alias :id) database-ids])))
-
 (def ^{:arglists '([table-id])} table-id->database-id
   "Retrieve the `Database` ID for the given table-id."
   (mdb/memoize-for-application-db
    (fn [table-id]
      {:pre [(integer? table-id)]}
-     (t2/select-one-fn :db_id :model/Table, :id table-id))))
+     (warehouses.db/table-database-id table-id))))
 
 ;;;; ------------------------------------------------- Search ----------------------------------------------------------
 

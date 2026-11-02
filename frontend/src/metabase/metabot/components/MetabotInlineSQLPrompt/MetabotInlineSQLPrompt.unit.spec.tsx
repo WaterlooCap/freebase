@@ -3,8 +3,8 @@ import type { ComponentProps } from "react";
 import { setupEnterprisePlugins } from "__support__/enterprise";
 import { setupUserMetabotPermissionsEndpoint } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
-import { createMockState } from "metabase/redux/store/mocks";
 import { createMockUser } from "metabase-types/api/mocks";
 
 import { MetabotInlineSQLPrompt } from "./MetabotInlineSQLPrompt";
@@ -52,7 +52,7 @@ describe("MetabotInlineSQLPrompt", () => {
     setup();
 
     expect(
-      screen.getByText(/To use SQL generation, please/),
+      await screen.findByText(/To use SQL generation, please/),
     ).toBeInTheDocument();
     expect(
       screen.queryByTestId("metabot-inline-sql-generate"),
@@ -62,11 +62,11 @@ describe("MetabotInlineSQLPrompt", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the admin message when the user cannot configure AI", () => {
+  it("shows the admin message when the user cannot configure AI", async () => {
     setup(undefined, { isAdmin: false });
 
     expect(
-      screen.getByText(
+      await screen.findByText(
         "Ask your admin to connect to a model to use SQL generation.",
       ),
     ).toBeInTheDocument();

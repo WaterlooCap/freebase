@@ -10,8 +10,7 @@
    [metabase.search.spec :as search.spec]
    [metabase.util.date-2 :as u.date]
    [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.i18n :refer [tru]]
-   [toucan2.core :as t2])
+   [metabase.util.i18n :refer [tru]])
   (:import
    (java.time LocalDate)))
 
@@ -20,11 +19,11 @@
 
 (defn visible-to?
   "Whether the search-model described by `spec` may be returned to the user described by `search-ctx`, per the spec's
-  `:visibility`: `:app-user` hides it from sandboxed or impersonated users, `:superuser` restricts it to superusers."
+  `:visibility`."
   [search-ctx {:keys [visibility] :as _spec}]
   (case visibility
     :all       true
-    :app-user  (not (search.permissions/sandboxed-or-impersonated-user? search-ctx))
+    :app-user  (not (search.permissions/sandboxed-impersonated-or-routed-user? search-ctx))
     :superuser (:is-superuser? search-ctx)))
 
 (def ^:private context-key->filter
@@ -53,7 +52,7 @@
   ;; :curated? is a precomputed flag every index row carries, so it isn't a per-spec attr; handle it
   ;; explicitly below rather than through the spec-attr gate (which would drop every model). It restricts
   ;; to the curatable models — which include `table`, so curated content stays visible where the
-  ;; verified-only filter dropped it — and matches the in-place engine for consistency.
+  ;; verified-only filter dropped it (BOT-1536) — and matches the in-place engine for consistency.
   (let [required (->> (remove-if-falsey search-ctx :archived?)
                       (#(dissoc % :curated?))
                       keys
@@ -132,9 +131,7 @@
     "only-mine"
     [:or
      [:= :collection.personal_owner_id current-user-id]
-     [:like :collection.location (format "/%d/%%" (t2/select-one-pk :model/Collection
-                                                                    :personal_owner_id [:= current-user-id]
-                                                                    :location          "/"))]]
+     [:like :collection.location (format "/%d/%%" (:id (collection/user->existing-personal-collection current-user-id)))]]
 
     "exclude-others"
     (let [with-filter #(personal-collections-where-clause
@@ -204,11 +201,15 @@
               ;; NOTE: we limit id-based search to only a subset of the models
               ;; TODO this should just become part of the model spec e.g. :search-by-id?
               [:in :search_index.model ["card" "dataset" "metric" "dashboard" "action"]]]]])
-    [[:dashboard-questions [:or
-                            ;; leverage the fact that only card-related models populate this attribute
-                            [:= nil :search_index.dashboard_id]
-                            (when (:include-dashboard-questions? search-context)
-                              [:not= [:inline 0] [:coalesce :search_index.dashboardcard_count [:inline 0]]])]]]
+    [[:dashboard-questions [:and
+                            [:or
+                             ;; leverage the fact that only card-related models populate this attribute
+                             [:= nil :search_index.dashboard_id]
+                             (when (:include-dashboard-questions? search-context)
+                               [:not= [:inline 0] [:coalesce :search_index.dashboardcard_count [:inline 0]]])]
+                            ;; documents with an exploration id are similar to a Dashboard Question - they aren't
+                            ;; searchable outside of their owning Exploration.
+                            [:= nil :search_index.exploration_id]]]]
     (for [{t :type :keys [context-key required-feature supported-value? field]}
           (vals (dissoc search.config/filters :id :native-query))
           :let [v (get search-context context-key)]]

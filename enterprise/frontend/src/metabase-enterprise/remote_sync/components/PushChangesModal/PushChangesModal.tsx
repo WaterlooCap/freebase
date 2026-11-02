@@ -41,6 +41,7 @@ export const PushChangesModal = ({
   ] = useExportChangesMutation();
 
   const { errorMessage } = useMemo(
+    // Unjustified type cast. FIXME
     () => parseSyncError(exportError as SyncError),
     [exportError],
   );
@@ -73,16 +74,21 @@ export const PushChangesModal = ({
       title={t`Push to Git`}
       onClose={onClose}
       size="lg"
-      padding="xl"
+      padding="xxl"
     >
-      <Box pt="md">
+      <Box pt="lg">
         {errorMessage && (
-          <Alert mb="md" variant="error" icon={<Icon name="warning" />}>
+          <Alert
+            size="compact"
+            mb="lg"
+            color="error"
+            icon={<Icon name="warning" />}
+          >
             {errorMessage}
           </Alert>
         )}
 
-        <Stack gap="lg">
+        <Stack gap="xl">
           <ChangesLists title={t`Changes to push`} />
 
           <CommitMessageSection
@@ -92,7 +98,7 @@ export const PushChangesModal = ({
         </Stack>
       </Box>
 
-      <Divider my="lg" />
+      <Divider my="xl" />
 
       <Box>
         <Group gap="sm" justify="end">

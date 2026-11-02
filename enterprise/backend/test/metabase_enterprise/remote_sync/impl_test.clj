@@ -14,6 +14,7 @@
    [metabase-enterprise.remote-sync.test-helpers :as test-helpers]
    [metabase.app-db.core :as app-db]
    [metabase.collections.models.collection :as collection]
+   [metabase.models.serialization.resolve :as resolve]
    [metabase.search.core :as search]
    [metabase.settings.core :as setting]
    [metabase.test :as mt]
@@ -23,7 +24,6 @@
 (use-fixtures :once (fixtures/initialize :db))
 
 ;; `reindex!` below is ok in a parallel test since it's not actually executing anything
-#_{:clj-kondo/ignore [:metabase/validate-deftest]}
 (use-fixtures :each (fn [f]
                       (mt/with-dynamic-fn-redefs [search/reindex! (constantly nil)]
                         (test-helpers/clean-remote-sync-state f))))
@@ -265,6 +265,21 @@
           (is (= {:kind "pulled" :count 3 :branch "main"} (:outcome task)))
           (is (= :successful (:status (t2/hydrate task :status)))))))))
 
+(deftest handle-task-result!-stores-conflict-categories-test
+  (testing "handle-task-result! records a conflict result's category set on the task as a vector"
+    (mt/with-model-cleanup [:model/RemoteSyncTask]
+      (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask
+                                             {:sync_task_type "import"
+                                              :initiated_by (mt/user->id :rasta)})]
+        (impl/handle-task-result! {:status    :conflict
+                                   :version   "abc123"
+                                   :conflicts #{"Snippets"}}
+                                  task-id)
+        (let [task (t2/select-one :model/RemoteSyncTask :id task-id)]
+          (is (some? (:ended_at task)))
+          (is (= "abc123" (:version task)))
+          (is (= ["Snippets"] (:conflicts task))))))))
+
 (deftest import!-proceeds-when-version-matches-with-force-test
   (testing "import! proceeds with import when source version matches last imported version but force? is true"
     (mt/with-model-cleanup [:model/Collection :model/RemoteSyncTask]
@@ -378,7 +393,8 @@
             (is (some #(str/includes? % "collection") (keys files-after-export)))
             (is (some #(str/includes? % "card") (keys files-after-export))))
           (t2/delete! :model/RemoteSyncTask :id (:id export-task))
-          (let [import-task (t2/with-connection [_conn (app-db/app-db) (t2/insert-returning-instance! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})])
+          (let [import-task (t2/with-connection [_conn (app-db/app-db)]
+                              (t2/insert-returning-instance! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)}))
                 import-result (impl/import! (source.p/snapshot mock-main) (:id import-task))]
             (remote-sync.task/complete-sync-task! (:id import-task))
             (is (= :success (:status import-result)))
@@ -395,22 +411,31 @@
               (is (= coll-id (:collection_id card))))))))))
 
 (deftest collection-cleanup-during-import-test
-  (testing "collection cleanup during import (tests clean-synced! private function)"
-    (let [import-task (t2/insert-returning-instance! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
-      (mt/with-temp [:model/Collection {coll1-id :id} {:name "Collection 1" :is_remote_synced true :entity_id "test-collection-1xxxx" :location "/"}
-                     :model/Collection {coll2-id :id} {:name "Collection 2" :is_remote_synced true :entity_id "test-collection-2xxxx" :location "/"}
-                     :model/Card {card1-id :id} {:name "Card 1" :collection_id coll1-id :entity_id "test-card-1xxxxxxxxxx"}
-                     :model/Card {card2-id :id} {:name "Card 2" :collection_id coll2-id :entity_id "test-card-2xxxxxxxxxx"}]
-        (let [test-files {"test-branch" {"collections/main/test_collection_1/test_collection_1.yaml"
-                                         (test-helpers/generate-collection-yaml "test-collection-1xxxx" "Test Collection 1")
-                                         "collections/main/test_collection_1/test_card_1.yaml"
-                                         (test-helpers/generate-card-yaml "test-card-1xxxxxxxxxx" "Test Card 1" "test-collection-1xxxx")}}
-              mock-main (test-helpers/create-mock-source :initial-files test-files :branch "test-branch")
-              result (impl/import! (source.p/snapshot mock-main) (:id import-task))]
-          (is (= :success (:status result)))
-          (is (t2/exists? :model/Card :id card1-id))
-          (is (not (t2/exists? :model/Collection :id coll2-id)))
-          (is (not (t2/exists? :model/Card :id card2-id))))))))
+  (testing "collection cleanup during import (remove-unsynced!)"
+    (mt/with-temp [:model/Collection {coll1-id :id} {:name "Collection 1" :is_remote_synced true :entity_id "test-collection-1xxxx" :location "/"}
+                   :model/Collection {coll2-id :id} {:name "Collection 2" :is_remote_synced true :entity_id "test-collection-2xxxx" :location "/"}
+                   :model/Card {card1-id :id} {:name "Card 1" :collection_id coll1-id :entity_id "test-card-1xxxxxxxxxx"}
+                   :model/Card {card2-id :id} {:name "Card 2" :collection_id coll2-id :entity_id "test-card-2xxxxxxxxxx"}]
+      (let [test-files {"test-branch" {"collections/main/test_collection_1/test_collection_1.yaml"
+                                       (test-helpers/generate-collection-yaml "test-collection-1xxxx" "Test Collection 1")
+                                       "collections/main/test_collection_1/test_card_1.yaml"
+                                       (test-helpers/generate-card-yaml "test-card-1xxxxxxxxxx" "Test Card 1" "test-collection-1xxxx")}}
+            mock-main  (test-helpers/create-mock-source :initial-files test-files :branch "test-branch")
+            new-task!  #(t2/insert-returning-instance! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
+        (testing "GHY-4019: by default the import blocks with a conflict rather than deleting unsynced local content (Card 2)"
+          (let [task   (new-task!)
+                result (impl/import! (source.p/snapshot mock-main) (:id task))]
+            (is (= :conflict (:status result)))
+            (is (t2/exists? :model/Card :id card2-id) "the unsynced local card is preserved")
+            (is (t2/exists? :model/Collection :id coll2-id))
+            ;; free the running-task guard so the next import can start
+            (remote-sync.task/complete-sync-task! (:id task))))
+        (testing "with force-deletion? the cleanup proceeds and removes content not present in the import"
+          (let [result (impl/import! (source.p/snapshot mock-main) (:id (new-task!)) :force-deletion? true)]
+            (is (= :success (:status result)))
+            (is (t2/exists? :model/Card :id card1-id))
+            (is (not (t2/exists? :model/Collection :id coll2-id)))
+            (is (not (t2/exists? :model/Card :id card2-id)))))))))
 
 (deftest import!-records-file-path-test
   (testing "import! records each entity's actual repo file_path on its RemoteSyncObject row, so later
@@ -491,7 +516,7 @@
                   (is (= :success (:status result)))
                   (is (pos? (count @progress-calls)))
                   (is (= task-id (:task-id (first @progress-calls))))
-                  (is (= 0.3 (:progress (first @progress-calls)))))))))))))
+                  (is (= 0.33 (:progress (first @progress-calls)))))))))))))
 
 (deftest import!-resets-remote-sync-object-table-test
   (testing "import! deletes and recreates RemoteSyncObject table with synced status"
@@ -1294,7 +1319,6 @@ source: |
   def shared_func():
       return 42
 entity_id: %s
-created_at: '2024-08-28T09:46:18.671622Z'
 serdes/meta:
 - id: %s
   model: PythonLibrary
@@ -1324,8 +1348,8 @@ serdes/meta:
                 (is (false? (remote-sync.settings/remote-sync-transforms))
                     "remote-sync-transforms should remain disabled when no transforms in remote")))))))))
 
-(deftest import!-disables-transforms-setting-when-no-transforms-in-branch-test
-  (testing "import! disables remote-sync-transforms setting when importing a branch without transforms"
+(deftest import!-keeps-transforms-setting-enabled-when-no-transforms-in-branch-test
+  (testing "import! never turns remote-sync-transforms off, even for a branch without transforms"
     (mt/with-model-cleanup [:model/RemoteSyncTask]
       (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
         (mt/with-temporary-setting-values [remote-sync-transforms true]
@@ -1337,8 +1361,8 @@ serdes/meta:
                   "remote-sync-transforms should be initially enabled")
               (let [result (impl/import! (source.p/snapshot mock-source) task-id)]
                 (is (= :success (:status result)))
-                (is (false? (remote-sync.settings/remote-sync-transforms))
-                    "remote-sync-transforms should be disabled when no transforms in remote")))))))))
+                (is (true? (remote-sync.settings/remote-sync-transforms))
+                    "remote-sync-transforms should stay enabled when no transforms in remote")))))))))
 
 (deftest import!-includes-all-optional-paths-regardless-of-settings-test
   (testing "import! always includes all optional paths (transforms, python-libraries, snippets)"
@@ -1368,16 +1392,33 @@ serdes/meta:
 (deftest import!-blocks-if-it-encounters-library-conflicts
   (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
     (t2/delete! :model/Collection :entity_id collection/library-entity-id)
-    (mt/with-temp [:model/Collection _ {:name "Test Library Collection"
-                                        :type "library"
-                                        :entity_id collection/library-entity-id
-                                        :location "/"}]
+    (mt/with-temp [:model/Collection {library-id :id} {:name "Test Library Collection"
+                                                       :type "library"
+                                                       :entity_id collection/library-entity-id
+                                                       :location "/"}
+                   :model/Collection _ {:name "Local Library Content" :location (str "/" library-id "/")}]
       (let [test-files {"main" {"collections/main/test_collection/test_collection.yaml"
                                 (test-helpers/generate-collection-yaml collection/library-entity-id "Another Library")}}
             mock-source (test-helpers/create-mock-source :initial-files test-files)
             result (impl/import! (source.p/snapshot mock-source) task-id)]
         (is (= :conflict (:status result)))
         (is (= #{"Library"} (:conflicts result)))))))
+
+(deftest import!-does-not-conflict-on-empty-library
+  (testing "First import into empty unsynced Library syncs it instead of reporting conflict"
+    (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
+      (t2/delete! :model/Collection :entity_id collection/library-entity-id)
+      (mt/with-temp [:model/Collection {library-id :id} {:name "Library"
+                                                         :type "library"
+                                                         :entity_id collection/library-entity-id
+                                                         :location "/"}]
+        (let [test-files {"main" {"collections/main/lib/lib.yaml"
+                                  (test-helpers/generate-collection-yaml collection/library-entity-id "Library"
+                                                                         :type "library" :is-remote-synced true)}}
+              mock-source (test-helpers/create-mock-source :initial-files test-files)
+              result (impl/import! (source.p/snapshot mock-source) task-id)]
+          (is (= :success (:status result)))
+          (is (true? (t2/select-one-fn :is_remote_synced :model/Collection :id library-id))))))))
 
 (deftest import!-blocks-if-it-encounters-snippet-conflicts
   (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
@@ -1403,10 +1444,11 @@ serdes/meta:
   (testing "when multiple conflict types exist, all are reported in the :conflicts set"
     (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
       (t2/delete! :model/Collection :entity_id collection/library-entity-id)
-      (mt/with-temp [:model/Collection _ {:name "Test Library Collection"
-                                          :type "library"
-                                          :entity_id collection/library-entity-id
-                                          :location "/"}
+      (mt/with-temp [:model/Collection {library-id :id} {:name "Test Library Collection"
+                                                         :type "library"
+                                                         :entity_id collection/library-entity-id
+                                                         :location "/"}
+                     :model/Collection _ {:name "Local Library Content" :location (str "/" library-id "/")}
                      :model/NativeQuerySnippet _ {:name "Test Snippet"}
                      :model/Transform _ {:name "Test Transform"}]
         (let [test-files {"main" {"collections/main/lib/lib.yaml"
@@ -1484,10 +1526,11 @@ serdes/meta:
   (testing "import! returns detailed conflict information in :conflict-details"
     (let [task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})]
       (t2/delete! :model/Collection :entity_id collection/library-entity-id)
-      (mt/with-temp [:model/Collection _ {:name "Test Library Collection"
-                                          :type "library"
-                                          :entity_id collection/library-entity-id
-                                          :location "/"}]
+      (mt/with-temp [:model/Collection {library-id :id} {:name "Test Library Collection"
+                                                         :type "library"
+                                                         :entity_id collection/library-entity-id
+                                                         :location "/"}
+                     :model/Collection _ {:name "Local Library Content" :location (str "/" library-id "/")}]
         (let [test-files {"main" {"collections/main/test_collection/test_collection.yaml"
                                   (test-helpers/generate-collection-yaml collection/library-entity-id "Another Library")}}
               mock-source (test-helpers/create-mock-source :initial-files test-files)
@@ -1499,6 +1542,26 @@ serdes/meta:
               "Should include detailed conflict information")
           (is (some #(= :library-conflict (:type %)) (:conflict-details result))
               "Should have library-conflict type in details"))))))
+
+(deftest remove-unsynced!-preserves-exploration-documents-test
+  (testing "remove-unsynced! does not delete local exploration documents in remote-synced collections (UXW-4091)"
+    (mt/with-temp [:model/Collection {coll-id :id} {:name "Synced"
+                                                    :location "/"
+                                                    :is_remote_synced true}
+                   :model/User {user-id :id} {:email "explo-preserve@example.com"}
+                   :model/Exploration {explo-id :id} {:name "Explo" :creator_id user-id}
+                   :model/Document {plain-doc-id :id} {:name "Plain Doc"
+                                                       :creator_id user-id
+                                                       :collection_id coll-id}
+                   :model/Document {explo-doc-id :id} {:name "Exploration Doc"
+                                                       :creator_id user-id
+                                                       :collection_id coll-id
+                                                       :exploration_id explo-id}]
+      (#'impl/remove-unsynced! [coll-id] {:by-entity-id {}})
+      (is (not (t2/exists? :model/Document :id plain-doc-id))
+          "plain doc should be deleted because it's not in the imported set")
+      (is (t2/exists? :model/Document :id explo-doc-id)
+          "exploration doc should be preserved by the :exploration_id condition"))))
 
 (deftest import!-transforms-conflict-test
   (testing "import! detects transforms conflict when local has transforms and import has transforms"
@@ -1663,8 +1726,8 @@ serdes/meta:
                                        remote-sync-token   "token"
                                        remote-sync-branch  "main"
                                        remote-sync-type    :read-write]
-      (with-redefs [guards/task-running?        (constantly true)
-                    source/source-from-settings (fn [& _] (test-helpers/create-mock-source))]
+      (mt/with-dynamic-fn-redefs [guards/task-running?        (constantly true)
+                                  source/source-from-settings (fn [& _] (test-helpers/create-mock-source))]
         (is (thrown-with-msg? Exception #"Remote sync task in progress"
                               (impl/async-import! "main" true {})))
         (is (zero? (t2/count :model/RemoteSyncTask))
@@ -1678,8 +1741,8 @@ serdes/meta:
                                        remote-sync-token   "token"
                                        remote-sync-branch  "main"
                                        remote-sync-type    :read-write]
-      (with-redefs [guards/task-running?        (constantly true)
-                    source/source-from-settings (fn [& _] (test-helpers/create-mock-source))]
+      (mt/with-dynamic-fn-redefs [guards/task-running?        (constantly true)
+                                  source/source-from-settings (fn [& _] (test-helpers/create-mock-source))]
         (is (thrown-with-msg? Exception #"Remote sync task in progress"
                               (impl/async-export! "main" true "msg")))
         (is (zero? (t2/count :model/RemoteSyncTask))
@@ -1695,8 +1758,8 @@ serdes/meta:
                                        remote-sync-type    :read-write]
       (let [mock-source      (test-helpers/create-mock-source)
             initial-branches @(:branches-atom mock-source)]
-        (with-redefs [guards/task-running?        (constantly true)
-                      source/source-from-settings (fn [& _] mock-source)]
+        (mt/with-dynamic-fn-redefs [guards/task-running?        (constantly true)
+                                    source/source-from-settings (fn [& _] mock-source)]
           (is (thrown-with-msg? Exception #"Remote sync task in progress"
                                 (impl/create-branch! "feature-x" "main")))
           (is (= "main" (remote-sync.settings/remote-sync-branch))
@@ -1714,8 +1777,8 @@ serdes/meta:
                                        remote-sync-type    :read-write]
       (let [mock-source      (test-helpers/create-mock-source)
             initial-branches @(:branches-atom mock-source)]
-        (with-redefs [guards/task-running?        (constantly true)
-                      source/source-from-settings (fn [& _] mock-source)]
+        (mt/with-dynamic-fn-redefs [guards/task-running?        (constantly true)
+                                    source/source-from-settings (fn [& _] mock-source)]
           (is (thrown-with-msg? Exception #"Remote sync task in progress"
                                 (impl/stash! "stash-branch" "stash message")))
           (is (= "main" (remote-sync.settings/remote-sync-branch))
@@ -1798,6 +1861,7 @@ serdes/meta:
    (reify source.p/SourceSnapshot
      (version [_] version)
      (list-files [_] [])
+     (list-dir [_ _] [])
      (read-file [_ _] nil)
      (open-commit [_]
        (reify source.p/CommitBuilder
@@ -1806,6 +1870,7 @@ serdes/meta:
          (replace-all! [_] nil)
          (empty-commit? [_] empty?)
          (finish-commit! [_ _] "written-version")
+         (finish-commit! [_ _ report-progress] (when report-progress (report-progress 0.8)) "written-version")
          (abort-commit! [_] nil))))))
 
 (defn- export-test-source
@@ -1822,15 +1887,15 @@ serdes/meta:
   (testing "when the remote advanced and the merge is clean, export! merges, advances the version, and reconciles local"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
       (let [reconciled (atom nil)]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [_ _ _ _]
-                                                         {:merged [{:path "collections/x.yaml" :content "x"}]
-                                                          :conflicts []
-                                                          :summary {:added 2 :updated 1 :removed 0}})
-                      impl/load-snapshot!              (fn [snap _ _ & {:keys [finalize!]}]
-                                                         (reset! reconciled (source.p/version snap))
-                                                         (when finalize! (finalize!)))]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge (fn [_ _ _ _ & _]
+                                                           {:merged [{:path "collections/x.yaml" :content "x"}]
+                                                            :conflicts []
+                                                            :summary {:added 2 :updated 1 :removed 0}})
+                                    impl/load-snapshot!              (fn [snap _ _ & {:keys [finalize!]}]
+                                                                       (reset! reconciled (source.p/version snap))
+                                                                       (when finalize! (finalize!)))]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :merge? true
                                      :source (export-test-source)
@@ -1845,15 +1910,15 @@ serdes/meta:
   (testing "when the merge matches the remote tip (nothing to push), export! folds in remote changes, reports a pull, and advances to the tip"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
       (let [reconciled (atom nil)]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [_ _ _ _]
-                                                         {:merged [{:path "collections/x.yaml" :content "x"}]
-                                                          :conflicts []
-                                                          :summary {:added 1 :updated 0 :removed 0}})
-                      impl/load-snapshot!              (fn [snap _ _ & {:keys [finalize!]}]
-                                                         (reset! reconciled (source.p/version snap))
-                                                         (when finalize! (finalize!)))]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge (fn [_ _ _ _ & _]
+                                                           {:merged [{:path "collections/x.yaml" :content "x"}]
+                                                            :conflicts []
+                                                            :summary {:added 1 :updated 0 :removed 0}})
+                                    impl/load-snapshot!              (fn [snap _ _ & {:keys [finalize!]}]
+                                                                       (reset! reconciled (source.p/version snap))
+                                                                       (when finalize! (finalize!)))]
           ;; the remote-tip snapshot reports the staged tree as identical (empty-commit? true), so the merge
           ;; pushes no commit
           (let [result (impl/export! (export-test-snapshot "remote-R" true) task-id "msg"
@@ -1872,15 +1937,15 @@ serdes/meta:
   (testing "when the same entity changed on both sides, export! returns :conflict without advancing the version or reconciling"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
       (let [reconciled? (atom false)]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [_ _ _ _]
-                                                         {:merged []
-                                                          :conflicts [{:key [["Card" "A"]]
-                                                                       :ours {:path "collections/a.yaml" :content "x"}
-                                                                       :theirs {:path "collections/a.yaml" :content "y"}}]
-                                                          :summary {:added 0 :updated 0 :removed 0}})
-                      impl/load-snapshot!              (fn [_ _ _] (reset! reconciled? true))]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge (fn [_ _ _ _ & _]
+                                                           {:merged []
+                                                            :conflicts [{:key [["Card" "A"]]
+                                                                         :ours {:path "collections/a.yaml" :content "x"}
+                                                                         :theirs {:path "collections/a.yaml" :content "y"}}]
+                                                            :summary {:added 0 :updated 0 :removed 0}})
+                                    impl/load-snapshot!              (fn [_ _ _] (reset! reconciled? true))]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :merge? true
                                      :source (export-test-source)
@@ -1901,13 +1966,13 @@ serdes/meta:
                                 (default-branch [_] "main")
                                 (snapshot [_] (export-test-snapshot "remote-R"))
                                 (snapshot-at [_ _] nil))]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [_ _ _ _]
-                                                         {:merged [{:path "collections/x.yaml" :content "x"}]
-                                                          :conflicts []
-                                                          :summary {:added 1 :updated 0 :removed 0}})
-                      impl/load-snapshot!              (fn [_ _ _ & _] (reset! reconciled? true))]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge (fn [_ _ _ _ & _]
+                                                           {:merged [{:path "collections/x.yaml" :content "x"}]
+                                                            :conflicts []
+                                                            :summary {:added 1 :updated 0 :removed 0}})
+                                    impl/load-snapshot!              (fn [_ _ _ & _] (reset! reconciled? true))]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :merge? true
                                      :source no-resolve-source
@@ -1920,8 +1985,8 @@ serdes/meta:
 (deftest export!-conflict-when-merge-base-unreachable-test
   (testing "when merge is requested but the merge base is gone (force-push/rebase), export! returns :conflict"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
-      (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                    spec/extract-entities-for-export (constantly [{:dummy true}])]
+      (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                  spec/extract-entities-for-export (constantly [{:dummy true}])]
         (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                    :merge? true
                                    :source (export-test-source)
@@ -1933,9 +1998,9 @@ serdes/meta:
   (testing "when the remote advanced and neither force? nor merge? is set, export! refuses without writing or merging"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
       (let [merged? (atom false)]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :source (export-test-source)
                                      :base-snapshot (export-test-snapshot "base-B"))]
@@ -1948,9 +2013,9 @@ serdes/meta:
   (testing "force? overwrites the remote wholesale (full export) even when it advanced — no merge"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
       (let [merged? (atom false)]
-        (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                      spec/exportable-entities         (constantly {"Card" [999999999]})  ; absent id -> empty extraction; routing is what's under test
-                      source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/exportable-entities         (constantly {"Card" [999999999]})  ; absent id -> empty extraction; routing is what's under test
+                                    source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :force? true
                                      :source (export-test-source)
@@ -1967,9 +2032,9 @@ serdes/meta:
         ;; remote-sync.task/last-version equals the snapshot version, so not diverged. No dirty RemoteSyncObject
         ;; rows and the snapshot lists no files, so the normal export path is a no-op success — and crucially
         ;; never reaches the merge path.
-        (with-redefs [remote-sync.task/last-version    (constantly "remote-R")
-                      spec/extract-entities-for-export (constantly [{:dummy true}])
-                      source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "remote-R")
+                                    spec/extract-entities-for-export (constantly [{:dummy true}])
+                                    source/compute-merge             (fn [& _] (reset! merged? true) {:merged [] :conflicts [] :summary {}})]
           (let [result (impl/export! (export-test-snapshot "remote-R") task-id "msg"
                                      :source (export-test-source)
                                      :base-snapshot (export-test-snapshot "remote-R"))]
@@ -1980,34 +2045,63 @@ serdes/meta:
 
 (deftest preview-export-merge-not-diverged-test
   (testing "preview reports no changes when the remote has not advanced"
-    (with-redefs [remote-sync.task/last-version (constantly "remote-R") ; == snapshot version
-                  source/source-from-settings   (constantly (export-test-source))]
+    (mt/with-dynamic-fn-redefs [remote-sync.task/last-version (constantly "remote-R") ; == snapshot version
+                                source/source-from-settings   (constantly (export-test-source))]
       (is (= {:diverged? false :clean? true :conflicts [] :summary {:added 0 :updated 0 :removed 0}
               :force-push-casualties {:deleted [] :overwritten []}}
              (impl/preview-export-merge "main"))))))
 
 (deftest preview-export-merge-clean-test
   (testing "preview reports a clean merge with a summary when changes don't conflict"
-    (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                  source/source-from-settings      (constantly (export-test-source))
-                  spec/extract-entities-for-export (constantly [{:dummy true}])
-                  source/preview-merge             (fn [_ _ _ _]
-                                                     {:clean? true :conflicts []
-                                                      :summary {:added 1 :updated 0 :removed 0}})]
+    (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                source/source-from-settings      (constantly (export-test-source))
+                                spec/exportable-entities         (constantly {"Card" [1]})
+                                spec/extract-entities-for-export (constantly [{:dummy true}])
+                                source/preview-merge             (fn [_ _ _ _]
+                                                                   {:clean? true :conflicts []
+                                                                    :summary {:added 1 :updated 0 :removed 0}})]
       (is (= {:diverged? true :clean? true :conflicts [] :summary {:added 1 :updated 0 :removed 0}}
              (impl/preview-export-merge "main"))))))
 
 (deftest preview-export-merge-conflict-test
   (testing "preview reports conflicts when the same entity changed on both sides"
-    (with-redefs [remote-sync.task/last-version    (constantly "base-B")
-                  source/source-from-settings      (constantly (export-test-source))
-                  spec/extract-entities-for-export (constantly [{:dummy true}])
-                  source/preview-merge             (fn [_ _ _ _]
-                                                     {:clean? false :conflicts ["Card A (collections/a.yaml)"]
-                                                      :summary {:added 0 :updated 0 :removed 0}})]
+    (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                source/source-from-settings      (constantly (export-test-source))
+                                spec/exportable-entities         (constantly {"Card" [1]})
+                                spec/extract-entities-for-export (constantly [{:dummy true}])
+                                source/preview-merge             (fn [_ _ _ _]
+                                                                   {:clean? false :conflicts ["Card A (collections/a.yaml)"]
+                                                                    :summary {:added 0 :updated 0 :removed 0}})]
       (is (= {:diverged? true :clean? false
               :conflicts ["Card A (collections/a.yaml)"]
               :summary {:added 0 :updated 0 :removed 0}}
+             (impl/preview-export-merge "main"))))))
+
+(deftest preview-export-merge-streams-extraction-test
+  (testing "preview hands the extraction stream to the merge unrealized and walks the targets once"
+    (let [walks    (atom 0)
+          stream   (eduction (map identity) [{:dummy true}])
+          received (atom nil)]
+      (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                  source/source-from-settings      (constantly (export-test-source))
+                                  spec/exportable-entities         (fn [] (swap! walks inc) {"Card" [1]})
+                                  spec/extract-entities-for-export (fn [_targets] stream)
+                                  source/preview-merge             (fn [s _ _ _]
+                                                                     (reset! received s)
+                                                                     {:clean? true :conflicts []
+                                                                      :summary {:added 0 :updated 0 :removed 0}})]
+        (impl/preview-export-merge "main")
+        (is (identical? stream @received))
+        (is (= 1 @walks))))))
+
+(deftest preview-export-merge-nothing-exportable-test
+  (testing "preview reports no changes but still diverged when nothing is exportable, without extracting"
+    (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                source/source-from-settings      (constantly (export-test-source))
+                                spec/exportable-entities         (constantly {})
+                                spec/extract-entities-for-export (fn [& _] (throw (ex-info "must not extract" {})))]
+      (is (= {:diverged? true :clean? true :conflicts [] :summary {:added 0 :updated 0 :removed 0}
+              :force-push-casualties {:deleted [] :overwritten []}}
              (impl/preview-export-merge "main"))))))
 
 (deftest preview-export-merge-history-rewritten-test
@@ -2018,10 +2112,11 @@ serdes/meta:
                            (default-branch [_] "main")
                            (snapshot [_] (export-test-snapshot "remote-R"))
                            (snapshot-at [_ _] nil))]
-      (with-redefs [remote-sync.task/last-version        (constantly "gone-base")
-                    source/source-from-settings          (constantly no-base-source)
-                    spec/extract-entities-for-export     (constantly [{:dummy true}])
-                    source/force-push-casualties-no-base (fn [_ _] {:deleted ["Audit Logs"] :overwritten []})]
+      (mt/with-dynamic-fn-redefs [remote-sync.task/last-version        (constantly "gone-base")
+                                  source/source-from-settings          (constantly no-base-source)
+                                  spec/exportable-entities             (constantly {"Card" [1]})
+                                  spec/extract-entities-for-export     (constantly [{:dummy true}])
+                                  source/force-push-casualties-no-base (fn [_ _] {:deleted ["Audit Logs"] :overwritten []})]
         (let [result (impl/preview-export-merge "main")]
           (is (true? (:diverged? result)))
           (is (false? (:clean? result)))
@@ -2040,17 +2135,17 @@ serdes/meta:
                                               :model_name "Local Card" :status_changed_at :%now}
                    :model/RemoteSyncObject _ {:model_type "Card" :model_id 9992 :status "synced"
                                               :model_name "Remote Card" :status_changed_at :%now}]
-      (with-redefs [source/compute-merge (fn [_ _ _ _]
-                                           {:merged   [{:path "collections/x.yaml" :content "y"}]
-                                            :conflicts []
-                                            :summary  {:added 1 :updated 0 :removed 0}})
-                    ;; simulate the load marking everything synced (what the import insert does), then running
-                    ;; the in-transaction finalize (restore-dirty + set-version)
-                    impl/load-snapshot!  (fn [_ _ _ & {:keys [finalize!]}]
-                                           (t2/update! :model/RemoteSyncObject
-                                                       :model_id [:in [9991 9992]]
-                                                       {:status "synced"})
-                                           (when finalize! (finalize!)))]
+      (mt/with-dynamic-fn-redefs [source/compute-merge (fn [_ _ _ _ & _]
+                                                         {:merged   [{:path "collections/x.yaml" :content "y"}]
+                                                          :conflicts []
+                                                          :summary  {:added 1 :updated 0 :removed 0}})
+                                  ;; simulate the load marking everything synced (what the import insert does), then running
+                                  ;; the in-transaction finalize (restore-dirty + set-version)
+                                  impl/load-snapshot!  (fn [_ _ _ & {:keys [finalize!]}]
+                                                         (t2/update! :model/RemoteSyncObject
+                                                                     :model_id [:in [9991 9992]]
+                                                                     {:status "synced"})
+                                                         (when finalize! (finalize!)))]
         (let [result (impl/import! (export-test-snapshot "remote-R") task-id
                                    :merge? true
                                    :base-snapshot (export-test-snapshot "base-B"))]
@@ -2068,13 +2163,13 @@ serdes/meta:
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "import"}
                    :model/RemoteSyncObject _ {:model_type "Card" :model_id 8881 :status "delete"
                                               :model_name "Deleted Card" :status_changed_at :%now}]
-      (with-redefs [source/compute-merge (fn [_ _ _ _]
-                                           {:merged [] :conflicts [] :summary {:added 0 :updated 0 :removed 0}})
-                    ;; simulate the load wiping and not re-inserting the deleted entity's row, then the
-                    ;; in-transaction finalize (restore-dirty + set-version)
-                    impl/load-snapshot!  (fn [_ _ _ & {:keys [finalize!]}]
-                                           (t2/delete! :model/RemoteSyncObject :model_id 8881)
-                                           (when finalize! (finalize!)))]
+      (mt/with-dynamic-fn-redefs [source/compute-merge (fn [_ _ _ _ & _]
+                                                         {:merged [] :conflicts [] :summary {:added 0 :updated 0 :removed 0}})
+                                  ;; simulate the load wiping and not re-inserting the deleted entity's row, then the
+                                  ;; in-transaction finalize (restore-dirty + set-version)
+                                  impl/load-snapshot!  (fn [_ _ _ & {:keys [finalize!]}]
+                                                         (t2/delete! :model/RemoteSyncObject :model_id 8881)
+                                                         (when finalize! (finalize!)))]
         (let [result (impl/import! (export-test-snapshot "remote-R") task-id
                                    :merge? true
                                    :base-snapshot (export-test-snapshot "base-B"))]
@@ -2090,16 +2185,16 @@ serdes/meta:
                                               :model_name "Locally Deleted" :status_changed_at :%now}
                    :model/RemoteSyncObject _ {:model_type "Card" :model_id 9992 :status "synced"
                                               :model_name "Remote Card" :status_changed_at :%now}]
-      (with-redefs [source/compute-merge (fn [_ _ _ _]
-                                           {:merged   [{:path "collections/remote.yaml" :content "y"}]
-                                            :conflicts []
-                                            :summary  {:added 0 :updated 1 :removed 0}})
-                    ;; simulate the load: the remote change is applied (9992 stays synced), the deleted
-                    ;; entity's row is wiped (the load doesn't re-create it), then the finalize runs.
-                    impl/load-snapshot! (fn [_ _ _ & {:keys [finalize!]}]
-                                          (t2/delete! :model/RemoteSyncObject :model_id 8881)
-                                          (t2/update! :model/RemoteSyncObject :model_id 9992 {:status "synced"})
-                                          (when finalize! (finalize!)))]
+      (mt/with-dynamic-fn-redefs [source/compute-merge (fn [_ _ _ _ & _]
+                                                         {:merged   [{:path "collections/remote.yaml" :content "y"}]
+                                                          :conflicts []
+                                                          :summary  {:added 0 :updated 1 :removed 0}})
+                                  ;; simulate the load: the remote change is applied (9992 stays synced), the deleted
+                                  ;; entity's row is wiped (the load doesn't re-create it), then the finalize runs.
+                                  impl/load-snapshot! (fn [_ _ _ & {:keys [finalize!]}]
+                                                        (t2/delete! :model/RemoteSyncObject :model_id 8881)
+                                                        (t2/update! :model/RemoteSyncObject :model_id 9992 {:status "synced"})
+                                                        (when finalize! (finalize!)))]
         (let [result (impl/import! (export-test-snapshot "remote-R") task-id
                                    :merge? true
                                    :base-snapshot (export-test-snapshot "base-B"))]
@@ -2115,13 +2210,13 @@ serdes/meta:
 (deftest import!-merge-conflict-test
   (testing "a local-only merge with a genuine conflict returns :conflict and does not load"
     (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "import"}]
-      (with-redefs [source/compute-merge (fn [_ _ _ _]
-                                           {:merged []
-                                            :conflicts [{:key [["Card" "A"]]
-                                                         :ours {:path "collections/a.yaml" :content "x"}
-                                                         :theirs {:path "collections/a.yaml" :content "z"}}]
-                                            :summary {:added 0 :updated 0 :removed 0}})
-                    impl/load-snapshot!  (fn [_ _ _] (throw (ex-info "should not load on conflict" {})))]
+      (mt/with-dynamic-fn-redefs [source/compute-merge (fn [_ _ _ _ & _]
+                                                         {:merged []
+                                                          :conflicts [{:key [["Card" "A"]]
+                                                                       :ours {:path "collections/a.yaml" :content "x"}
+                                                                       :theirs {:path "collections/a.yaml" :content "z"}}]
+                                                          :summary {:added 0 :updated 0 :removed 0}})
+                                  impl/load-snapshot!  (fn [_ _ _] (throw (ex-info "should not load on conflict" {})))]
         (let [result (impl/import! (export-test-snapshot "remote-R") task-id
                                    :merge? true
                                    :base-snapshot (export-test-snapshot "base-B"))]
@@ -2137,3 +2232,109 @@ serdes/meta:
                                  :base-snapshot nil)]
         (is (= :conflict (:status result)))
         (is (str/includes? (:message result) "rewritten"))))))
+
+;;; ------------------------------- merging pull and push extract the library once -------------------------------
+
+(defn- merge-extraction-probe
+  "Stubs for a merging sync that record how the extraction reaches `compute-merge`. Returns
+  `{:targets :stream :walks :received :stubs}`: `walks` counts target walks; `received` captures the targets the
+  extraction was built from, the stream `compute-merge` got, its `:total`, and whether the serdes cache was
+  bound; `stream` is the marker eduction the extraction stub hands back."
+  []
+  (let [walks    (atom 0)
+        received (atom {})
+        targets  {"Card" [1 2 3] "Collection" [4]}
+        stream   (eduction (map identity) [{:dummy true}])]
+    {:targets  targets
+     :stream   stream
+     :walks    walks
+     :received received
+     :stubs    {:exportable-entities (fn [] (swap! walks inc) targets)
+                :extract             (fn [t] (swap! received assoc :targets t) stream)
+                :compute-merge       (fn [s _ _ _ & {:keys [total]}]
+                                       (swap! received assoc
+                                              :stream  s
+                                              :total   total
+                                              :cached? (some? resolve/*export-resolver*))
+                                       {:merged [] :conflicts [] :summary {:added 0 :updated 0 :removed 0}})
+                :load-snapshot!      (fn [_ _ _ & {:keys [finalize!]}] (when finalize! (finalize!)))}}))
+
+(defn- assert-extracted-once
+  [{:keys [targets stream walks received]}]
+  (is (= 1 @walks) "the dependency walk runs once")
+  (is (identical? targets (:targets @received)) "the extraction is built from the walked targets")
+  (is (identical? stream (:stream @received)) "the merge receives the extraction stream unrealized")
+  (is (= (spec/exportable-entity-count targets) (:total @received)) ":total is the count of the same targets")
+  (is (true? (:cached? @received)) "the merge extracts under serdes/with-cache"))
+
+(deftest import!-merge-extracts-once-test
+  (testing "a merging pull walks the targets once and hands the merge the unrealized extraction with its total"
+    (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "import"}]
+      (let [{{:keys [exportable-entities extract compute-merge load-snapshot!]} :stubs :as probe} (merge-extraction-probe)]
+        (mt/with-dynamic-fn-redefs [spec/exportable-entities         exportable-entities
+                                    spec/extract-entities-for-export extract
+                                    source/compute-merge             compute-merge
+                                    impl/load-snapshot!              load-snapshot!]
+          (is (= :success (:status (impl/import! (export-test-snapshot "remote-R") task-id
+                                                 :merge? true
+                                                 :base-snapshot (export-test-snapshot "base-B")))))
+          (assert-extracted-once probe))))))
+
+(deftest export!-merge-extracts-once-test
+  (testing "a merging push walks the targets once and hands the merge the unrealized extraction with its total"
+    (mt/with-temp [:model/RemoteSyncTask {task-id :id} {:sync_task_type "export"}]
+      (let [{{:keys [exportable-entities extract compute-merge load-snapshot!]} :stubs :as probe} (merge-extraction-probe)]
+        (mt/with-dynamic-fn-redefs [remote-sync.task/last-version    (constantly "base-B")
+                                    spec/exportable-entities         exportable-entities
+                                    spec/extract-entities-for-export extract
+                                    source/compute-merge             compute-merge
+                                    impl/load-snapshot!              load-snapshot!]
+          (is (= :success (:status (impl/export! (export-test-snapshot "remote-R") task-id "msg"
+                                                 :merge? true
+                                                 :source (export-test-source)
+                                                 :base-snapshot (export-test-snapshot "base-B")))))
+          (assert-extracted-once probe))))))
+
+;;; --------------------------------- Table/Field user-settings inline round trip ---------------------------------
+
+(deftest table-and-field-user-settings-round-trip-test
+  (testing "a full export writes one file per published Table with user edits -- the TableUserSettings entity at
+            the Table's own path, inlining its edited Fields' settings under :fields -- and a later import
+            restores it, pruning field edits the file no longer lists"
+    (mt/with-temporary-setting-values [remote-sync-type :read-write]
+      (mt/with-temp [:model/Database   {db-id :id}    {:name "test-db"}
+                     :model/Collection {coll-id :id}  {:name "RS" :is_remote_synced true :location "/"}
+                     :model/Table      {table-id :id} {:name "Test Table" :db_id db-id
+                                                       :is_published true :collection_id coll-id}
+                     :model/Field      {f1-id :id}    {:name "F1" :table_id table-id :base_type :type/Text}
+                     :model/Field      {f2-id :id}    {:name "F2" :table_id table-id :base_type :type/Text}]
+        (t2/insert! :model/TableUserSettings {:table_id table-id :display_name "Renamed"})
+        (t2/insert! :model/FieldUserSettings {:field_id f1-id :description "curated"})
+        (let [export-task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "export" :initiated_by (mt/user->id :rasta)})
+              mock-source    (test-helpers/create-mock-source)
+              export-result  (impl/export! (source.p/snapshot mock-source) export-task-id "Test export" :force? true)]
+          (is (= :success (:status export-result)))
+          (remote-sync.task/complete-sync-task! export-task-id)
+          (let [files       (get @(:files-atom mock-source) "main")
+                table-files (into {} (filter (fn [[p _]] (str/includes? p "test_table"))) files)]
+            (is (= 1 (count table-files))
+                (str "expected exactly one Table-related file, got " (keys table-files)))
+            (let [[path content] (first table-files)]
+              (is (str/ends-with? path "test_table.yaml")
+                  "the file lives at the Table's own path, not a ___tableusersettings/___fieldusersettings file")
+              (is (not (str/includes? path "___tableusersettings")))
+              (is (not (str/includes? path "___fieldusersettings")))
+              (is (str/includes? content "Renamed"))
+              (is (str/includes? content "fields:"))
+              (is (str/includes? content "curated"))))
+          (t2/insert! :model/FieldUserSettings {:field_id f2-id :description "stale"})
+          (t2/update! :model/TableUserSettings :table_id table-id {:display_name "Local Edit"})
+          (let [import-task-id (t2/insert-returning-pk! :model/RemoteSyncTask {:sync_task_type "import" :initiated_by (mt/user->id :rasta)})
+                import-result  (impl/import! (source.p/snapshot mock-source) import-task-id :force? true)]
+            (is (= :success (:status import-result)))
+            (is (= "Renamed" (:display_name (t2/select-one :model/TableUserSettings :table_id table-id)))
+                "T's user display_name is restored from the import")
+            (is (= "curated" (:description (t2/select-one :model/FieldUserSettings :field_id f1-id)))
+                "F1's edited description is present")
+            (is (not (t2/exists? :model/FieldUserSettings :field_id f2-id))
+                "F2's stale local row, absent from the imported file's :fields, is gone")))))))

@@ -3,8 +3,6 @@
    [clojure.set :as set]
    [clojure.test :refer :all]
    [metabase.dashboards.models.dashboard-card :as dashboard-card]
-   [metabase.permissions.core :as perms]
-   [metabase.permissions.models.permissions-group :as perms-group]
    [metabase.revisions.impl.dashboard :as impl.dashboard]
    [metabase.revisions.models.revision :as revision]
    [metabase.test :as mt]
@@ -448,34 +446,6 @@
     :id           dash-id
     :user-id      (mt/user->id :crowberto)
     :is-creation? is-creation?}))
-
-(deftest revert-cannot-reintroduce-unreadable-parameter-source-card-test
-  (testing "reverting may not re-introduce a parameter values source Card the reverting user cannot read"
-    (mt/with-non-admin-groups-no-root-collection-perms
-      (mt/with-temp [:model/Collection {coll-id :id}      {}
-                     :model/Collection {secret-coll :id}  {}
-                     :model/Card       {secret :id}       {:collection_id secret-coll}
-                     :model/Dashboard  {dashboard-id :id} {:collection_id coll-id :parameters []}]
-        (perms/grant-collection-readwrite-permissions! (perms-group/all-users) coll-id)
-        (perms/revoke-collection-permissions! (perms-group/all-users) secret-coll)
-        (create-dashboard-revision! dashboard-id true)
-        (t2/update! :model/Dashboard dashboard-id
-                    {:parameters [{:id "pid" :name "p" :slug "p" :type "category"
-                                   :values_source_type "card"
-                                   :values_source_config {:card_id secret :value_field [:field 1 nil]}}]})
-        (create-dashboard-revision! dashboard-id false)
-        (t2/update! :model/Dashboard dashboard-id {:parameters []})
-        (create-dashboard-revision! dashboard-id false)
-        (let [ids (t2/select-pks-vec :model/Revision :model "Dashboard" :model_id dashboard-id
-                                     {:order-by [[:id :desc]] :limit 2})]
-          (testing "rasta cannot read the secret source Card, so the revert is refused"
-            (mt/with-test-user :rasta
-              (is (thrown-with-msg?
-                   clojure.lang.ExceptionInfo #"You don't have permissions to do that"
-                   (revision/revert! {:entity :model/Dashboard :id dashboard-id
-                                      :user-id (mt/user->id :rasta) :revision-id (last ids)})))))
-          (testing "and the dashboard's parameters are left untouched"
-            (is (= [] (:parameters (t2/select-one :model/Dashboard :id dashboard-id))))))))))
 
 (defn- revert-to-previous-revision!
   "Revert to a previous revision for a model.

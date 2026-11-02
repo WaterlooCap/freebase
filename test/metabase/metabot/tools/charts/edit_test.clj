@@ -40,7 +40,7 @@
     (let [mp (mt/metadata-provider)
           charts-state {"chart-456" {:chart-id "chart-456"
                                      :queries [(lib/native-query mp "SELECT * FROM orders")]}}]
-      (doseq [new-type [:pie :table :scatter :area :sunburst]]
+      (doseq [new-type [:pie :table :scatter :area :sunburst :treemap :boxplot]]
         (let [{:keys [result]} (edit-chart/edit-chart
                                 {:chart-id "chart-456"
                                  :new-chart-type new-type
@@ -64,6 +64,71 @@
           {:chart-id "nonexistent"
            :new-chart-type :bar
            :charts-state {}})))))
+
+(deftest ^:parallel edit-chart-result-carries-query-id-test
+  (testing "edit-chart's :result carries the source chart's query-id and query"
+    ;; Regression: without :query-id on the result, `chart->xml` renders an empty
+    ;; `query-id=""` attribute and `agent/extract-charts` (which requires BOTH
+    ;; :chart-id and :query-id — see commit 6d5721c5853) never captures the edited
+    ;; chart into `:charts` state. `create-chart` includes :query-id; `edit-chart`
+    ;; must match. But :query-id alone isn't enough: `extract-charts` rebuilds
+    ;; `:queries` from :query, so omitting :query overwrites the chart's real
+    ;; queries with `[nil]` the moment `update-memory` runs (see the next test).
+    (let [mp           (mt/metadata-provider)
+          query        (lib/native-query mp "SELECT * FROM orders")
+          charts-state {"chart-abc" {:chart_id                "chart-abc"
+                                     :query_id                "query-xyz"
+                                     :queries                 [query]
+                                     :visualization_settings  {:chart_type :bar}}}
+          {:keys [result]} (edit-chart/edit-chart
+                            {:chart-id       "chart-abc"
+                             :new-chart-type :line
+                             :charts-state   charts-state})]
+      (is (contains? result :query-id))
+      (is (= "query-xyz" (:query-id result)))
+      (is (= query (:query result))))))
+
+(deftest ^:parallel edit-chart-falls-back-to-caller-resolved-query-test
+  (testing "uses the :query param when the chart's own :queries is empty"
+    ;; Regression: edit-chart-tool resolves the query from either the chart or
+    ;; queries-state (`(or (first (:queries chart)) (get queries-state
+    ;; (:query_id chart)))`), but edit-chart itself only looked at charts-state.
+    ;; A chart with a :query_id but no :queries (the query lives in
+    ;; current-queries-state) produced :query-id set and :query nil on the
+    ;; result — the same [nil]-in-memory bug the tests above cover, just via a
+    ;; different path. The caller now passes its resolved query through.
+    (let [mp           (mt/metadata-provider)
+          query        (lib/native-query mp "SELECT * FROM orders")
+          charts-state {"chart-abc" {:chart_id "chart-abc"
+                                     :query_id "query-xyz"
+                                     :queries  []
+                                     :visualization_settings {:chart_type :bar}}}
+          {:keys [result]} (edit-chart/edit-chart
+                            {:chart-id       "chart-abc"
+                             :new-chart-type :line
+                             :charts-state   charts-state
+                             :query          query})]
+      (is (= {:query-id "query-xyz" :query query}
+             (select-keys result [:query-id :query]))))))
+
+(deftest ^:parallel edit-chart-result-survives-update-memory-test
+  (testing "update-memory stores the edited chart's real query, not [nil]"
+    (let [mp           (mt/metadata-provider)
+          query        (lib/native-query mp "SELECT * FROM orders")
+          charts-state {"chart-abc" {:chart_id                "chart-abc"
+                                     :query_id                "query-xyz"
+                                     :queries                 [query]
+                                     :visualization_settings  {:chart_type :bar}}}
+          {:keys [result]} (edit-chart/edit-chart
+                            {:chart-id       "chart-abc"
+                             :new-chart-type :line
+                             :charts-state   charts-state})
+          memory (#'agent/update-memory
+                  {:state {:charts charts-state}}
+                  [{:type :tool-output
+                    :result {:structured-output result}}])
+          stored (get-in memory [:state :charts (:chart-id result)])]
+      (is (= query (get-in stored [:queries 0]))))))
 
 (deftest edit-chart-of-constructed-query-test
   (mt/with-current-user (test.users/user->id :crowberto)
@@ -92,6 +157,7 @@
           construct-result (tools.construct/construct-notebook-query-tool
                             {:query         external-query
                              :title         "Counts by category"
+                             :description   "Counts by category."
                              :visualization {:chart_type "bar"}})
           query-id (get-in construct-result [:structured-output :query-id])
           query (get-in construct-result [:structured-output :query])
@@ -106,7 +172,8 @@
           ;; (3) call the edit-chart-tool which uses the shared memory
           (let [edit-result (tools.charts/edit-chart-tool {:chart_id chart-id
                                                            :new_viz_settings {:chart_type "pie"}
-                                                           :title "Counts by category"})
+                                                           :title "Counts by category"
+                                                           :description "Counts by category."})
                 new-chart-id (get-in edit-result [:structured-output :chart-id])
                 new-chart-in-memory (get (tools.shared/current-charts-state) new-chart-id)]
             (is (= :pie
@@ -141,6 +208,7 @@
             result (tools.construct/construct-notebook-query-tool
                     {:query         external-query
                      :title         "Test chart"
+                     :description   "Test chart description."
                      :visualization {:chart_type "bar"}})
             query (get-in result [:structured-output :query])]
         (testing "order-by inner clause is now an aggregation reference, not :sum"
@@ -185,6 +253,7 @@
             result (tools.construct/construct-notebook-query-tool
                     {:query         external-query
                      :title         "Test chart"
+                     :description   "Test chart description."
                      :visualization {:chart_type "bar"}})]
         (testing "tool returns a clear, agent-targeted error rather than producing a chart"
           ;; The outer `construct-notebook-query-tool` catches the ex-info and returns
@@ -218,6 +287,7 @@
             result (tools.construct/construct-notebook-query-tool
                     {:query         external-query
                      :title         "Test chart"
+                     :description   "Test chart description."
                      :visualization {:chart_type "bar"}})
             query (get-in result [:structured-output :query])
             breakout-field (get-in query [:stages 0 :breakout 0])]
@@ -273,6 +343,7 @@
             construct-result (tools.construct/construct-notebook-query-tool
                               {:query         external-query
                                :title         "Test chart"
+                               :description   "Test chart description."
                                :visualization {:chart_type "bar"}})
             query (get-in construct-result [:structured-output :query])
             breakout-field (get-in query [:stages 0 :breakout 0])

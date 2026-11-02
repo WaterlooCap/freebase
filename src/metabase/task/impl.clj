@@ -79,7 +79,7 @@
       (log/info "Initializing task" (u/format-color 'green (name k)) (u/emoji "📆"))
       (f k)
       (catch Throwable e
-        (log/errorf "Error initializing task %s: %s" k (ex-message e))))))
+        (log/errorf e "Error initializing task %s" k)))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                          STARTING/STOPPING SCHEDULER                                           |
@@ -133,14 +133,17 @@
         (reset-errored-triggers! new-scheduler)
         (init-tasks!)))))
 
-;;; this is a function mostly to facilitate testing.
-(defn- disable-scheduler? []
-  (some-> (env/env :mb-disable-scheduler) Boolean/parseBoolean))
+(defn scheduler-disabled?
+  "Whether the task scheduler is explicitly disabled via the `MB_DISABLE_SCHEDULER` env var. When true the
+  scheduler is still initialized (in standby mode, so the Quartz job store stays writable) but is never
+  started, so no triggers ever fire on this node."
+  []
+  (boolean (some-> (env/env :mb-disable-scheduler) Boolean/parseBoolean)))
 
 (defn start-scheduler!
   "Start the task scheduler. Tasks do not run before calling this function."
   []
-  (if (disable-scheduler?)
+  (if (scheduler-disabled?)
     (log/warn  "Metabase task scheduler disabled. Scheduled tasks will not be ran.")
     (do (init-scheduler!)
         (qs/start (scheduler))
@@ -354,6 +357,7 @@
          (log/error msg# (ex-message e#))
          (throw (JobExecutionException. msg# e# true))))))
 
+;; this is the sanctioned metabase.task/defjob wrapper; it must expand to the quartzite macro
 #_{:clj-kondo/ignore [:discouraged-var]}
 (defmacro defjob
   "Like `clojurewerkz.quartzite.task/defjob` but with a log context and an OpenTelemetry tracing span."

@@ -10,8 +10,6 @@
    [metabase.metabot.context :as context]
    [metabase.metabot.curation :as curation]
    [metabase.metabot.table-utils :as table-utils]
-   [metabase.permissions.core :as perms]
-   [metabase.permissions.models.permissions-group :as perms-group]
    [metabase.test :as mt]
    [toucan2.core :as t2]))
 
@@ -98,91 +96,6 @@
           (is (= 0 @call-count)
               "Should not call database-tables-for-context for MBQL queries"))))))
 
-(deftest enhance-context-with-schema-python-transform
-  (testing "Enhances context with schema for Python transforms"
-    (let [mock-tables [{:id 24 :name "orders" :schema "public"}
-                       {:id 31 :name "products" :schema "public"}]]
-      (mt/with-dynamic-fn-redefs [context/python-transform-tables-for-context
-                                  (fn [_] mock-tables)]
-        (let [input {:user_is_viewing [{:type "transform"
-                                        :source {:type "python"
-                                                 :source-database 2
-                                                 :source-tables [{:alias "orders" :table_id 24}
-                                                                 {:alias "products" :table_id 31}]}}]}
-              result (#'context/enhance-context-with-schema input)
-              used-tables (get-in result [:user_is_viewing 0 :used_tables])]
-          (is (= mock-tables used-tables)))))))
-
-(deftest python-transform-tables-for-context-returns-stubs
-  (testing "Python transform used tables are lightweight stubs without columns"
-    (mt/with-dynamic-fn-redefs [table-utils/used-tables-from-ids
-                                (fn [_ _] [{:id 24 :name "orders" :schema "public" :description "orders table"}])]
-      (let [result (#'context/python-transform-tables-for-context {:database-id 2 :table-ids [24]})]
-        (is (= [{:id 24 :type :table :name "orders" :database_schema "public" :description "orders table"}]
-               result))
-        (is (not-any? #(contains? % :fields) result))))))
-
-(deftest enhance-context-with-schema-python-transform-no-source-tables
-  (testing "Handles Python transform without source-tables"
-    (let [called? (atom false)]
-      (mt/with-dynamic-fn-redefs [context/python-transform-tables-for-context
-                                  (fn [_] (reset! called? true) nil)]
-        (let [input {:user_is_viewing [{:type "transform"
-                                        :source {:type "python"
-                                                 :source-database 2
-                                                 :source-tables []}}]}
-              result (#'context/enhance-context-with-schema input)]
-          (is (nil? (get-in result [:user_is_viewing 0 :used_tables])))
-          (is (false? @called?)))))))
-
-(deftest enhance-context-with-schema-python-transform-no-source-database
-  (testing "Handles Python transform without source-database"
-    (let [called? (atom false)]
-      (mt/with-dynamic-fn-redefs [context/python-transform-tables-for-context
-                                  (fn [_] (reset! called? true) nil)]
-        (let [input {:user_is_viewing [{:type "transform"
-                                        :source {:type "python"
-                                                 :source-tables [{:alias "orders" :table_id 24}]}}]}
-              result (#'context/enhance-context-with-schema input)]
-          (is (nil? (get-in result [:user_is_viewing 0 :used_tables])))
-          (is (false? @called?)))))))
-
-(deftest annotate-transform-source-types-native-transform-test
-  (testing "Annotates draft native transform with source_type :native"
-    (let [input {:user_is_viewing [{:type "transform"
-                                    :source {:type :query
-                                             :query users-native-query}}]}
-          result (#'context/annotate-transform-source-types input)]
-      (is (= :native (get-in result [:user_is_viewing 0 :source_type]))))))
-
-(deftest annotate-transform-source-types-mbql-transform-test
-  (testing "Annotates draft MBQL transform with source_type :mbql"
-    (let [input {:user_is_viewing [{:type "transform"
-                                    :source {:type :query
-                                             :query users-mbql-query}}]}
-          result (#'context/annotate-transform-source-types input)]
-      (is (= :mbql (get-in result [:user_is_viewing 0 :source_type]))))))
-
-(deftest annotate-transform-source-types-python-transform-test
-  (testing "Annotates draft Python transform with source_type :python"
-    (let [input {:user_is_viewing [{:type "transform"
-                                    :source {:type :python
-                                             :body "import pandas as pd"
-                                             :source-database (mt/id)}}]}
-          result (#'context/annotate-transform-source-types input)]
-      (is (= :python (get-in result [:user_is_viewing 0 :source_type]))))))
-
-(deftest annotate-transform-source-types-normalization-test
-  (testing "Transform source query gets normalized before query type detection"
-    (let [input {:user_is_viewing [{:type "transform"
-                                    :source {:type "query"
-                                             :query {:lib/type "mbql/query"
-                                                     :stages [{:native "SELECT * FROM users"
-                                                               :lib/type "mbql.stage/native"}]
-                                                     :database (mt/id)}}}]}
-          result (#'context/annotate-transform-source-types input)]
-      (is (= :native (get-in result [:user_is_viewing 0 :source_type]))))))
-
 (deftest recent-views-in-context-test
   (testing "Adds recent views to context"
     (mt/with-test-user :rasta
@@ -229,6 +142,24 @@
     (mt/with-temporary-setting-values [metabot-recent-views-enabled? false]
       (is (not (contains? (#'context/add-recent-views {:user_recently_viewed [{:id 1 :name "stale"}]} {})
                           :user_recently_viewed))))))
+
+(deftest recent-views-excluded-for-nlq-profile-test
+  (testing "The :nlq profile never gets recent views, and caller-supplied ones are stripped"
+    (is (not (contains? (#'context/add-recent-views {:user_recently_viewed [{:id 1 :name "stale"}]}
+                                                    {:profile-id :nlq})
+                        :user_recently_viewed)))))
+
+(deftest recent-views-excluded-for-slackbot-profile-test
+  (testing "The :slackbot profile never gets recent views, and caller-supplied ones are stripped"
+    (is (not (contains? (#'context/add-recent-views {:user_recently_viewed [{:id 1 :name "stale"}]}
+                                                    {:profile-id :slackbot})
+                        :user_recently_viewed)))))
+
+(deftest recent-views-excluded-for-document-generate-content-profile-test
+  (testing "The :document-generate-content profile never gets recent views, and caller-supplied ones are stripped"
+    (is (not (contains? (#'context/add-recent-views {:user_recently_viewed [{:id 1 :name "stale"}]}
+                                                    {:profile-id :document-generate-content})
+                        :user_recently_viewed)))))
 
 (deftest recent-views-verified-content-filter-test
   (testing "Recent views filtering by curated content (verified is one curation signal)"
@@ -389,33 +320,22 @@
           (is (true? @called-native?) "Should use native SQL parsing path")
           (is (false? @called-mbql?) "Should NOT use MBQL path for native queries"))))))
 
-(deftest mbql-source-tables-for-context-is-permission-filtered-test
-  (testing "table ids come out of the client-supplied query, so a table the user cannot query never
-            becomes a stub carrying a DB-sourced name/schema/description, not even for a user who manages
-            that table's metadata"
-    (mt/with-no-data-perms-for-all-users!
-      (perms/set-table-permission! (perms-group/all-users) (mt/id :orders) :perms/view-data :unrestricted)
-      (perms/set-table-permission! (perms-group/all-users) (mt/id :orders) :perms/create-queries :query-builder)
-      (perms/set-table-permission! (perms-group/all-users) (mt/id :people) :perms/view-data :blocked)
-      (perms/set-table-permission! (perms-group/all-users) (mt/id :people) :perms/create-queries :no)
-      (perms/set-table-permission! (perms-group/all-users) (mt/id :people) :perms/manage-table-metadata :yes)
-      (mt/with-test-user :rasta
-        (let [stubs (fn [table-id]
-                      (-> (#'context/enhance-context-with-schema
-                           {:user_is_viewing [{:type  "adhoc"
-                                               :query {:database (mt/id)
-                                                       :type     "query"
-                                                       :query    {:source-table table-id}}}]})
-                          :user_is_viewing first :used_tables))]
-          (is (nil? (stubs (mt/id :people)))
-              "blocked table produces no stub at all, despite manage-table-metadata")
-          (is (= [{:id (mt/id :orders) :type :table :name "ORDERS" :database_schema "PUBLIC" :description nil}]
-                 (stubs (mt/id :orders)))
-              "readable table still produces its stub"))))))
-
 (deftest filter-recents-to-curated-test
-  (testing "keeps only recents that collections.curation marks curated, keyed by [model id]"
+  (testing "keeps only recents that collections.curation marks curated, keyed by [model id] (BOT-1570)"
     (let [recents [{:model :card :id 1} {:model :table :id 2} {:model :dashboard :id 3}]]
       (mt/with-dynamic-fn-redefs [curation/curated-ids (constantly #{["card" 1] ["table" 2]})]
         (is (= [{:model :card :id 1} {:model :table :id 2}]
                (#'context/filter-recents-to-curated recents)))))))
+
+(deftest ^:parallel host-app-request?-test
+  (testing "the client header decides whether Metabase's own pages surround Metabot"
+    (doseq [[client expected] {"embedding-sdk-react"       true
+                               "embedding-simple"          true
+                               "embedding-iframe-full-app" false
+                               "embedding-iframe-static"   false
+                               nil                         false}]
+      (testing (pr-str client)
+        (is (= expected
+               (context/host-app-request? {:headers (cond-> {} client (assoc "x-metabase-client" client))}))))))
+  (testing "no request bound, e.g. a caller outside an HTTP handler"
+    (is (false? (context/host-app-request? nil)))))

@@ -33,7 +33,7 @@ export function EmojiPicker({
   const searchValue = controlledSearch ?? search;
 
   return (
-    <Paper data-testid="emoji-picker" radius="sm">
+    <Paper data-testid="emoji-picker" radius="xs">
       <Picker.Root
         className={S.root}
         emojibaseUrl={EMOJIBASE_URL}
@@ -104,6 +104,7 @@ function Emoji({
       component="button"
       w="2rem"
       fz="1.25rem"
+      // Unjustified type cast. FIXME
       ref={ref as React.RefObject<HTMLButtonElement>}
       data-emoji={emoji.emoji}
       styles={{

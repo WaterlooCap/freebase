@@ -13,14 +13,14 @@ allowed-tools: Read, Grep, Bash, Glob, Skill
 
 **Primary standard: the [`typescript-write`](../typescript-write/SKILL.md) skill.** Load it first — it defines the authoring rules this review enforces, alongside `frontend/CLAUDE.md` and `docs/developers-guide/frontend.md`.
 
-Adherence to `typescript-write` is the **highest-priority** review dimension: rank any violation of its provisions above all other findings. Treat its **no-`any` hard rule** (no explicit *or* implicit `any` in new code) as **blocking**, and verify it with the LSP rather than by eye.
+Adherence to `typescript-write` is the **highest-priority** review dimension: rank any violation of its provisions above all other findings. Treat its **no-`any` hard rule** (no explicit *or* implicit `any` in new code) as **blocking**. Use TypeScript LSP tools to inspect inferred types when available; otherwise rely on type-checking and linting.
 
 Review in this priority order:
 
-1. **Violations of [`typescript-write`](../typescript-write/SKILL.md) provisions** — no-`any`, type tightening, type modeling, null/undefined handling, naming, structure, comments. Highest priority; block on the no-`any` rule.
+1. **Violations of [`typescript-write`](../typescript-write/SKILL.md) provisions** — no-`any`, type tightening, type modeling, function signatures, null/undefined handling, naming, structure, comments. Highest priority; block on the no-`any` rule. Apply conditional guidance in context: explain the unsupported type guarantee or concrete readability problem, rather than treating every preference as a blanket ban.
 2. Compliance with `frontend/CLAUDE.md`.
 3. Readability and maintainability.
-4. Appropriate test coverage.
+4. Appropriate test coverage. For internal typed callers, avoid requesting tests solely for inputs the type system excludes. External API data, deserialised values, storage and JavaScript callers can violate annotations: test runtime validation and nontrivial assumptions at those boundaries. Types do not replace behavioural, security or data-integrity tests.
 
 ## Blind spots — act as the missing reviewer
 
@@ -31,3 +31,4 @@ These rarely surface in team reviews, so this skill should raise them. They are 
 - **Security.** Evaluate potential security issues in new code.
 - **Bundle size.** Flag new large dependencies, default imports from icon or util libs, and heavy modules imported at route-load time.
 - **Analytics.** User-facing flows should emit tracking events. If a PR adds a new flow (button, modal, navigation) without a tracking event, ask whether one is expected.
+- **Public API surface** (embedding SDK). Consumers should be able to use public signatures and name types they need to import. Export those types deliberately and document public behaviour, including `@deprecated` for deprecated APIs; a referenced structural type does not automatically need its own named export.

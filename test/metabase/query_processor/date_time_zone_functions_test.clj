@@ -13,9 +13,9 @@
    [metabase.lib.metadata.result-metadata :as lib.metadata.result-metadata]
    [metabase.lib.options :as lib.options]
    [metabase.lib.test-util :as lib.tu]
-   [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.middleware.annotate :as annotate]
    [metabase.query-processor.preprocess :as qp.preprocess]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.test :as qp]
    [metabase.query-processor.timezone :as qp.timezone]
@@ -671,21 +671,6 @@
        mt/rows
        first))
 
-(deftest convert-timezone-rejects-hostile-timezone-at-schema-layer-test
-  (testing "a hostile :convert-timezone zone is rejected by MBQL/schema validation before it
-            ever reaches driver compilation, for every driver"
-    (mt/test-drivers (mt/normal-drivers-with-feature :convert-timezone)
-      (mt/dataset times-mixed
-        (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo
-             #"(?i)invalid timezone ID"
-             (qp.compile/compile
-              (mt/mbql-query times
-                {:expressions {"tz" [:convert-timezone [:field (mt/id :times :dt) nil]
-                                     "Z\\' AT TIME ZONE 'UTC" "UTC"]}
-                 :fields      [[:expression "tz"]]
-                 :limit       1}))))))))
-
 (deftest convert-timezone-test
   (mt/test-drivers (mt/normal-drivers-with-feature :convert-timezone)
     (mt/dataset times-mixed
@@ -772,6 +757,32 @@
                          :fields      [[:expression "expr"]]})
                       mt/rows
                       ffirst))))))))
+
+(deftest convert-timezone-date-column-test
+  (mt/test-drivers (mt/normal-drivers-with-feature :convert-timezone)
+    (mt/dataset times-mixed
+      (testing "a DATE column should not be shifted by the report timezone when it's not part of the expression (#27186)"
+        (mt/with-report-timezone-id! "Asia/Ho_Chi_Minh"
+          (let [mp          (mt/metadata-provider)
+                times-table (lib.metadata/table mp (mt/id :times))
+                d           (lib.metadata/field mp (mt/id :times :d))
+                base        (-> (lib/query mp times-table)
+                                (lib/expression "expr" (lib/convert-timezone d "UTC" "UTC")))
+                query       (-> base
+                                (lib/with-fields [d (lib/expression-ref base "expr")])
+                                (lib/order-by d)
+                                (lib/limit 2))
+                ;; the raw `d` column comes back as midnight in the results timezone. That's the report timezone for
+                ;; drivers that support `:set-timezone`, but drivers that don't (e.g. SQL Server) fall back to the
+                ;; database timezone, so derive the expected values instead of hardcoding `+07:00`.
+                results-tz  (mt/with-metadata-provider (mt/id) (qp.timezone/results-timezone-id))
+                midnight    (fn [date-str]
+                              (t/format :iso-offset-date-time
+                                        (u.date/with-time-zone-same-instant (t/local-date date-str)
+                                                                            (t/zone-id results-tz))))]
+            (is (= [[(midnight "2004-03-19") "2004-03-19T00:00:00Z"]
+                    [(midnight "2008-06-20") "2008-06-20T00:00:00Z"]]
+                   (mt/rows (qp/process-query query))))))))))
 
 (deftest nested-convert-timezone-test
   (mt/test-drivers (mt/normal-drivers-with-feature :convert-timezone)

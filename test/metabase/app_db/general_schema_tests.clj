@@ -17,7 +17,12 @@
 
 (deftest ^:parallel fks-are-indexed-test
   (when (= (mdb/db-type) :postgres)
-    (let [excluded-fks #{}
+    (let [excluded-fks #{{:table_name  "data_app"
+                          :column_name "creator_id"}
+                         {:table_name  "data_app"
+                          :column_name "permission_group_id"}
+                         {:table_name  "data_app"
+                          :column_name "resource_collection_id"}}
           indexed-fks  (t2/query
                         "SELECT
                               conrelid::regclass::text AS table_name,

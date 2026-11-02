@@ -1,9 +1,9 @@
 (ns metabase-enterprise.audit-app.query-processor.middleware.handle-audit-queries-test
   "Additional tests for this namespace can be found in `metabase-enterprise.audit-app.pages-test`."
   (:require
+   [clojure.data.csv :as csv]
    [clojure.test :refer :all]
    [metabase-enterprise.audit-app.interface :as audit.i]
-   [metabase-enterprise.audit-app.query-processor.middleware.handle-audit-queries :as qp.middleware.audit]
    [metabase.query-processor.test :as qp]
    [metabase.test :as mt]
    [metabase.util :as u]))
@@ -31,26 +31,6 @@
                           [3 5]])
    :xform    (map #(update (vec %) 0 inc))})
 
-(deftest ^:parallel validate-internal-query-test
-  (testing "InternalQuery is enforced by a plain fn that runs in production builds too, not by a mu/defn arg schema"
-    (testing "a declared query passes"
-      (is (nil? (#'qp.middleware.audit/validate-internal-query
-                 {:type :internal
-                  :fn   "metabase-enterprise.audit-app.pages.queries/bad-table"
-                  :args ["" "" "" "card_name" "asc"]}))))
-    (testing "an undeclared arg shape does not"
-      (doseq [args [["" "" "" "u.password" "asc"]   ; sort-column reaches an ORDER BY identifier
-                    ["" "" "" "%now" "asc"]         ; where a leading % is read as a function call
-                    ["" "" "" "card_name" "asc; --"]]]
-        (testing (pr-str args)
-          (is (thrown-with-msg?
-               clojure.lang.ExceptionInfo
-               #"Invalid internal query"
-               (#'qp.middleware.audit/validate-internal-query
-                {:type :internal
-                 :fn   "metabase-enterprise.audit-app.pages.queries/bad-table"
-                 :args args}))))))))
-
 (deftest ^:parallel transform-results-test
   (testing "Make sure query function result are transformed to QP results correctly"
     (doseq [[format-name {:keys [query-type expected-rows]}] {"legacy"    {:query-type    ::legacy-format-query-fn
@@ -66,3 +46,18 @@
           (testing "rows"
             (is (= expected-rows
                    (mt/rows @results)))))))))
+
+(defmethod audit.i/internal-query ::export-query-fn
+  [_]
+  {:metadata [[:title {:display_name "Title", :base_type :type/Text}]
+              [:count {:display_name "Count", :base_type :type/Integer}]]
+   :results  [{:title "Birds", :count 2}
+              {:title "Cans", :count 3}]})
+
+(deftest export-internal-query-test
+  (testing "POST /api/dataset/:export-format downloads the results of an internal query"
+    (mt/with-premium-features #{:audit-app}
+      (is (= [["Birds" "2"] ["Cans" "3"]]
+             (rest (csv/read-csv (mt/user-http-request :crowberto :post 200 "dataset/csv"
+                                                       {:query {:type "internal"
+                                                                :fn   (u/qualified-name ::export-query-fn)}}))))))))

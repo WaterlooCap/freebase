@@ -3,12 +3,12 @@
    [clojure.set :as set]
    [metabase.api.common :as api]
    [metabase.lib.core :as lib]
+   [metabase.metabot.db :as metabot.db]
    [metabase.metabot.metadata-perms :as metabot.perms]
    [metabase.metabot.tools.util :as metabot.tools.u]
    [metabase.parameters.field-values :as params.field-values]
    [metabase.request.core :as request]
-   [metabase.sync.core :as sync]
-   [toucan2.core :as t2]))
+   [metabase.sync.core :as sync]))
 
 (defn- build-field-statistics [fvs fp limit]
   (merge
@@ -16,14 +16,16 @@
      {:statistics (-> (or (:global fp) {})
                       (set/rename-keys {:nil% :percent-null})
                       (into (vals (:type fp))))})
-   (when-let [fvs (-> fvs :values not-empty)]
-     {:field_values (into [] (if limit (take limit) identity) fvs)})))
+   (when-let [values (-> fvs :values not-empty)]
+     {:field_values       (into [] (if limit (take limit) identity) values)
+      :field_values_total (count values)
+      :has_more_values    (:has_more_values fvs)})))
 
 (defn- get-or-create-fingerprint! [{:keys [id fingerprint] :as field}]
   (or fingerprint
       ;; Run with admin perms to match behavior during normal sync.
       (and (pos? (:updated-fingerprints (request/as-admin (sync/refingerprint-field! field))))
-           (t2/select-one-fn :fingerprint :model/Field :id id))))
+           (metabot.db/field-fingerprint id))))
 
 (defn- field-statistics
   "Fingerprint statistics are global (computed across every row of the table), so they're withheld
@@ -34,7 +36,7 @@
   caller's column metadata, since saved Card result metadata can be stale or user-edited."
   [{:keys [id fingerprint]} limit]
   (if id
-    (let [field (t2/select-one :model/Field :id id)
+    (let [field (metabot.db/field id)
           table-id (:table_id field)
           fvs (params.field-values/get-or-create-field-values! field)
           restricted? (or (not (int? table-id))
@@ -56,24 +58,6 @@
                                           [:portable_fk :table_reference]))})
 
 (defn- check-column-table-perms!
-  "Re-check permissions on the table a drilled-into column actually belongs to.
-
-  `visible-columns`/`filterable-columns` resolve through the permission-blind metadata provider and
-  surface columns from tables the caller never named: reached by an FK, brought in by an explicit join,
-  carried up from a previous stage, or inherited through a source card. Keying this gate on
-  `:lib/source` misses shapes — a join in a nested stage arrives as `:source/previous-stage`, a model's
-  join as `:source/card` — so it keys on the column's own `:table-id` instead.
-
-  Three bars, each matching what the query processor would demand to produce the same value:
-
-  - An implicit FK join is an ad-hoc join the caller would have to build themselves, so it takes query
-    permission on the joined table.
-  - Every other table takes data access — including the one the caller named. The entry check that
-    reached this tool is `api/read-check`, and `mi/can-read? :model/Table` passes on a bare
-    `manage-table-metadata` grant with `view-data` still `:blocked`, so exempting the named table would
-    hand that user the fingerprint statistics and cached values of a table they cannot query.
-  - Every table takes the column-level sandbox check. Reading a table says nothing about which of its
-    columns a sandbox exposes, so the read check the entity already passed does not cover this."
   [col]
   (let [field-id (:id col)
         ;; A saved Card's result metadata can override :table-id while retaining a real Field ID.

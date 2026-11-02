@@ -177,13 +177,18 @@ export function visitMetric(id) {
  * @param {number|string} dashboardIdOrAlias
  * @param {Object} config
  */
-export function visitDashboard(dashboardIdOrAlias, { params = {} } = {}) {
+export function visitDashboard(
+  dashboardIdOrAlias,
+  { params = {}, dashcardTimeout } = {},
+) {
   if (typeof dashboardIdOrAlias === "number") {
-    visitDashboardById(dashboardIdOrAlias, { params });
+    visitDashboardById(dashboardIdOrAlias, { params, dashcardTimeout });
   }
 
   if (typeof dashboardIdOrAlias === "string") {
-    cy.get(dashboardIdOrAlias).then((id) => visitDashboardById(id, { params }));
+    cy.get(dashboardIdOrAlias).then((id) =>
+      visitDashboardById(id, { params, dashcardTimeout }),
+    );
   }
 }
 
@@ -236,7 +241,12 @@ function visitDashboardById(dashboard_id, config) {
         qs: config.params,
       });
 
-      cy.wait(aliases);
+      // dashcardTimeout lets callers widen the per-query wait window for dashboards with
+      // many cards, whose tail queries stagger past cy.wait's 5s default under CPU load
+      cy.wait(
+        aliases,
+        config.dashcardTimeout ? { timeout: config.dashcardTimeout } : {},
+      );
     } else {
       // For a dashboard:
       //  - without questions (can be empty or markdown only) or
@@ -450,5 +460,34 @@ export const onNextAnchorClick = (callback) => {
       callback(this);
       window.HTMLAnchorElement.prototype.click = originalClick;
     };
+  });
+};
+
+/**
+ * Replaces anchor clicks with a stub, so the app does not open the link.
+ * Call `assertAnchorClicked` after the click to examine the anchor.
+ */
+export const stubAnchorClick = () => {
+  cy.window().then((window) => {
+    cy.stub(window.HTMLAnchorElement.prototype, "click").as("anchorClick");
+  });
+};
+
+/**
+ * Makes sure that the app clicked one anchor with these attributes.
+ * Use it after `stubAnchorClick`.
+ */
+export const assertAnchorClicked = ({
+  href,
+  target = "_blank",
+  rel = "noopener",
+}) => {
+  cy.get("@anchorClick").should((stub) => {
+    expect(stub).to.have.been.calledOnce;
+
+    const anchor = stub.firstCall.thisValue;
+    expect(anchor.getAttribute("href")).to.equal(href);
+    expect(anchor.getAttribute("target")).to.equal(target);
+    expect(anchor.getAttribute("rel")).to.equal(rel);
   });
 };

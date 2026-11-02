@@ -1,5 +1,4 @@
 import { useCallback, useMemo } from "react";
-import { withRouter } from "react-router";
 import { c, t } from "ttag";
 import * as Yup from "yup";
 
@@ -137,7 +136,7 @@ function CopyDashboardForm({
             mt="1rem"
             name="is_shallow_copy"
             label={
-              <Group align="center" gap="xs">
+              <Group align="center" gap="xxs">
                 {t`Only duplicate the dashboard`}
 
                 <Tooltip
@@ -162,4 +161,4 @@ function CopyDashboardForm({
   );
 }
 
-export const CopyDashboardFormConnected = withRouter(CopyDashboardForm);
+export const CopyDashboardFormConnected = CopyDashboardForm;

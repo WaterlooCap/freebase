@@ -115,16 +115,6 @@
            (lib/normalize ::lib.schema.parameter/widget-type "broken/=")
            (lib/normalize ::lib.schema.parameter/widget-type "broken")))))
 
-(deftest ^:parallel normalize-invalid-parameter-value-test
-  (testing "Normalize invalid parameter values to `nil`"
-    (are [parameter normalized] (= normalized
-                                   (lib/normalize ::lib.schema.parameter/parameter.value parameter))
-      {:k "v"}   nil
-      [{:k "v"}] [nil]
-      #{1}       nil
-      ["A" #{1}] ["A" nil]
-      [["A"]]    [nil])))
-
 (deftest ^:parallel normalize-invalid-parameter-default-test
   (testing "A parameter with no value falls back to its `:default`, so a default is normalized like a value"
     (are [parameter normalized] (= normalized
@@ -143,7 +133,6 @@
       {:include-current true}  true
       {}                       true
       {:case-sensitive "yes"}  false
-      ;; An unrecognized option is not a validation error: the map stays open so a new frontend option does not 400
-      ;; against an older backend. Such a key never reaches the clause either way, because request decoding strips
+      ;; the options map is closed: an option this version does not know is not valid, and request decoding strips
       ;; it -- see `decode-strips-undeclared-keys-test` in [[metabase.api.macros-test]].
-      {:lib/uuid "not-yours"}  true)))
+      {:lib/uuid "not-yours"}  false)))
