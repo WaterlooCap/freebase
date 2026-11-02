@@ -7,9 +7,9 @@
 
 (deftest provider-derives-from-base-oidc-test
   (testing "our provider inherits the AGPL base OIDC flow"
-    (is (isa? :provider/free-oidc :provider/oidc)
+    (is (auth-identity/isa? :provider/free-oidc :provider/oidc)
         "must derive from the OSS base provider so we inherit discovery, token exchange, and ID-token validation")
-    (is (isa? :provider/free-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
+    (is (auth-identity/isa? :provider/free-oidc :metabase.auth-identity.provider/create-user-if-not-exists)
         "must auto-provision: Authentik is the gatekeeper")))
 
 (deftest authenticate-rejects-when-disabled-test

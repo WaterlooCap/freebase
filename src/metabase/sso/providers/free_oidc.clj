@@ -19,15 +19,9 @@
 
 ;;; -------------------------------------------------- Provider Registration --------------------------------------------------
 
-;; :provider/oidc already derives from :metabase.auth-identity.provider/create-user-if-not-exists
-;; (see metabase.sso.providers.oidc), so :provider/free-oidc inherits that transitively. Do NOT
-;; also `derive` it directly here -- that creates a diamond (two paths to the same ancestor) in
-;; Clojure's *shared, global* hierarchy. `underive` rebuilds the whole global hierarchy from
-;; scratch by replaying every derive pair in map-iteration order, and unrelated code elsewhere in
-;; the app that calls `underive` on some other keyword can hit our diamond mid-rebuild and throw
-;; ":provider/free-oidc already has :metabase.auth-identity.provider/create-user-if-not-exists as
-;; ancestor" -- reproduced by running the test suite, see metabase.transforms.models.transform.
-(derive :provider/free-oidc :provider/oidc)
+;; :provider/oidc already derives from ::provider/provider and ::provider/create-user-if-not-exists,
+;; so :provider/free-oidc inherits both.
+(auth-identity/derive! :provider/free-oidc :provider/oidc)
 
 (def provider-name
   "Provider name for Waterloo OIDC authentication."

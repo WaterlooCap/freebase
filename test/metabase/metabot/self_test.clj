@@ -1624,12 +1624,13 @@
   (testing "a model that answers in text instead of calling the structured-output tool still yields its JSON"
     (let [schema {:type "object" :properties {:questions {:type "array" :items {:type "string"}}} :required ["questions"]}
           call!  (fn [text]
-                   (mt/with-dynamic-fn-redefs [openrouter/openrouter
-                                               (constantly (test-util/mock-llm-response
-                                                            [{:type :start :id "msg-1"}
-                                                             {:type :text :id "t1" :text text}]))]
-                     (self/call-llm-structured "openrouter/test-model" [{:role "user" :content "test"}]
-                                               schema 0.3 1024 {:tag "test-tag"})))]
+                   (llm.tu/with-default-connections
+                     (mt/with-dynamic-fn-redefs [openrouter/openrouter
+                                                 (constantly (test-util/mock-llm-response
+                                                              [{:type :start :id "msg-1"}
+                                                               {:type :text :id "t1" :text text}]))]
+                       (self/call-llm-structured "openrouter/test-model" [{:role "user" :content "test"}]
+                                                 schema 0.3 1024 {:tag "test-tag"}))))]
       (testing "the whole reply is the JSON object"
         (is (= {:questions ["How many orders?"]}
                (call! "{\"questions\": [\"How many orders?\"]}"))))
