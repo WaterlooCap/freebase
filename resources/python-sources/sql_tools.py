@@ -14,7 +14,7 @@ import sqlglot.optimizer.qualify as qualify
 from sqlglot import exp
 from sqlglot.dialects.clickhouse import ClickHouse
 from sqlglot.errors import OptimizeError, ParseError
-from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers  # noqa: E402
 
 # sqlglot (as of 28.6.0) renders every placeholder in ClickHouse's named-parameter
 # syntax `{name: Type}`, so a positional JDBC placeholder `?` (a nameless Placeholder)
