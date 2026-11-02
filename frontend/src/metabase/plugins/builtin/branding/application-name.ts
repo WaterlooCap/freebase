@@ -1,6 +1,7 @@
 import { PLUGIN_SELECTORS } from "metabase/plugins";
 import type { State } from "metabase/redux/store";
-import { getSetting } from "metabase/selectors/settings";
+// eslint-disable-next-line boundaries/element-types -- this fork plugin reads a fork setting, and getSetting moved up to metabase/settings
+import { getSetting } from "metabase/settings";
 
 // eslint-disable-next-line metabase/no-literal-metabase-strings -- fallback when wc-brand-name is unset
 const DEFAULT_APPLICATION_NAME = "Metabase";
