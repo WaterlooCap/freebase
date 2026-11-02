@@ -1,5 +1,5 @@
 import { mockSettings } from "__support__/settings";
-import { createMockState } from "metabase/redux/store/mocks";
+import { createMockState } from "__support__/state";
 
 import { getApplicationName } from "./application-name";
 

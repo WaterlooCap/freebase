@@ -1,15 +1,23 @@
+import type { EnterpriseSettings } from "./settings";
+
 import type {
   CardDisplayType,
   CardId,
   CardType,
+  CreateCardRequest,
   DashboardId,
+  DatabaseId,
   DatasetQuery,
   DraftTransform,
+  PaginationRequest,
   PaginationResponse,
+  ResearchPlanContext,
   RowValue,
   SuggestedTransform,
   Transform,
   UnsavedCard,
+  User,
+  UserPermissions,
 } from ".";
 
 export type MetabotFeedbackType =
@@ -49,37 +57,13 @@ export type MetabotChatContext = {
   default_database_id?: number;
   capabilities: string[];
   code_editor?: MetabotCodeEditorContext;
+  research_plan?: ResearchPlanContext;
 };
 
 export type MetabotTool = {
   name: string; // TODO: make strictly typed - currently there's no tools
   parameters: Record<string, any>;
 };
-
-export type MetabotHistoryUserMessageEntry = {
-  role: "user";
-  message: string;
-  context: MetabotChatContext;
-};
-
-export type MetabotHistoryToolEntry = {
-  role: "assistant";
-  assistant_response_type: "tools";
-  tools: MetabotTool[];
-};
-
-export type MetabotHistoryMessageEntry = {
-  role: "assistant";
-  assistant_response_type: "message";
-  message: string;
-};
-
-export type MetabotHistoryEntry =
-  | MetabotHistoryUserMessageEntry
-  | MetabotHistoryToolEntry
-  | MetabotHistoryMessageEntry;
-
-export type MetabotHistory = any[];
 
 export type MetabotStateContext = Record<string, any>;
 
@@ -107,7 +91,6 @@ export type MetabotSeriesConfig = {
 };
 
 export type MetabotChartConfig = {
-  image_base_64?: string;
   title?: string | null;
   description?: string | null;
   data?: Array<{
@@ -173,62 +156,43 @@ export type MetabotCodeEdit = {
 export type MetabotAgentRequest = {
   message: string;
   context: MetabotChatContext;
-  history: MetabotHistory;
-  state: MetabotStateContext;
   conversation_id: string; // uuid
+  parent_message_id?: string;
+  retry_message_id?: string;
+  user_message_id?: string; // uuid
+  assistant_message_id: string; // uuid
   metabot_id?: string;
   profile_id?: string;
 };
 
 export type MetabotAgentResponse = {
-  history: MetabotHistory[];
   conversation_id: string;
-  state: any;
+  state?: MetabotStateContext;
 };
 
-export type MetabotProvider =
-  | "metabase"
-  | "anthropic"
-  | "azure"
-  | "bedrock"
-  | "mistral"
-  | "openai"
-  | "openrouter"
-  | "zai";
+export type MetabotConversation = {
+  conversation_id: string;
+  created_at: string;
+  title: string | null;
+  user_id: number | null;
+  profile_id: string | null;
+  message_count: number;
+  last_message_at: string | null;
+  forked_from_conversation_id: string | null;
+};
 
-export interface BedrockCredentials {
-  "access-key-id"?: string | null;
-  "secret-access-key"?: string | null;
-  region?: string | null;
-  "session-token"?: string | null;
-}
+export type MetabotConversationTitleResponse =
+  | { status: "ready"; title: string }
+  | { status: "pending"; title: null }
+  | { status: "missing"; title: null };
 
-export interface AzureCredentials {
-  "api-key"?: string | null;
-  "base-url"?: string | null;
-}
+export type ListMetabotConversationsRequest = PaginationRequest & {
+  profile_id?: string | null;
+};
 
-/** One permissive map mirroring the backend's request schema: Bedrock sends AWS key
- * material, Azure sends an API key and base URL. */
-export interface MetabotCredentials
-  extends BedrockCredentials, AzureCredentials {}
-
-export interface MetabotSettingsResponse {
-  value: string | null;
-  "credentials-error"?: string | null;
-  models: {
-    id: string;
-    display_name: string;
-    group?: string | null;
-  }[];
-}
-
-export interface UpdateMetabotSettingsRequest {
-  provider: MetabotProvider;
-  model?: string;
-  "api-key"?: string | null;
-  credentials?: MetabotCredentials | null;
-}
+export type ListMetabotConversationsResponse = PaginationResponse & {
+  data: MetabotConversation[];
+};
 
 /* Metabot - Suggested Prompts */
 
@@ -304,16 +268,13 @@ export type MetabotSourceFeedback = {
 /**
  * Feedback payload for MCP Apps visualization results.
  *
- * Sends the prompt and query context needed for Harbormaster
- * to understand the generated visualization.
+ * Sends the prompt and query context needed to understand
+ * the generated visualization.
  */
 export type McpAppsFeedback = {
   /** User's rating and optional comments about the generated visualization. */
   feedback: {
     positive: boolean;
-
-    /** Client-generated id for feedback submission. */
-    message_id: string;
 
     /** Optional category for negative feedback. */
     issue_type?: string;
@@ -322,7 +283,7 @@ export type McpAppsFeedback = {
     freeform_feedback?: string;
   };
 
-  /** MCP-specific context that Harbormaster needs to evaluate the result. */
+  /** MCP-specific context stored alongside the rating. */
   conversation_data: {
     /** Identifies this submission as coming from the MCP Apps flow. */
     source: "mcp";
@@ -338,6 +299,37 @@ export type McpAppsFeedback = {
 export type SubmitMcpAppsFeedbackRequest = {
   mcpSessionId: string;
   payload: McpAppsFeedback;
+};
+
+/**
+ * The current-user projection `GET /api/embed-mcp/bootstrap` returns.
+ *
+ * Deliberately much narrower than `User`: the iframe's UI credential is minted from an
+ * MCP token that may hold nothing but `agent:query:run`, so it must not be able to read
+ * the full profile. Adding a field here means adding it to `::bootstrap-user` in
+ * `metabase.mcp.callback-api`, which is where that decision belongs.
+ */
+export type McpAppsBootstrapUser = Pick<
+  User,
+  | "id"
+  | "locale"
+  | "is_superuser"
+  | "is_data_analyst"
+  | "is_qbnewb"
+  | "tenant_id"
+  | "personal_collection_id"
+> & {
+  permissions: Pick<
+    UserPermissions,
+    "can_create_queries" | "can_create_native_queries"
+  >;
+};
+
+export type McpAppsBootstrapResponse = {
+  user: McpAppsBootstrapUser;
+
+  /** The settings a non-admin authenticated user may read, whoever the credential belongs to. */
+  settings: EnterpriseSettings;
 };
 
 /* Metabot v3 - Entity Types */
@@ -364,9 +356,22 @@ export interface MetabotGenerateContentRequest {
 }
 
 export interface MetabotGenerateContentResponse {
-  draft_card: (UnsavedCard & { name?: string }) | null;
+  draft_card: (UnsavedCard & { name?: string; database_id: DatabaseId }) | null;
   description: string;
   error: string | null;
+}
+
+/* Metabot v3 - Conversations */
+
+export interface SaveMetabotEntityRequest {
+  conversation_id: string;
+  chart_id: string;
+  card: CreateCardRequest;
+}
+
+export interface ForkMetabotConversationRequest {
+  conversation_id: string;
+  message_id: string;
 }
 
 /* Metabot v3 - Data Part Types */

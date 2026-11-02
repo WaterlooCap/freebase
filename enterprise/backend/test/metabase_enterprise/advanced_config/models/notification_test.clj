@@ -55,7 +55,7 @@
               :hash                    (messages/generate-notification-unsubscribe-hash handler-id email)}))
 
 (deftest notification-recipient-validate-email-domains-test
-  (testing "every write path of a raw-value NotificationRecipient enforces subscription-allowed-domains"
+  (testing "every write path of a raw-value NotificationRecipient enforces subscription-allowed-domains (SEC-662)"
     (mt/with-premium-features #{:email-allow-list}
       (mt/with-temporary-setting-values [subscription-allowed-domains "metabase.com"]
         (notification.tu/with-card-notification

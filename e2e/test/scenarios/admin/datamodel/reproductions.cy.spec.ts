@@ -247,7 +247,6 @@ describe("issues 55617, 55618", () => {
     cy.intercept("GET", "/api/segment").as("getSegments");
     H.createSegment({
       name: "My segment",
-      table_id: ORDERS_ID,
       definition: {
         database: SAMPLE_DB_ID,
         type: "query",

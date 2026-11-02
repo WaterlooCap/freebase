@@ -1,31 +1,58 @@
-import { mockSettings } from "__support__/settings";
+import { getPathnameWithoutSubPath } from "./dom";
 
-import { getSitePath } from "./dom";
-
-describe("getSitePath", () => {
-  it("returns the lower-cased path of site-url", () => {
-    mockSettings({ "site-url": "https://example.com/Analytics" });
-    expect(getSitePath()).toBe("/analytics");
+describe("getPathnameWithoutSubPath", () => {
+  it("should leave the pathname unchanged when the site url has no subpath", () => {
+    expect(
+      getPathnameWithoutSubPath("/dashboard/1", "http://example.com"),
+    ).toBe("/dashboard/1");
+    expect(
+      getPathnameWithoutSubPath("/dashboard/1", "http://example.com/"),
+    ).toBe("/dashboard/1");
   });
 
-  it("returns the root path for a site-url without a sub-path", () => {
-    mockSettings({ "site-url": "https://example.com" });
-    expect(getSitePath()).toBe("/");
+  it("should strip the subpath from the pathname", () => {
+    expect(
+      getPathnameWithoutSubPath(
+        "/metabase/dashboard/1",
+        "http://example.com/metabase",
+      ),
+    ).toBe("/dashboard/1");
   });
 
-  // `site-url` is a public setting with no default, so it is null on instances where it was never set --
-  // e.g. ones provisioned by config-from-file, which never run the setup wizard. Throwing here used to
-  // white-screen the whole app, since GlobalStyles calls this above any error boundary.
-  it.each([null, undefined, ""])(
-    "falls back to the root path when site-url is %p",
-    (siteUrl) => {
-      mockSettings({ "site-url": siteUrl as unknown as string });
-      expect(getSitePath()).toBe("/");
-    },
-  );
+  it("should strip the subpath case-insensitively", () => {
+    expect(
+      getPathnameWithoutSubPath(
+        "/Metabase/dashboard/1",
+        "http://example.com/metabase",
+      ),
+    ).toBe("/dashboard/1");
+  });
 
-  it("falls back to the root path when site-url is not a parseable URL", () => {
-    mockSettings({ "site-url": "not a url" });
-    expect(getSitePath()).toBe("/");
+  it("should not strip a subpath that appears mid-pathname", () => {
+    expect(
+      getPathnameWithoutSubPath(
+        "/dashboard/metabase/1",
+        "http://example.com/metabase",
+      ),
+    ).toBe("/dashboard/metabase/1");
+  });
+
+  it("should not strip a subpath that only matches a partial path segment", () => {
+    expect(
+      getPathnameWithoutSubPath(
+        "/metabase2/dashboard/1",
+        "http://example.com/metabase",
+      ),
+    ).toBe("/metabase2/dashboard/1");
+  });
+
+  it("should leave a pathname shorter than the subpath unchanged", () => {
+    expect(
+      getPathnameWithoutSubPath("/metabase", "http://example.com/metabase/sub"),
+    ).toBe("/metabase");
+  });
+
+  it("should leave the pathname unchanged when the site url is empty", () => {
+    expect(getPathnameWithoutSubPath("/dashboard/1", "")).toBe("/dashboard/1");
   });
 });

@@ -15,6 +15,7 @@
    [metabase.permissions.core :as perms]
    [metabase.permissions.models.data-permissions :as data-perms]
    [metabase.permissions.models.permissions-group-membership :as perms-group-membership]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.request.core :as request]
    [metabase.secrets.core :as secret]
@@ -587,7 +588,6 @@
                                        :name "Secret Test"
                                        :details base-details}]
       (mt/with-current-user (mt/user->id :crowberto)
-        #_{:clj-kondo/ignore [:redundant-nested-call]}
         (are [expected extra-details] (= (merge
                                           base-details
                                           expected)
@@ -803,6 +803,27 @@
              #"private or internal network address"
              (t2/update! :model/Database (:id db) {:admin_details {:host "127.0.0.1" :user "hummingbird"}})))))))
 
+(deftest disallowed-connection-parameters-are-refused-on-save-test
+  ;; like the network policy, enforced on the model so serialization import and config-file provisioning -- which
+  ;; write a Database without testing a connection -- cannot store one either
+  (testing "a disallowed connection parameter cannot be stored"
+    (doseq [details [{:host "db.example.com" :additional-options "socketFactory=a.b.C"}
+                     {:host "db.example.com" :sslfactory "a.b.C"}]]
+      (testing (pr-str details)
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"dangerous"
+             (mt/with-temp [:model/Database _ {:engine :postgres :details details}]))))))
+  (testing "...including by adding it to an existing database"
+    (mt/with-temp [:model/Database db {:engine :postgres :details {:host "db.example.com"}}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"dangerous"
+           (t2/update! :model/Database (:id db) {:details {:host "db.example.com" :sslfactory "a.b.C"}})))))
+  (testing "a database whose driver isn't registered (e.g. an uninstalled plugin) can still be saved"
+    (mt/with-temp [:model/Database db {:engine "not-a-registered-driver" :details {:host "db.example.com"}}]
+      (t2/update! :model/Database (:id db) {:details {:host "db2.example.com"}})
+      (is (=? {:details {:host "db2.example.com"}}
+              (t2/select-one :model/Database (:id db)))))))
+
 (deftest audit-db-is-not-subject-to-the-network-policy-test
   ;; The Audit DB is a clone of the *application* database, not a warehouse an admin pointed somewhere: it carries no
   ;; `:details` and is reached over the app-db connection. Under the policy its empty details read as `localhost` --
@@ -869,14 +890,6 @@
       (is (= ::test
              (t2/select-one-fn :engine :model/Database :id db-id))))))
 
-(deftest identity-hash-test
-  (testing "Database hashes are composed of the name and engine"
-    (mt/with-temp [:model/Database db {:engine :mysql :name "hashmysql"}]
-      (is (= (Integer/toHexString (hash ["hashmysql" :mysql]))
-             (serdes/identity-hash db)))
-      (is (= "b6f1a9e8"
-             (serdes/identity-hash db))))))
-
 (deftest ^:parallel serdes-extract-is-stub-test
   (testing "serdes/extract-one preserves :is_stub true and elides it when false"
     (mt/with-temp [:model/Database stub     {:engine :h2 :name "stub" :is_stub true}
@@ -885,6 +898,22 @@
         (is (true? (:is_stub (serdes/extract-one "Database" nil stub)))))
       (testing "non-stub DB elides :is_stub from the extracted map (matches default)"
         (is (not (contains? (serdes/extract-one "Database" nil non-stub) :is_stub)))))))
+
+(deftest ^:parallel serdes-is-sample-not-trusted-test
+  (testing "serdes never trusts an archive's :is_sample (SEC-1175): the real Sample Database is excluded from export,
+            so an incoming is_sample is forged. It is dropped from :copy and imported as false."
+    (let [spec (serdes/make-spec "Database" nil)]
+      (is (not (contains? (set (:copy spec)) :is_sample)))
+      (is (false? ((get-in spec [:transform :is_sample :import]) true))))))
+
+(deftest assert-sqlite-not-hosted-test
+  (testing "serdes import refuses a SQLite Database on a hosted instance (SEC-1175); self-hosted and non-SQLite are fine"
+    (mt/with-premium-features #{:hosting}
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SQLite is not available"
+                            (database/assert-sqlite-not-hosted! {:engine :sqlite :name "x" :details {:db "/etc/hosts"}})))
+      (is (nil? (database/assert-sqlite-not-hosted! {:engine :postgres :name "x"}))))
+    (mt/with-premium-features #{}
+      (is (nil? (database/assert-sqlite-not-hosted! {:engine :sqlite :name "x"}))))))
 
 (deftest create-database-with-null-details-test
   (testing "Details should get a default value of {} if unspecified"

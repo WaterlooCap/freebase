@@ -1,7 +1,5 @@
 import { render as testingLibraryRender } from "@testing-library/react";
 import fetchMock from "fetch-mock";
-import type { ReactNode } from "react";
-import { Route } from "react-router";
 
 import {
   setupEnterpriseOnlyPlugin,
@@ -24,9 +22,10 @@ import {
 } from "__support__/server-mocks";
 import { setupWebhookChannelsEndpoint } from "__support__/server-mocks/channel";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { getTestStoreAndWrapper, screen } from "__support__/ui";
 import { getSettingsRoutes } from "metabase/admin/settingsRoutes";
-import { createMockState } from "metabase/redux/store/mocks";
+import { Outlet, Route } from "metabase/router";
 import type { TokenFeature, TokenFeatures } from "metabase-types/api";
 import {
   createMockSettings,
@@ -61,7 +60,7 @@ export const ossRoutes: RouteMap = {
     path: "/authentication/api-keys",
     testPattern: /Create API keys to let users authenticate/i,
   },
-  maps: { path: "/maps", testPattern: /Map tile server URL/i },
+  maps: { path: "/maps", testPattern: /Map tile server public URL/i },
   localization: { path: "/localization", testPattern: /Instance language/i },
   uploads: {
     path: "/uploads",
@@ -88,7 +87,10 @@ export const enterpriseRoutes: RouteMap = {
 };
 
 export const premiumRoutes: RouteMap = {
-  saml: { path: "/authentication/saml", testPattern: /Set up SAML-based SSO/i },
+  saml: {
+    path: "/authentication/saml",
+    testPattern: /Identity provider \(IdP\) configuration/i,
+  },
   jwt: { path: "/authentication/jwt", testPattern: /Server Settings/i },
 };
 
@@ -127,6 +129,7 @@ export const setup = async ({
   if (hasTokenFeatures) {
     // all or nothing token features
     Object.keys(tokenFeatures).forEach((feature) => {
+      // Unjustified type cast. FIXME
       tokenFeatures[feature as TokenFeature] = true;
     });
   }
@@ -205,9 +208,7 @@ export const setup = async ({
     initialRoute: `/admin/settings${initialRoute}`,
   });
 
-  const PassThroughGuard = ({ children }: { children: ReactNode }) => (
-    <>{children}</>
-  );
+  const PassThroughGuard = () => <Outlet />;
 
   testingLibraryRender(
     <Route path="admin/settings">

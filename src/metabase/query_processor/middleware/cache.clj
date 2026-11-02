@@ -16,6 +16,7 @@
    [metabase.cache.core :as cache]
    [metabase.config.core :as config]
    [metabase.lib.core :as lib]
+   [metabase.lib.schema :as lib.schema]
    [metabase.query-processor.middleware.cache-backend.db :as backend.db]
    [metabase.query-processor.middleware.cache-backend.interface :as i]
    [metabase.query-processor.middleware.cache.impl :as impl]
@@ -80,9 +81,9 @@
   "Add `object` (e.g. a result row or metadata) to the current cache entry."
   [object]
   (when *in-fn*
-    (*in-fn* (cond-> object
-               (map? object) (-> (m/update-existing :json_query lib/prepare-for-serialization)
-                                 (m/update-existing :preprocessed_query lib/prepare-for-serialization))))))
+    (*in-fn* (if (map? object)
+               (m/update-existing object :json_query lib/prepare-for-serialization)
+               object))))
 
 (def ^:private ^:dynamic *result-fn*
   "The `result-fn` provided by [[impl/do-with-serialization]]."
@@ -127,7 +128,7 @@
                              (m/dissoc-in result [:data :rows])
                              {}))
      (let [duration-ms     (/ (- (System/nanoTime) start-time-ns) 1e6)
-           min-duration-ms (:min-duration-ms strategy 0)
+           min-duration-ms (:min_duration_ms strategy 0)
            ;; cache any query that ran long enough -- including ones that returned no rows, so a slow empty result
            ;; doesn't get re-run at full cost on every request
            eligible?       (> duration-ms min-duration-ms)]
@@ -272,9 +273,9 @@
     - `[::miss nil]`     -- no entry; or it's expired, or nearly so, and *this* process won the lease; or it's too
                             stale to serve to anyone. The caller must recompute.
     - `[::canceled nil]` -- the request was canceled."
-  [ignore-cache?
-   query-hash :- bytes?
-   strategy   :- :map
+  [ignore-cache? :- [:maybe :boolean]
+   query-hash    :- bytes?
+   strategy   :- ::lib.schema/cache-strategy
    rff        :- ::qp.schema/rff]
   (if ignore-cache?
     [::miss nil]
@@ -352,7 +353,8 @@
             (save-results-xform start-time-ns metadata query-hash cache-strategy (rff metadata)))))))
 
 (mu/defn- run-query-with-cache :- :any
-  [qp {:keys [cache-strategy middleware], :as query} :- ::qp.schema/any-query
+  [qp                                                 :- fn?
+   {:keys [cache-strategy middleware], :as query} :- ::qp.schema/any-query
    rff                                               :- ::qp.schema/rff]
   ;; Query will already have `info.hash` if it's a userland query. It's not the same hash, because this is calculated
   ;; after normalization, instead of before. This is necessary to make caching work properly with sandboxed users, see

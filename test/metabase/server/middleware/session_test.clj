@@ -7,12 +7,15 @@
    [metabase.api-keys.core :as api-key]
    [metabase.api.common :refer [*current-user* *current-user-id* *is-group-manager?* *is-superuser?*]]
    [metabase.app-db.core :as mdb]
+   [metabase.auth-identity.core :as auth-identity]
    [metabase.config.core :as config]
    [metabase.initialization-status.core :as init-status]
    [metabase.premium-features.core :as premium-features]
    [metabase.request.core :as request]
+   [metabase.server.db :as server.db]
    [metabase.server.middleware.session :as mw.session]
    [metabase.session.core :as session]
+   [metabase.session.events.revoke-on-deactivation] ; for side effects: deletes sessions on deactivation
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
    [metabase.util.encryption :as encryption]
@@ -35,25 +38,75 @@
 (def ^:private test-session-key-hashed (session/hash-session-key test-session-key))
 (def ^:private test-session-id "abcd1234")
 
+(deftest session-deactivation-revokes-test
+  (init-status/set-complete!)
+  (testing "deactivating the user deletes the session; reactivating does NOT revive it (SEC-863)"
+    (mt/with-temp [:model/User {user-id :id} {:is_active true}]
+      (let [session-key (str (random-uuid))]
+        (t2/insert! (t2/table-name :model/Session)
+                    {:id         (session/generate-session-id)
+                     :key_hashed (session/hash-session-key session-key)
+                     :user_id    user-id
+                     :created_at :%now})
+        (testing "session authenticates while the user is active"
+          (is (some? (#'mw.session/current-user-info-for-session session-key nil))))
+        (t2/update! :model/User user-id {:is_active false})
+        (testing "after deactivation the session no longer authenticates"
+          (is (nil? (#'mw.session/current-user-info-for-session session-key nil))))
+        (t2/update! :model/User user-id {:is_active true})
+        (testing "after reactivation the same session STILL does not authenticate"
+          (is (nil? (#'mw.session/current-user-info-for-session session-key nil))))))))
+
 (deftest session-expired-test
   (init-status/set-complete!)
   (testing "Session expiration time = 1 minute"
-    (with-redefs [env/env (assoc env/env :max-session-age "1")]
-      (doseq [[created-at expected msg]
-              [[:%now                                                            false "brand-new session"]
-               [#t "1970-01-01T00:00:01Z"                                        true  "really old session"]
-               [(h2x/add-interval-honeysql-form (mdb/db-type) :%now -61 :second) true  "session that is 61 seconds old"]
-               [(h2x/add-interval-honeysql-form (mdb/db-type) :%now -59 :second) false "session that is 59 seconds old"]]]
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (with-redefs [env/env (assoc env/env :max-session-age "1")]
+        (doseq [[created-at expected msg]
+                [[:%now                                                            false "brand-new session"]
+                 [#t "1970-01-01T00:00:01Z"                                        true  "really old session"]
+                 [(h2x/add-interval-honeysql-form (mdb/db-type) :%now -61 :second) true  "session that is 61 seconds old"]
+                 [(h2x/add-interval-honeysql-form (mdb/db-type) :%now -59 :second) false "session that is 59 seconds old"]]]
+          (testing (format "\n%s %s be expired." msg (if expected "SHOULD" "SHOULD NOT"))
+            (mt/with-temp [:model/User {user-id :id}]
+              (let [session-id (session/generate-session-id)
+                    session-key (str (random-uuid))
+                    session-key-hashed (session/hash-session-key session-key)]
+                (t2/insert! (t2/table-name :model/Session) {:id session-id :key_hashed session-key-hashed, :user_id user-id, :created_at created-at})
+                (let [session (#'mw.session/current-user-info-for-session session-key nil)]
+                  (if expected
+                    (is (nil? session))
+                    (is (some? session))))))))))))
+
+(defn- insert-test-session!
+  "Insert a `core_session` row directly, bypassing the model hooks so that columns like `created_at` and `expires_at`
+  can be set to arbitrary (including DB-side) expressions. Returns the plaintext session key."
+  [user-id extra-cols]
+  (let [session-key (str (random-uuid))]
+    (t2/insert! (t2/table-name :model/Session)
+                (merge {:id         (session/generate-session-id)
+                        :key_hashed (session/hash-session-key session-key)
+                        :user_id    user-id}
+                       extra-cols))
+    session-key))
+
+(deftest session-expires-at-test
+  (init-status/set-complete!)
+  (testing "`expires_at` is enforced server-side, even for a session well within `max-session-age`"
+    (let [db-type (mdb/db-type)
+          now     (h2x/current-datetime-honeysql-form db-type)]
+      (doseq [[expires-at expected msg]
+              [[nil                                                    false "session with no expires_at"]
+               [(h2x/add-interval-honeysql-form db-type now 60 :second) false "session that expires in 60 seconds"]
+               [(h2x/add-interval-honeysql-form db-type now -1 :second) true  "session that expired 1 second ago"]
+               [#t "1970-01-01T00:00:01Z"                              true  "session that expired long ago"]]]
         (testing (format "\n%s %s be expired." msg (if expected "SHOULD" "SHOULD NOT"))
           (mt/with-temp [:model/User {user-id :id}]
-            (let [session-id (session/generate-session-id)
-                  session-key (str (random-uuid))
-                  session-key-hashed (session/hash-session-key session-key)]
-              (t2/insert! (t2/table-name :model/Session) {:id session-id :key_hashed session-key-hashed, :user_id user-id, :created_at created-at})
-              (let [session (#'mw.session/current-user-info-for-session session-key nil)]
-                (if expected
-                  (is (nil? session))
-                  (is (some? session)))))))))))
+            (let [session-key (insert-test-session! user-id {:created_at now, :expires_at expires-at})
+                  session     (#'mw.session/current-user-info-for-session session-key nil)]
+              (if expected
+                (is (nil? session))
+                (is (some? session))))))))))
 
 ;;; ---------------------------------------- TEST wrap-session-key middleware -----------------------------------------
 
@@ -287,6 +340,27 @@
                :message   "Ignoring invalid API Key"}]
              (messages))))))
 
+(deftest api-key-lifecycle-follows-synthetic-user-not-creator-test
+  (testing "an API key is gated by its own synthetic user, not the admin who created it (SEC-863)"
+    (mt/with-temp [:model/User  {synthetic-id :id} {}
+                   :model/User  {creator-id :id}   {}
+                   :model/ApiKey _ {:name                  "An API Key"
+                                    :user_id               synthetic-id
+                                    :creator_id            creator-id
+                                    :updated_by_id         creator-id
+                                    ::api-key/unhashed-key (u.secret/secret "mb_foobar123")}]
+      (let [authed? (fn [] (mt/with-premium-features #{}
+                             (boolean (:metabase-user-id
+                                       (#'mw.session/merge-current-user-info {:headers {"x-api-key" "mb_foobar123"}})))))]
+        (testing "authenticates while its synthetic user is active"
+          (is (authed?)))
+        (testing "deactivating the creator does NOT revoke the key — creator_id is attribution only"
+          (t2/update! :model/User creator-id {:is_active false})
+          (is (authed?)))
+        (testing "deactivating the key's own synthetic user DOES revoke it"
+          (t2/update! :model/User synthetic-id {:is_active false})
+          (is (not (authed?))))))))
+
 (deftest ^:parallel current-user-info-for-api-key-test-2
   (mt/with-temp [:model/ApiKey _ {:name                  "An API Key without an internal user"
                                   :user_id               nil
@@ -353,96 +427,100 @@
   (testing "make sure the `current-user-info-for-session` logic is working correctly"
     ;; for some reason Toucan seems to be busted with models with non-integer IDs and `with-temp` doesn't seem to work
     ;; the way we'd expect :/
-    (try
-      (t2/insert! :model/Session {:id         test-session-id
-                                  :key_hashed test-session-key-hashed
-                                  :user_id    (mt/user->id :lucky)})
-      (is (= {:metabase-user-id (mt/user->id :lucky),
-              :is-superuser? false,
-              :is-group-manager? false,
-              :user-locale nil
-              :is-data-analyst? false
-              :auth-provider nil}
-             (#'mw.session/current-user-info-for-session test-session-key nil)))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))))
-
-(deftest current-user-info-for-session-test-2
-  (testing "superusers should come back as `:is-superuser?`"
-    (try
-      (t2/insert! :model/Session {:id         test-session-id
-                                  :key_hashed test-session-key-hashed
-                                  :user_id    (mt/user->id :crowberto)})
-      (is (= {:metabase-user-id (mt/user->id :crowberto),
-              :is-superuser? true,
-              :is-group-manager? false,
-              :user-locale nil
-              :is-data-analyst? false
-              :auth-provider nil}
-             (#'mw.session/current-user-info-for-session test-session-key nil)))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))))
-
-(deftest current-user-info-for-session-test-3
-  (testing "If user is a group manager of at least one group, `:is-group-manager?` "
-    (try
-      (mt/with-user-in-groups [group-1 {:name "New Group 1"}
-                               group-2 {:name "New Group 2"}
-                               user    [group-1 group-2]]
-        (t2/update! :model/PermissionsGroupMembership {:user_id (:id user), :group_id (:id group-2)}
-                    {:is_group_manager true})
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (try
         (t2/insert! :model/Session {:id         test-session-id
                                     :key_hashed test-session-key-hashed
-                                    :user_id    (:id user)})
-        (testing "is `false` if advanced-permisison is disabled"
-          (mt/with-premium-features #{}
-            (is (= false
-                   (:is-group-manager? (#'mw.session/current-user-info-for-session test-session-key nil))))))
-        (testing "is `true` if advanced-permisison is enabled"
-          ;; a trick to run this test in OSS because even if advanced-permisison is enabled but EE ns is not evailable
-          ;; `enable-advanced-permissions?` will still return false
-          (mt/with-dynamic-fn-redefs [premium-features/enable-advanced-permissions? (fn [& _args] true)]
-            (is (true?
-                 (:is-group-manager? (#'mw.session/current-user-info-for-session test-session-key nil)))))))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))))
-
-(deftest current-user-info-for-session-test-4
-  (testing "full-app-embed sessions shouldn't come back if we don't explicitly specifiy the anti-csrf token"
-    (try
-      (t2/insert! :model/Session {:id              test-session-id
-                                  :key_hashed      test-session-key-hashed
-                                  :user_id         (mt/user->id :lucky)
-                                  :anti_csrf_token test-anti-csrf-token})
-      (is (= nil
-             (#'mw.session/current-user-info-for-session test-session-key nil)))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))
-    (testing "...but if we do specifiy the token, they should come back"
-      (try
-        (t2/insert! :model/Session {:id              test-session-id
-                                    :key_hashed      test-session-key-hashed
-                                    :user_id         (mt/user->id :lucky)
-                                    :anti_csrf_token test-anti-csrf-token})
+                                    :user_id    (mt/user->id :lucky)})
         (is (= {:metabase-user-id (mt/user->id :lucky),
                 :is-superuser? false,
                 :is-group-manager? false,
                 :user-locale nil
                 :is-data-analyst? false
                 :auth-provider nil}
-               (#'mw.session/current-user-info-for-session test-session-key test-anti-csrf-token)))
+               (#'mw.session/current-user-info-for-session test-session-key nil)))
+        (finally
+          (t2/delete! :model/Session :id test-session-id))))))
+
+(deftest current-user-info-for-session-test-2
+  (testing "superusers should come back as `:is-superuser?`"
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (try
+        (t2/insert! :model/Session {:id         test-session-id
+                                    :key_hashed test-session-key-hashed
+                                    :user_id    (mt/user->id :crowberto)})
+        (is (= {:metabase-user-id (mt/user->id :crowberto),
+                :is-superuser? true,
+                :is-group-manager? false,
+                :user-locale nil
+                :is-data-analyst? false
+                :auth-provider nil}
+               (#'mw.session/current-user-info-for-session test-session-key nil)))
+        (finally
+          (t2/delete! :model/Session :id test-session-id))))))
+
+(deftest current-user-info-for-session-test-3
+  (testing "If user is a group manager of at least one group, `:is-group-manager?` "
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (try
+        (mt/with-user-in-groups [group-1 {:name "New Group 1"}
+                                 group-2 {:name "New Group 2"}
+                                 user    [group-1 group-2]]
+          (t2/update! :model/PermissionsGroupMembership {:user_id (:id user), :group_id (:id group-2)}
+                      {:is_group_manager true})
+          (t2/insert! :model/Session {:id         test-session-id
+                                      :key_hashed test-session-key-hashed
+                                      :user_id    (:id user)})
+          (testing "is `false` if advanced-permisison is disabled"
+            (mt/with-premium-features #{}
+              (is (= false
+                     (:is-group-manager? (#'mw.session/current-user-info-for-session test-session-key nil))))))
+          (testing "is `true` if advanced-permisison is enabled"
+            ;; a trick to run this test in OSS because even if advanced-permisison is enabled but EE ns is not evailable
+            ;; `enable-advanced-permissions?` will still return false
+            (mt/with-dynamic-fn-redefs [premium-features/enable-advanced-permissions? (fn [& _args] true)]
+              (is (true?
+                   (:is-group-manager? (#'mw.session/current-user-info-for-session test-session-key nil)))))))
+        (finally
+          (t2/delete! :model/Session :id test-session-id))))))
+
+(deftest current-user-info-for-session-test-4
+  (mt/with-temporary-setting-values [mfa-enforcement :off]
+    (testing "full-app-embed sessions shouldn't come back if we don't explicitly specifiy the anti-csrf token"
+      (try
+        (t2/insert! :model/Session {:id              test-session-id
+                                    :key_hashed      test-session-key-hashed
+                                    :user_id         (mt/user->id :lucky)
+                                    :anti_csrf_token test-anti-csrf-token})
+        (is (= nil
+               (#'mw.session/current-user-info-for-session test-session-key nil)))
         (finally
           (t2/delete! :model/Session :id test-session-id)))
-      (testing "(unless the token is wrong)"
+      (testing "...but if we do specifiy the token, they should come back"
         (try
           (t2/insert! :model/Session {:id              test-session-id
                                       :key_hashed      test-session-key-hashed
                                       :user_id         (mt/user->id :lucky)
                                       :anti_csrf_token test-anti-csrf-token})
-          (is (= nil
-                 (#'mw.session/current-user-info-for-session test-session-key (str/join (reverse test-anti-csrf-token)))))
+          (is (= {:metabase-user-id (mt/user->id :lucky),
+                  :is-superuser? false,
+                  :is-group-manager? false,
+                  :user-locale nil
+                  :is-data-analyst? false
+                  :auth-provider nil}
+                 (#'mw.session/current-user-info-for-session test-session-key test-anti-csrf-token)))
           (finally
-            (t2/delete! :model/Session :id test-session-id)))))))
+            (t2/delete! :model/Session :id test-session-id)))
+        (testing "(unless the token is wrong)"
+          (try
+            (t2/insert! :model/Session {:id              test-session-id
+                                        :key_hashed      test-session-key-hashed
+                                        :user_id         (mt/user->id :lucky)
+                                        :anti_csrf_token test-anti-csrf-token})
+            (is (= nil
+                   (#'mw.session/current-user-info-for-session test-session-key (str/join (reverse test-anti-csrf-token)))))
+            (finally
+              (t2/delete! :model/Session :id test-session-id))))))))
 
 (deftest current-user-info-for-session-test-5
   (testing "if we specify an anti-csrf token we shouldn't get back a session without that token"
@@ -457,55 +535,58 @@
 
 (deftest current-user-info-for-session-test-6
   (testing "shouldn't fetch expired sessions"
-    (try
-      (t2/insert! :model/Session {:id         test-session-id
-                                  :key_hashed test-session-key-hashed
-                                  :user_id    (mt/user->id :lucky)})
-      ;; use low-level `execute!` because updating is normally disallowed for Sessions
-      (t2/query-one {:update (t2/table-name :model/Session), :set {:created_at (t/instant 1000)}, :where [:= :id test-session-id]})
-      (is (= nil
-             (#'mw.session/current-user-info-for-session test-session-key nil)))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))))
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (try
+        (t2/insert! :model/Session {:id         test-session-id
+                                    :key_hashed test-session-key-hashed
+                                    :user_id    (mt/user->id :lucky)})
+        ;; use low-level `execute!` because updating is normally disallowed for Sessions
+        (t2/query-one {:update (t2/table-name :model/Session), :set {:created_at (t/instant 1000)}, :where [:= :id test-session-id]})
+        (is (= nil
+               (#'mw.session/current-user-info-for-session test-session-key nil)))
+        (finally
+          (t2/delete! :model/Session :id test-session-id))))))
 
 (deftest current-user-info-for-session-test-7
   (testing "shouldn't fetch sessions for inactive users"
-    (try
-      (t2/insert! :model/Session {:id test-session-id :key_hashed test-session-key-hashed, :user_id (mt/user->id :trashbird)})
-      (is (= nil
-             (#'mw.session/current-user-info-for-session test-session-key nil)))
-      (finally
-        (t2/delete! :model/Session :id test-session-id)))))
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (try
+        (t2/insert! :model/Session {:id test-session-id :key_hashed test-session-key-hashed, :user_id (mt/user->id :trashbird)})
+        (is (= nil
+               (#'mw.session/current-user-info-for-session test-session-key nil)))
+        (finally
+          (t2/delete! :model/Session :id test-session-id))))))
 
 (deftest auth-provider-via-left-join-test
   (testing "session LEFT JOIN on auth_identity returns correct provider for each auth method"
-    (mt/with-temp [:model/User {user-id :id} {}]
-      ;; "password" is excluded - its before-insert hook requires credentials, and it's already
-      ;; tested via auth-method-test in view_log_test.clj. "api-key" is tested above in
-      ;; current-user-info-for-api-key-test (different code path, no auth_identity).
-      (doseq [provider ["jwt" "saml" "google" "ldap" "oidc"
-                        "custom-oidc" "slack-connect" "support-access-grant"]]
-        (testing (str "provider: " provider)
-          (let [ai         (first (t2/insert-returning-instances! (t2/table-name :model/AuthIdentity)
-                                                                  {:user_id     user-id
-                                                                   :provider    provider
-                                                                   :provider_id (str user-id "-" provider)
-                                                                   :created_at  :%now
-                                                                   :updated_at  :%now}))
-                session-key (session/generate-session-key)
-                session-id  (session/generate-session-id)]
-            (try
-              (t2/insert! (t2/table-name :model/Session)
-                          {:id                session-id
-                           :key_hashed        (session/hash-session-key session-key)
-                           :user_id           user-id
-                           :auth_identity_id  (:id ai)
-                           :created_at        :%now})
-              (is (= provider
-                     (:auth-provider (#'mw.session/current-user-info-for-session session-key nil))))
-              (finally
-                (t2/delete! :model/Session :id session-id)
-                (t2/delete! :model/AuthIdentity :id (:id ai))))))))))
+    (mt/with-temporary-setting-values [mfa-enforcement :off]
+      (mt/with-temp [:model/User {user-id :id} {}]
+        ;; "password" is excluded - its before-insert hook requires credentials, and it's already
+        ;; tested via auth-method-test in view_log_test.clj. "api-key" is tested above in
+        ;; current-user-info-for-api-key-test (different code path, no auth_identity).
+        (doseq [provider ["jwt" "saml" "google" "ldap" "oidc"
+                          "custom-oidc" "slack-connect" "support-access-grant"]]
+          (testing (str "provider: " provider)
+            (let [ai         (first (t2/insert-returning-instances! (t2/table-name :model/AuthIdentity)
+                                                                    {:user_id     user-id
+                                                                     :provider    provider
+                                                                     :provider_id (str user-id "-" provider)
+                                                                     :created_at  :%now
+                                                                     :updated_at  :%now}))
+                  session-key (session/generate-session-key)
+                  session-id  (session/generate-session-id)]
+              (try
+                (t2/insert! (t2/table-name :model/Session)
+                            {:id                session-id
+                             :key_hashed        (session/hash-session-key session-key)
+                             :user_id           user-id
+                             :auth_identity_id  (:id ai)
+                             :created_at        :%now})
+                (is (= provider
+                       (:auth-provider (#'mw.session/current-user-info-for-session session-key nil))))
+                (finally
+                  (t2/delete! :model/Session :id session-id)
+                  (t2/delete! :model/AuthIdentity :id (:id ai)))))))))))
 
 ;; create a simple example of our middleware wrapped around a handler that simply returns our bound variables for users
 (defn- user-bound-handler [request]
@@ -542,41 +623,42 @@
 ;;; ----------------------------------------------   with-current-user -------------------------------------------------
 
 (deftest bind-locale-test
-  (let [handler        (-> (fn [_ respond _]
-                             (respond i18n/*user-locale*))
-                           mw.session/bind-current-user
-                           mw.session/wrap-current-user-info)
-        session-locale (fn [session-key & {:as more}]
-                         (handler
-                          (merge {:metabase-session-key session-key} more)
-                          identity
-                          (fn [e] (throw e))))]
-    (testing "No Session"
-      (is (= nil
-             (session-locale nil))))
-    (testing "w/ Session"
-      (testing "for user with no `:locale`"
-        (mt/with-temp [:model/User {user-id :id}]
-          (let [session-id (session/generate-session-id)
-                session-key (str (random-uuid))
-                session-key-hashed (session/hash-session-key session-key)]
-            (t2/insert! :model/Session {:id session-id :key_hashed session-key-hashed, :user_id user-id})
-            (is (= nil
-                   (session-locale session-key)))
-            (testing "w/ X-Metabase-Locale header"
+  (mt/with-temporary-setting-values [mfa-enforcement :off]
+    (let [handler        (-> (fn [_ respond _]
+                               (respond i18n/*user-locale*))
+                             mw.session/bind-current-user
+                             mw.session/wrap-current-user-info)
+          session-locale (fn [session-key & {:as more}]
+                           (handler
+                            (merge {:metabase-session-key session-key} more)
+                            identity
+                            (fn [e] (throw e))))]
+      (testing "No Session"
+        (is (= nil
+               (session-locale nil))))
+      (testing "w/ Session"
+        (testing "for user with no `:locale`"
+          (mt/with-temp [:model/User {user-id :id}]
+            (let [session-id (session/generate-session-id)
+                  session-key (str (random-uuid))
+                  session-key-hashed (session/hash-session-key session-key)]
+              (t2/insert! :model/Session {:id session-id :key_hashed session-key-hashed, :user_id user-id})
+              (is (= nil
+                     (session-locale session-key)))
+              (testing "w/ X-Metabase-Locale header"
+                (is (= "es_MX"
+                       (session-locale session-key :headers {"x-metabase-locale" "es-mx"})))))))
+        (testing "for user *with* `:locale`"
+          (mt/with-temp [:model/User {user-id :id} {:locale "es-MX"}]
+            (let [session-id (session/generate-session-id)
+                  session-key (str (random-uuid))
+                  session-key-hashed (session/hash-session-key session-key)]
+              (t2/insert! :model/Session {:id session-id :key_hashed session-key-hashed, :user_id user-id, :created_at :%now})
               (is (= "es_MX"
-                     (session-locale session-key :headers {"x-metabase-locale" "es-mx"})))))))
-      (testing "for user *with* `:locale`"
-        (mt/with-temp [:model/User {user-id :id} {:locale "es-MX"}]
-          (let [session-id (session/generate-session-id)
-                session-key (str (random-uuid))
-                session-key-hashed (session/hash-session-key session-key)]
-            (t2/insert! :model/Session {:id session-id :key_hashed session-key-hashed, :user_id user-id, :created_at :%now})
-            (is (= "es_MX"
-                   (session-locale session-key)))
-            (testing "w/ X-Metabase-Locale header"
-              (is (= "en_GB"
-                     (session-locale session-key :headers {"x-metabase-locale" "en-GB"}))))))))))
+                     (session-locale session-key)))
+              (testing "w/ X-Metabase-Locale header"
+                (is (= "en_GB"
+                       (session-locale session-key :headers {"x-metabase-locale" "en-GB"})))))))))))
 
 (deftest session-timeout-test
   (let [request-time (t/zoned-date-time "2022-01-01T00:00:00.000Z")
@@ -585,7 +667,8 @@
                       :cookies {}}]
     (testing "non-nil `session-timeout-seconds` should set the expiry of the timeout cookie relative to the request time"
       (mt/with-temporary-setting-values [session-timeout {:amount 60
-                                                          :unit   "minutes"}]
+                                                          :unit   "minutes"}
+                                         mfa-enforcement :off]
         (testing "with normal sessions"
           (let [request {:cookies               {request/metabase-session-cookie         {:value "8df268ab-00c0-4b40-9413-d66b966b696a"}
                                                  request/metabase-session-timeout-cookie {:value "alive"}}
@@ -614,7 +697,8 @@
                       :cookies {}}]
     (testing "If the request does not have session cookies (because they have expired), they should not be reset."
       (mt/with-temporary-setting-values [session-timeout {:amount 60
-                                                          :unit   "minutes"}]
+                                                          :unit   "minutes"}
+                                         mfa-enforcement :off]
         (let [request {:cookies {}}]
           (is (= response
                  (mw.session/reset-session-timeout* request response request-time))))))))
@@ -626,7 +710,8 @@
 (deftest session-timeout-requires-premium-feature-test
   (init-status/set-complete!)
   (mt/with-premium-features #{}
-    (mt/with-temporary-setting-values [session-timeout {:amount 5 :unit "minutes"}]
+    (mt/with-temporary-setting-values [session-timeout {:amount 5 :unit "minutes"}
+                                       mfa-enforcement :off]
       (mt/with-temp [:model/User {user-id :id}]
         (let [session-id  (session/generate-session-id)
               session-key (str (random-uuid))
@@ -661,3 +746,224 @@
         nil                         nil nil nil "agent-api"    "agent-api"
         ;; fully anonymous, non-special route
         nil                         nil nil nil nil            nil))))
+
+(defn session-valid?
+  [session-key]
+  (boolean (#'mw.session/current-user-info-for-session session-key nil)))
+
+(defn- generate-session!
+  [user-id auth-identity-id & {:keys [mfa_auth_identity_id]}]
+  (let [session-id (session/generate-session-id)
+        session-key (str (random-uuid))
+        session-key-hashed (session/hash-session-key session-key)]
+    (t2/insert! :model/Session {:id session-id
+                                :key_hashed session-key-hashed
+                                :user_id user-id
+                                :auth_identity_id auth-identity-id
+                                :mfa_auth_identity_id mfa_auth_identity_id})
+    session-key))
+
+(defn generate-mfa-session!
+  [user-id auth-identity-id]
+  (let [totp-auth-identity-id (t2/insert-returning-pk! :model/AuthIdentity {:user_id  user-id
+                                                                            :provider "totp"})]
+    (generate-session! user-id
+                       auth-identity-id
+                       :mfa_auth_identity_id totp-auth-identity-id)))
+
+(defn- generate-session-and-get-user-info!
+  [user-id auth-identity-id]
+  (let [session-key (generate-session! user-id auth-identity-id)
+        session     (#'mw.session/current-user-info-for-session session-key nil)]
+    session))
+
+(deftest mfa-password-test
+  (testing "password"
+    (testing "With feature flag off, password works"
+      (mt/with-premium-features
+       #{}
+        (mt/with-temp
+          [:model/User {user-id :id} {}]
+          (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+                session       (generate-session-and-get-user-info! user-id (:id auth-identity))]
+            (is (some? session))))))
+    (testing "When you lose access to the feature, MFA doesn't apply anymore."
+      (mt/when-ee-evailable
+       (mt/with-premium-features
+        #{:multi-factor-auth}
+         (mt/with-temporary-setting-values
+           [mfa-enforcement          :required
+            mfa-requirement-deadline nil]
+           (mt/with-premium-features
+            #{}
+             (mt/with-temp
+               [:model/User {user-id :id} {}]
+               (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+                     session       (generate-session-and-get-user-info! user-id (:id auth-identity))]
+                 (is (some? session)))))))))
+    (mt/when-ee-evailable
+     (testing "With feature flag on, password doesn't work"
+       (mt/with-premium-features
+        #{:multi-factor-auth}
+         (mt/with-temporary-setting-values
+           [mfa-enforcement :required
+            mfa-requirement-deadline nil]
+           (mt/with-temp
+             [:model/User {user-id :id} {}]
+             (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+                   session       (generate-session-and-get-user-info! user-id (:id auth-identity))]
+               (is (nil? session)))))))
+     (testing "With feature flag on before deadline, password doesn't work"
+       (mt/with-premium-features
+        #{:multi-factor-auth}
+         (mt/with-temporary-setting-values
+           [mfa-enforcement :required
+            mfa-requirement-deadline (t/plus (t/offset-date-time)
+                                             (t/hours 16))]
+           (mt/with-temp
+             [:model/User {user-id :id} {}]
+             (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+                   session       (generate-session-and-get-user-info! user-id (:id auth-identity))]
+               (is (some? session)))))))
+     (testing "With feature flag on after deadline, password doesn't work"
+       (mt/with-premium-features
+        #{:multi-factor-auth}
+         (mt/with-temporary-setting-values
+           [mfa-enforcement :required
+            mfa-requirement-deadline (t/minus (t/offset-date-time)
+                                              (t/hours 16))]
+           (mt/with-temp
+             [:model/User {user-id :id} {}]
+             (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+                   session       (generate-session-and-get-user-info! user-id (:id auth-identity))]
+               (is (nil? session))))))))))
+
+(deftest mfa-providers-test
+  (init-status/set-complete!)
+  (doseq [provider (->> (descendants :metabase.auth-identity.provider/provider)
+                        ;; We test password separately above because of toucan weirdnes
+                        (remove #{:provider/password})
+                        ;; This one doesn't let you get a session normally
+                        (remove #{:provider/emailed-secret-password-reset}))]
+    (testing (name provider)
+      (testing "With feature flag off, all providers work"
+        (mt/with-premium-features
+         #{}
+          (mt/with-temp
+            [:model/User {user-id :id} {}
+             :model/AuthIdentity {auth-identity-id :id} {:user_id  user-id
+                                                         :provider (name provider)}]
+            (let [session (generate-session-and-get-user-info! user-id auth-identity-id)]
+              (is (some? session))))))
+      (testing "When you lose access to the feature, MFA doesn't apply anymore."
+        (mt/when-ee-evailable
+         (mt/with-premium-features
+          #{:multi-factor-auth}
+           (mt/with-temporary-setting-values
+             [mfa-enforcement          :required
+              mfa-requirement-deadline nil]
+             (mt/with-premium-features
+              #{}
+               (mt/with-temp
+                 [:model/User {user-id :id} {}
+                  :model/AuthIdentity {auth-identity-id :id} {:user_id  user-id
+                                                              :provider (name provider)}]
+                 (let [session (generate-session-and-get-user-info! user-id auth-identity-id)]
+                   (is (some? session)))))))))
+      (mt/when-ee-evailable
+       (let [supports-mfa (auth-identity/isa? provider :metabase.auth-identity.provider/supports-mfa)]
+         (testing "With mfa is being enforced, methods that support mfa don't work"
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline nil]
+               (mt/with-temp
+                 [:model/User {user-id :id} {}
+                  :model/AuthIdentity {auth-identity-id :id} {:user_id  user-id
+                                                              :provider (name provider)}]
+                 (let [session (generate-session-and-get-user-info! user-id auth-identity-id)]
+                   (is ((if supports-mfa nil? some?) session)))))))
+         (testing "With mfa is being enforced but the enrollment deadline has not passed, methods that support mfa still work"
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline (t/plus (t/offset-date-time)
+                                                 (t/hours 16))]
+               (mt/with-temp
+                 [:model/User {user-id :id} {}
+                  :model/AuthIdentity {auth-identity-id :id} {:user_id  user-id
+                                                              :provider (name provider)}]
+                 (let [session (generate-session-and-get-user-info! user-id auth-identity-id)]
+                   (is (some? session)))))))
+         (testing "With mfa is being enforced but the enrollment deadline has not passed, methods that support mfa don't work"
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline (t/minus (t/offset-date-time)
+                                                  (t/hours 16))]
+               (mt/with-temp
+                 [:model/User {user-id :id} {}
+                  :model/AuthIdentity {auth-identity-id :id} {:user_id  user-id
+                                                              :provider (name provider)}]
+                 (let [session (generate-session-and-get-user-info! user-id auth-identity-id)]
+                   (is ((if supports-mfa nil? some?) session))))))))))))
+
+(deftest mfa-providers-list-test
+  (testing "Ldap and password are the only ones that support mfa"
+    (is (= #{:provider/password :provider/ldap}
+           (auth-identity/descendants :metabase.auth-identity.provider/supports-mfa))))
+  (testing "and the hard-coded list the session query is compiled from says the same thing"
+    (is (= #{:provider/password :provider/ldap}
+           @#'server.db/mfa-supported-methods))))
+
+(deftest mfa-session-preservation-test
+  (init-status/set-complete!)
+  (testing "If you had a session before MFA was required, it is not preserved"
+    (mt/when-ee-evailable
+     (mt/with-premium-features
+      #{}
+       (mt/with-temp
+         [:model/User {user-id :id} {}]
+         (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+               session-key (generate-session! user-id (:id auth-identity))]
+           (is (session-valid? session-key))
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline nil]
+               (is (not (session-valid? session-key))))))))))
+  (testing "If you had a session before MFA was required, but it was MFA'd, it is still preserved"
+    (mt/when-ee-evailable
+     (mt/with-premium-features
+      #{}
+       (mt/with-temp
+         [:model/User {user-id :id} {}]
+         (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+               session-key   (generate-mfa-session! user-id (:id auth-identity))]
+           (is (session-valid? session-key))
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline nil]
+               (is (session-valid? session-key)))))))))
+  (testing "If you had a session before the MFA requirement deadline, but it was MFA'd, it is still preserved"
+    (mt/when-ee-evailable
+     (mt/with-premium-features
+      #{}
+       (mt/with-temp
+         [:model/User {user-id :id} {}]
+         (let [auth-identity (t2/select-one :model/AuthIdentity :user_id user-id)
+               session-key   (generate-mfa-session! user-id (:id auth-identity))]
+           (is (session-valid? session-key))
+           (mt/with-premium-features
+            #{:multi-factor-auth}
+             (mt/with-temporary-setting-values
+               [mfa-enforcement :required
+                mfa-requirement-deadline (t/minus (t/offset-date-time)
+                                                  (t/hours 16))]
+               (is (session-valid? session-key))))))))))

@@ -1,3 +1,5 @@
+import { t } from "ttag";
+
 import * as Lib from "metabase-lib";
 import { getSchemaName } from "metabase-lib/v1/metadata/utils/schema";
 import type { DatabaseId, SchemaName } from "metabase-types/api";
@@ -73,3 +75,10 @@ export const shouldDisableItemNotInDb =
 
     return false;
   };
+
+export const getItemNotInDbTooltip =
+  (databaseId?: DatabaseId) =>
+  (item: OmniPickerItem): string | undefined =>
+    shouldDisableItemNotInDb(databaseId)(item)
+      ? t`You can't combine data from different databases.`
+      : undefined;

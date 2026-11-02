@@ -12,6 +12,7 @@
    [clojure.string :as str]
    [metabase.auth-identity.core :as auth-identity]
    [metabase.sso.settings :as sso-settings]
+   [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [methodical.core :as methodical]))
 
@@ -19,15 +20,9 @@
 
 ;;; -------------------------------------------------- Provider Registration --------------------------------------------------
 
-;; :provider/oidc already derives from :metabase.auth-identity.provider/create-user-if-not-exists
-;; (see metabase.sso.providers.oidc), so :provider/free-oidc inherits that transitively. Do NOT
-;; also `derive` it directly here -- that creates a diamond (two paths to the same ancestor) in
-;; Clojure's *shared, global* hierarchy. `underive` rebuilds the whole global hierarchy from
-;; scratch by replaying every derive pair in map-iteration order, and unrelated code elsewhere in
-;; the app that calls `underive` on some other keyword can hit our diamond mid-rebuild and throw
-;; ":provider/free-oidc already has :metabase.auth-identity.provider/create-user-if-not-exists as
-;; ancestor" -- reproduced by running the test suite, see metabase.transforms.models.transform.
-(derive :provider/free-oidc :provider/oidc)
+;; :provider/oidc already derives from ::provider/provider and ::provider/create-user-if-not-exists,
+;; so :provider/free-oidc inherits both.
+(auth-identity/derive! :provider/free-oidc :provider/oidc)
 
 (def provider-name
   "Provider name for Waterloo OIDC authentication."
@@ -50,25 +45,43 @@
 
 ;;; -------------------------------------------------- Open Redirect Guard --------------------------------------------------
 
+(defn- safe-relative-path?
+  "Whether `url` stays on this site once a browser follows it. Its path needs one leading slash and then no second
+  slash, backslash or control character, at every level of percent-decoding, because browsers read a run of slashes
+  or backslashes as `//host`. The query string and fragment cannot change the host, so they are not decoded."
+  [^String url]
+  (let [path (first (str/split url #"[?#]" 2))]
+    (loop [value path, levels 3]
+      (and (re-find #"^/(?![/\\])[^\\\p{Cntrl}]*$" value)
+           (let [decoded (try
+                           (java.net.URLDecoder/decode ^String value "UTF-8")
+                           ;; a stray % cannot decode into a slash, so this is as far as it goes
+                           (catch IllegalArgumentException _ value))]
+             (if (or (zero? levels) (= decoded value))
+               true
+               (recur decoded (dec levels))))))))
+
 (defn check-sso-redirect
   "Check if open redirect is being exploited in SSO. If so, or if the redirect-url is
   invalid, throw a 400."
   [redirect-url]
-  (try
-    (let [redirect (some-> redirect-url (java.net.URI.))
-          our-host (some-> ((requiring-resolve 'metabase.system.core/site-url)) (java.net.URI.) (.getHost))]
-      (when-not (or (nil? redirect-url)
-                    (and (nil? (.getHost redirect))
-                         (nil? (.getScheme redirect)))
-                    (= (.getHost redirect) our-host))
-        (throw (ex-info (tru "Invalid redirect URL")
-                        {:status-code  400
-                         :redirect-url redirect-url})))
-      redirect-url)
-    (catch java.net.URISyntaxException _
-      (throw (ex-info (tru "Invalid redirect URL")
-                      {:status-code  400
-                       :redirect-url redirect-url})))))
+  (let [invalid (fn []
+                  (throw (ex-info (tru "Invalid redirect URL")
+                                  {:status-code  400
+                                   :redirect-url redirect-url})))]
+    (try
+      (let [redirect (some-> redirect-url (java.net.URI.))
+            our-host (some-> ((requiring-resolve 'metabase.system.core/site-url)) (java.net.URI.) (.getHost))]
+        (when-not (or (nil? redirect-url)
+                      (if (.getScheme redirect)
+                        (and (#{"http" "https"} (u/lower-case-en (.getScheme redirect)))
+                             our-host
+                             (= (.getHost redirect) our-host))
+                        (safe-relative-path? redirect-url)))
+          (invalid))
+        redirect-url)
+      (catch java.net.URISyntaxException _
+        (invalid)))))
 
 ;;; -------------------------------------------------- Authentication --------------------------------------------------
 

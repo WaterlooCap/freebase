@@ -6,6 +6,7 @@
    [clojure.test :refer :all]
    [java-time.api :as t]
    [metabase.driver :as driver]
+   [metabase.events.core :as events]
    [metabase.models.interface :as mi]
    [metabase.sync.core :as sync]
    [metabase.sync.sync-metadata :as sync-metadata]
@@ -15,6 +16,7 @@
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
    [metabase.test.util :as tu]
+   [metabase.util.quick-task :as quick-task]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -114,7 +116,7 @@
   (let [process-name (mt/random-name)
         step-1-name  (mt/random-name)
         step-2-name  (mt/random-name)
-        sync-steps   [(sync-util/create-sync-step step-1-name (fn [_] (Thread/sleep 10) {:foo "bar"}))
+        sync-steps   [(sync-util/create-sync-step step-1-name (fn [_] (Thread/sleep 10) {:total-tables 1}))
                       (sync-util/create-sync-step step-2-name (fn [_] (Thread/sleep 10)))]
         mock-db      (mi/instance :model/Database {:name "test", :id 1, :engine :h2})
         [results]    (:operation-results
@@ -132,7 +134,7 @@
       (is (=? (merge default-task-history {:task process-name, :task_details nil})
               (fetch-task-history-row process-name))))
     (testing "step 1 history"
-      (is (=? (merge default-task-history {:task step-1-name, :task_details {:foo "bar"}})
+      (is (=? (merge default-task-history {:task step-1-name, :task_details {:total-tables 1}})
               (fetch-task-history-row step-1-name))))
     (testing "step 2 history"
       (is (=? (merge default-task-history {:task step-2-name, :task_details nil})
@@ -226,8 +228,8 @@
           (is (true?
                (str/includes? results "4.0 s"))))))))
 
-(derive ::sync-error-handling-begin ::sync-util/event)
-(derive ::sync-error-handling-end ::sync-util/event)
+(events/derive! ::sync-error-handling-begin ::sync-util/event)
+(events/derive! ::sync-error-handling-end ::sync-util/event)
 
 (deftest ^:parallel error-handling-test
   (testing "A ConnectException will cause sync to stop"
@@ -369,3 +371,42 @@
            :sync db "test sync failure"
            (fn [] (throw (Exception. "sync boom"))))
           (is (< initial (mt/metric-value system :metabase-sync/failures {:driver "h2"}))))))))
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                          Tables that take part in sync                                         |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- in-sync-tables? [table-id]
+  (contains? (into #{} (map :id) (sync-util/reducible-sync-tables (mt/id))) table-id))
+
+(defn- set-visibility-type-via-api! [table-id visibility-type]
+  (mt/user-http-request :crowberto :put 200 (format "table/%d" table-id) {:visibility_type visibility-type}))
+
+(deftest reducible-sync-tables-follows-user-visibility-test
+  (mt/with-dynamic-fn-redefs [quick-task/submit-task! (fn [_task])]
+    (testing "a visible table takes part in sync"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES"}]
+        (is (in-sync-tables? table-id))))
+    (testing "a table sync recorded as hidden is left out"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES" :visibility_type :hidden}]
+        (is (not (in-sync-tables? table-id)))))
+    (testing "a table hidden through PUT /api/table/:id is left out"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES"}]
+        (set-visibility-type-via-api! table-id "hidden")
+        (is (not (in-sync-tables? table-id)))))
+    (testing "a table hidden through the Data Studio data layer is left out"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES"}]
+        (mt/user-http-request :crowberto :post 200 "data-studio/table/edit" {:table_ids [table-id] :data_layer "hidden"})
+        (is (not (in-sync-tables? table-id)))))
+    (testing "a hidden table takes part in sync again once the user un-hides it"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES"}]
+        (set-visibility-type-via-api! table-id "hidden")
+        (set-visibility-type-via-api! table-id nil)
+        (is (in-sync-tables? table-id))))
+    (testing "a cruft table takes part in sync once the user sets its visibility_type to NULL"
+      (mt/with-temp [:model/Table {table-id :id} {:db_id (mt/id) :name "VENUES" :visibility_type :cruft}]
+        (is (not (in-sync-tables? table-id)))
+        (set-visibility-type-via-api! table-id nil)
+        (is (= {:visibility_type nil :visibility_type_set true}
+               (t2/select-one [:model/TableUserSettings :visibility_type :visibility_type_set] :table_id table-id)))
+        (is (in-sync-tables? table-id))))))

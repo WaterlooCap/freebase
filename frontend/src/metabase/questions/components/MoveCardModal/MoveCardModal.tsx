@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { push } from "react-router-redux";
 import { c, t } from "ttag";
 import _ from "underscore";
 
@@ -16,8 +15,9 @@ import { DashboardName } from "metabase/common/components/DashboardName";
 import type { OmniPickerCollectionItem } from "metabase/common/components/Pickers";
 import { MoveModal } from "metabase/common/components/Pickers";
 import { useDispatch } from "metabase/redux";
-import { API_UPDATE_QUESTION } from "metabase/redux/query-builder";
+import { questionUpdated } from "metabase/redux/query-builder";
 import { addUndo } from "metabase/redux/undo";
+import { useNavigate } from "metabase/router";
 import { Box, Icon, Radio, Title } from "metabase/ui";
 import * as Urls from "metabase/urls";
 import type { Card } from "metabase-types/api";
@@ -36,6 +36,7 @@ type ConfirmationTypes =
 
 export const MoveCardModal = ({ card, onClose }: MoveCardModalProps) => {
   const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   const [updateCard] = useUpdateCardMutation();
 
@@ -57,7 +58,8 @@ export const MoveCardModal = ({ card, onClose }: MoveCardModalProps) => {
   ) => {
     const update =
       destination.model === "dashboard"
-        ? { dashboard_id: destination.id as number }
+        ? // Unjustified type cast. FIXME
+          { dashboard_id: destination.id as number }
         : {
             dashboard_id: null,
             collection_id: canonicalCollectionId(destination.id),
@@ -72,7 +74,7 @@ export const MoveCardModal = ({ card, onClose }: MoveCardModalProps) => {
       .then(async (updatedCard) => {
         // HACK: entity framework would previously keep the qb in sync
         // with changing where the question lived
-        dispatch({ type: API_UPDATE_QUESTION, payload: updatedCard });
+        dispatch(questionUpdated(updatedCard));
 
         dispatch(
           addUndo({
@@ -100,7 +102,7 @@ export const MoveCardModal = ({ card, onClose }: MoveCardModalProps) => {
             { id: destination.id, name: "", ...dashboard },
             { editMode: true, scrollToDashcard: dashcard?.id },
           );
-          dispatch(push(url));
+          navigate(url);
         }
 
         onClose();
@@ -183,7 +185,7 @@ export const MoveCardModal = ({ card, onClose }: MoveCardModalProps) => {
                 value={"true"}
               />
               <Radio
-                mt="md"
+                mt="lg"
                 label={t`No, remove it from that dashboard`}
                 value={"false"}
               />

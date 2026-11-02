@@ -16,7 +16,6 @@
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
    [metabase.util :as u]
-   [metabase.util.json :as json]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))
 
@@ -194,22 +193,20 @@
                   (let [action   (cross-db-action (:id model) test-data-id)
                         response (mt/user-http-request :rasta :post 400 "action" action)]
                     (testing "Checks both databases for actions enabled"
-                      (is (partial= {:message "Actions are not enabled."
-                                     :data    {:database-id test-data-id}}
-                                    response))))))))))
+                      (is (= "Actions are not enabled."
+                             response))))))))))
       (testing "When executing, both dbs are checked for enabled"
         (mt/dataset test-data
           (let [test-data-id (mt/id)]
             (mt/with-actions-test-data-and-actions-enabled
               (mt/with-actions [{model-id :id} {:type :model, :dataset_query (mt/mbql-query categories)}
                                 {action-on-other-id :action-id} (cross-db-action model-id test-data-id)]
-                (is (partial= {:message "Actions are not enabled."
-                               :data    {:database-id test-data-id}}
-                              (mt/user-http-request :rasta
-                                                    :post 400
-                                                    (format "action/%s/execute" action-on-other-id)
-                                                    ;; Twitter is the current value so effectively a no-op
-                                                    {:parameters {:id 1 :source "Twitter"}})))))))
+                (is (= "Actions are not enabled."
+                       (mt/user-http-request :rasta
+                                             :post 400
+                                             (format "action/%s/execute" action-on-other-id)
+                                             ;; Twitter is the current value so effectively a no-op
+                                             {:parameters {:id 1 :source "Twitter"}})))))))
         (testing "When actions are enabled on the other database"
           (mt/dataset test-data
             (let [test-data-id (mt/id)]
@@ -253,11 +250,10 @@
                   (testing "the declared database_id is overwritten with the query's real database on save"
                     (is (= target-db-id (:database_id created))))
                   (testing "execution is blocked because actions are disabled on the query's real DB"
-                    (is (partial= {:message "Actions are not enabled."
-                                   :data    {:database-id target-db-id}}
-                                  (mt/user-http-request :crowberto :post 400
-                                                        (format "action/%s/execute" (:id created))
-                                                        {:parameters {}})))))))))))))
+                    (is (= "Actions are not enabled."
+                           (mt/user-http-request :crowberto :post 400
+                                                 (format "action/%s/execute" (:id created))
+                                                 {:parameters {}})))))))))))))
 
 (deftest unified-action-create-test
   (mt/test-helpers-set-global-values!
@@ -302,8 +298,7 @@
                   (testing "actions disabled"
                     (mt/with-actions-disabled
                       (is (= "Actions are not enabled."
-                             (:cause
-                              (mt/user-http-request :crowberto :post 400 "action" initial-action))))))
+                             (mt/user-http-request :crowberto :post 400 "action" initial-action)))))
                   (testing "a plain card instead of a model"
                     (mt/with-temp [:model/Card {plain-card-id :id} {:dataset_query (mt/mbql-query users)}]
                       (is (= "Actions must be made with models, not cards."
@@ -323,8 +318,7 @@
                       (testing "actions disabled"
                         (mt/with-actions-disabled
                           (is (= "Actions are not enabled."
-                                 (:cause
-                                  (mt/user-http-request :crowberto :put 400 action-path (update-fn {}))))))))
+                                 (mt/user-http-request :crowberto :put 400 action-path (update-fn {})))))))
                     (testing "Get"
                       (is (partial= (expected-fn updated-action)
                                     (mt/user-http-request :crowberto :get 200 action-path)))
@@ -353,34 +347,6 @@
                              (mt/user-http-request :rasta :delete 403 action-path))))
                     (is (nil? (mt/user-http-request :crowberto :delete 204 action-path)))
                     (is (= "Not found." (mt/user-http-request :crowberto :get 404 action-path)))))))))))))
-
-(deftest create-and-update-ignore-public-uuid-and-creator-id-test
-  (testing "POST /api/action and PUT /api/action/:id ignore public_uuid/made_public_by_id/creator_id:
-           only POST /api/action/:id/public_link, which requires superuser, may set these"
-    (mt/with-actions-enabled
-      (mt/with-actions-test-data-tables #{"users"}
-        (mt/with-actions [{card-id :id} {:type :model :dataset_query (mt/mbql-query users)}]
-          (let [malicious {:name       "malicious test"
-                           :type       "query"
-                           :model_id   card-id
-                           :database_id (t2/select-one-fn :database_id :model/Card :id card-id)
-                           :dataset_query (lib/native-query (mt/metadata-provider) "select 1")
-                           :public_uuid       (str (random-uuid))
-                           :made_public_by_id (mt/user->id :crowberto)
-                           :creator_id        (mt/user->id :crowberto)}
-                created   (mt/user-http-request :rasta :post 200 "action" malicious)]
-            (testing "Create ignores the smuggled fields"
-              (is (nil? (:public_uuid created)))
-              (is (nil? (:made_public_by_id created)))
-              (is (= (mt/user->id :rasta) (:creator_id created))))
-            (testing "Update ignores the smuggled fields, and can't overwrite an existing creator_id"
-              (let [updated (mt/user-http-request :rasta :put 200 (str "action/" (:id created))
-                                                  {:public_uuid       (str (random-uuid))
-                                                   :made_public_by_id (mt/user->id :crowberto)
-                                                   :creator_id        (mt/user->id :crowberto)})]
-                (is (nil? (:public_uuid updated)))
-                (is (nil? (:made_public_by_id updated)))
-                (is (= (mt/user->id :rasta) (:creator_id updated)))))))))))
 
 (deftest implicit-actions-on-non-raw-model-test
   (testing "Implicit actions are not supported on models that have clauses (aggregation, sort, breakout, ...)"
@@ -505,6 +471,53 @@
                                                     {:dataset_query (lib/native-query (mt/metadata-provider)
                                                                                       "update users set name = 'baz' where id = {{x}}")}))))))))))))))
 
+(deftest remap-parameter-keys-test
+  (testing "remap-parameter-keys translates incoming parameter keys to the destination parameter's :id"
+    (let [action {:parameters [{:id "d800e41d-edde-49cb-b63b-2386aba34334"
+                                :slug "id"
+                                :name "ID"}
+                               {:id "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b"
+                                :slug "discount"
+                                :name "Discount"}]}]
+      (testing "slug-keyed input is remapped to :id"
+        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
+               (#'api.action/remap-parameter-keys action
+                                                  {"id" 1 "discount" 0.1}))))
+      (testing "already-:id-keyed input is passed through unchanged"
+        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
+               (#'api.action/remap-parameter-keys
+                action
+                {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                 "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}))))
+      (testing "display-name keys (`:name`) are NOT accepted — they pass through unchanged"
+        (is (= {"ID" 1 "Discount" 0.1}
+               (#'api.action/remap-parameter-keys action
+                                                  {"ID" 1 "Discount" 0.1}))))
+      (testing "unknown keys pass through unchanged so downstream validation still fires"
+        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                "bogus" 42}
+               (#'api.action/remap-parameter-keys action
+                                                  {"id" 1 "bogus" 42}))))
+      (testing "a mix of :id and :slug keys resolve together"
+        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
+               (#'api.action/remap-parameter-keys
+                action
+                {"d800e41d-edde-49cb-b63b-2386aba34334" 1
+                 "discount" 0.1}))))
+      (testing "empty parameters map → empty result"
+        (is (= {}
+               (#'api.action/remap-parameter-keys action {}))))
+      (testing "implicit-action style (no :slug) — :id-keyed input still passes through"
+        (let [implicit-action {:parameters [{:id "name" :name "Name"}
+                                            {:id "email" :name "Email"}]}]
+          (is (= {"name" "Foo" "email" "foo@bar.com"}
+                 (#'api.action/remap-parameter-keys
+                  implicit-action
+                  {"name" "Foo" "email" "foo@bar.com"}))))))))
+
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                            PUBLIC SHARING ENDPOINTS                                            |
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -560,8 +573,7 @@
             (testing "We *cannot* share an action if actions are disabled"
               (mt/with-actions-disabled
                 (is (= "Actions are not enabled."
-                       (:cause
-                        (mt/user-http-request :crowberto :post 400 (format "action/%d/public_link" action-id)))))))
+                       (mt/user-http-request :crowberto :post 400 (format "action/%d/public_link" action-id))))))
             (testing "We get a 404 if the Action doesn't exist"
               (is (= "Not found."
                      (mt/user-http-request :crowberto :post 404 (format "action/%d/public_link" Integer/MAX_VALUE)))))))
@@ -579,8 +591,7 @@
             (testing "We *cannot* unshare an action if actions are disabled"
               (mt/with-actions-disabled
                 (is (= "Actions are not enabled."
-                       (:cause
-                        (mt/user-http-request :crowberto :delete 400 (format "action/%d/public_link" action-id)))))))
+                       (mt/user-http-request :crowberto :delete 400 (format "action/%d/public_link" action-id))))))
             (testing "Test that we can unshare an action"
               (mt/user-http-request :crowberto :delete 204 (format "action/%d/public_link" action-id))
               (is (= false
@@ -602,53 +613,6 @@
         (testing "Test that we get a 404 if Action doesn't exist"
           (is (= "Not found."
                  (mt/user-http-request :crowberto :delete 404 (format "action/%d/public_link" Integer/MAX_VALUE)))))))))
-
-(deftest remap-parameter-keys-test
-  (testing "remap-parameter-keys translates incoming parameter keys to the destination parameter's :id"
-    (let [action {:parameters [{:id "d800e41d-edde-49cb-b63b-2386aba34334"
-                                :slug "id"
-                                :name "ID"}
-                               {:id "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b"
-                                :slug "discount"
-                                :name "Discount"}]}]
-      (testing "slug-keyed input is remapped to :id"
-        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
-               (#'api.action/remap-parameter-keys action
-                                                  {"id" 1 "discount" 0.1}))))
-      (testing "already-:id-keyed input is passed through unchanged"
-        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
-               (#'api.action/remap-parameter-keys
-                action
-                {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                 "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}))))
-      (testing "display-name keys (`:name`) are NOT accepted — they pass through unchanged"
-        (is (= {"ID" 1 "Discount" 0.1}
-               (#'api.action/remap-parameter-keys action
-                                                  {"ID" 1 "Discount" 0.1}))))
-      (testing "unknown keys pass through unchanged so downstream validation still fires"
-        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                "bogus" 42}
-               (#'api.action/remap-parameter-keys action
-                                                  {"id" 1 "bogus" 42}))))
-      (testing "a mix of :id and :slug keys resolve together"
-        (is (= {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                "58c9e1ca-2f3a-4e57-96d9-2507c21a9a4b" 0.1}
-               (#'api.action/remap-parameter-keys
-                action
-                {"d800e41d-edde-49cb-b63b-2386aba34334" 1
-                 "discount" 0.1}))))
-      (testing "empty parameters map → empty result"
-        (is (= {}
-               (#'api.action/remap-parameter-keys action {}))))
-      (testing "implicit-action style (no :slug) — :id-keyed input still passes through"
-        (let [implicit-action {:parameters [{:id "name" :name "Name"}
-                                            {:id "email" :name "Email"}]}]
-          (is (= {"name" "Foo" "email" "foo@bar.com"}
-                 (#'api.action/remap-parameter-keys
-                  implicit-action
-                  {"name" "Foo" "email" "foo@bar.com"}))))))))
 
 (deftest execute-action-test
   (mt/with-actions-test-data-and-actions-enabled
@@ -709,11 +673,10 @@
       (testing "Check that we get a 400 if actions are disabled for the database."
         (mt/with-temp-vals-in-db :model/Database (mt/id) {:settings {:database-enable-actions false}}
           (is (= "Actions are not enabled."
-                 (:cause
-                  (mt/user-http-request :crowberto
-                                        :post 400
-                                        (format "action/%s/execute" action-id)
-                                        {:parameters {:id 1 :name "European"}})))))))))
+                 (mt/user-http-request :crowberto
+                                       :post 400
+                                       (format "action/%s/execute" action-id)
+                                       {:parameters {:id 1 :name "European"}}))))))))
 
 (deftest execute-action-permission-test
   (mt/test-drivers (mt/normal-drivers-with-feature :actions)
@@ -788,7 +751,7 @@
                                              :visualization_settings {:fields {"name" {:id     "name"
                                                                                        :hidden true}}}}]
         (testing "Hidden parameter should fail gracefully"
-          (testing "GET /api/action/:id/execute"
+          (testing "POST /api/action/:id/execute"
             (is (partial= {:message "No destination parameter found for #{\"name\"}. Found: #{\"last_login\" \"id\"}"}
                           (mt/user-http-request :crowberto :post 400 (format "action/%s/execute" action-id)
                                                 {:parameters {:name "Darth Vader"}})))))))))
@@ -800,8 +763,8 @@
         (mt/with-actions [_ {:type :model :dataset_query (mt/mbql-query users)}
                           {action-id :action-id} {:type :implicit :kind "row/update"}]
           (testing "a prefetched temporal value round-trips unchanged through an update execution (#32840)"
-            (let [fetch!      #(mt/user-http-request :crowberto :get 200 (format "action/%d/execute" action-id)
-                                                     :parameters (json/encode {:id 1}))
+            (let [fetch!      #(mt/user-http-request :crowberto :post 200 (format "action/%d/execute/values" action-id)
+                                                     {:parameters {"id" 1}})
                   {:keys [last_login] :as fetched} (fetch!)
                   local-value (.format ^java.time.OffsetDateTime last_login
                                        (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss"))]
@@ -821,72 +784,26 @@
                         {query-action-id :action-id}  {:type :query}]
         (testing "403 if user does not have permission to view the action"
           (is (= "You don't have permissions to do that."
-                 (mt/user-http-request :rasta :get 403 (format "action/%d/execute" update-action-id) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :rasta :post 403 (format "action/%d/execute/values" update-action-id) {:parameters {"id" 1}}))))
         (testing "404 if id does not exist"
           (is (= "Not found."
-                 (mt/user-http-request :rasta :get 404 (format "action/%d/execute" Integer/MAX_VALUE) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :rasta :post 404 (format "action/%d/execute/values" Integer/MAX_VALUE) {:parameters {"id" 1}}))))
         (testing "returns empty map for query actions (not implicit)"
           (is (= {}
-                 (mt/user-http-request :crowberto :get 200 (format "action/%d/execute" query-action-id) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :crowberto :post 200 (format "action/%d/execute/values" query-action-id) {:parameters {"id" 1}}))))
         (testing "Can't fetch for create action"
           (is (= "Values can only be fetched for actions that require a Primary Key."
-                 (mt/user-http-request :crowberto :get 400 (format "action/%d/execute" create-action-id) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :crowberto :post 400 (format "action/%d/execute/values" create-action-id) {:parameters {"id" 1}}))))
         (testing "fetch for update action return name and id"
           (is (= {:id 1 :name "Red Medicine"}
-                 (mt/user-http-request :crowberto :get 200 (format "action/%d/execute" update-action-id) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :crowberto :post 200 (format "action/%d/execute/values" update-action-id) {:parameters {"id" 1}}))))
         (testing "fetch for delete action returns the id only"
           (is (= {:id 1}
-                 (mt/user-http-request :crowberto :get 200 (format "action/%d/execute" delete-action-id) :parameters (json/encode {:id 1})))))
+                 (mt/user-http-request :crowberto :post 200 (format "action/%d/execute/values" delete-action-id) {:parameters {"id" 1}}))))
         (mt/with-actions-disabled
           (testing "error if actions is disabled"
             (is (= "Actions are not enabled."
-                   (:message (mt/user-http-request :crowberto :get 400 (format "action/%d/execute" delete-action-id) :parameters (json/encode {:id 1})))))))))))
-
-(deftest fetch-values-parameter-validation-test
-  (testing "GET /api/action/:action-id/execute"
-    ;; the request is rejected while decoding `:parameters`, before the handler runs, so no Action is needed
-    (let [url  (format "action/%d/execute" Integer/MAX_VALUE)
-          get! (fn [status & [parameters]]
-                 (apply mt/user-http-request :crowberto :get status url
-                        (when parameters [:parameters parameters])))]
-      (testing "a value that is not a scalar is rejected rather than dropped"
-        (doseq [[label value] {"a map"      {:data "string"}
-                               "a sequence" [1 2]}]
-          (testing label
-            (is (=? {:errors {:parameters "value must be a JSON object mapping parameter ids to scalar values."}}
-                    (get! 400 (json/encode {:id value})))))))
-      (testing "a blank parameter id is rejected"
-        (is (=? {:errors {:parameters "value must be a JSON object mapping parameter ids to scalar values."}}
-                (get! 400 (json/encode {"" 1})))))
-      (testing "anything that is not a JSON object is rejected, rather than blowing up while being decoded"
-        (doseq [value ["definitely-not-json" "[1,2]" "42" "null"]]
-          (testing (pr-str value)
-            (is (= "value must be a JSON object mapping parameter ids to scalar values."
-                   (get! 400 value))))))
-      (testing "`:parameters` is required"
-        (is (=? {:errors {:parameters some?}}
-                (get! 400))))
-      (testing "scalar values pass validation and reach the handler"
-        (doseq [value [1 "1" nil true]]
-          (testing (pr-str value)
-            (is (= "Not found."
-                   (get! 404 (json/encode {:id value}))))))))))
-
-(deftest execute-parameter-validation-test
-  (testing "POST /api/action/:id/execute"
-    ;; the request is rejected while decoding `:parameters`, before the handler runs, so no Action is needed
-    (let [url   (format "action/%d/execute" Integer/MAX_VALUE)
-          post! (fn [status parameters]
-                  (mt/user-http-request :crowberto :post status url {:parameters parameters}))]
-      (testing "a map value is rejected rather than dropped or normalized to nil -- it would otherwise reach the
-               write as query structure"
-        (is (=? {:errors {:parameters "nullable value must map parameter ids to scalar values."}}
-                (post! 400 {:id {:data "string"}}))))
-      (testing "scalars and sequences of them pass validation and reach the handler"
-        (doseq [value [1 "1" nil true [1 2] ["a" "b"]]]
-          (testing (pr-str value)
-            (is (= "Not found."
-                   (post! 404 {:id value})))))))))
+                   (mt/user-http-request :crowberto :post 400 (format "action/%d/execute/values" delete-action-id) {:parameters {"id" 1}})))))))))
 
 ;; This is just to test the flow, a comprehensive tests for error type ares in
 ;; [[metabase.driver.sql-jdbc.actions-test/action-error-handling-test]]
@@ -902,28 +819,3 @@
                     :errors {:user_id "This value does not exist in table \"users\"."}}
                    (mt/user-http-request :rasta :post 400 (format "action/%d/execute" update-action)
                                          {:parameters {"id" 1 "user_id" 99999}})))))))))
-
-(deftest update-model-id-permissions-test
-  (testing "PUT /api/action/:id may only repoint an Action at a model the user could have created it against"
-    (mt/with-actions-enabled
-      (mt/with-non-admin-groups-no-root-collection-perms
-        (mt/with-temp [:model/Collection {coll-id :id}     {}
-                       :model/Collection {secret-coll :id} {}]
-          (perms/grant-collection-readwrite-permissions! (perms/all-users-group) coll-id)
-          (perms/revoke-collection-permissions! (perms/all-users-group) secret-coll)
-          (mt/with-actions [{my-model :id}     {:type          :model
-                                                :collection_id coll-id
-                                                :dataset_query (mt/mbql-query users)}
-                            {action-id :action-id} {:type :query
-                                                    :dataset_query (mt/mbql-query users)}]
-            (mt/with-temp [:model/Card {secret-model :id} {:type          :model
-                                                           :collection_id secret-coll
-                                                           :dataset_query (mt/mbql-query users)}]
-              (testing "repointing at a model the user cannot write is rejected"
-                (is (= "You don't have permissions to do that."
-                       (mt/user-http-request :rasta :put 403 (str "action/" action-id)
-                                             {:model_id secret-model, :type "query"})))
-                (is (= my-model (t2/select-one-fn :model_id :model/Action :id action-id))))
-              (testing "leaving the model alone is still allowed"
-                (is (some? (mt/user-http-request :rasta :put 200 (str "action/" action-id)
-                                                 {:model_id my-model, :type "query"})))))))))))

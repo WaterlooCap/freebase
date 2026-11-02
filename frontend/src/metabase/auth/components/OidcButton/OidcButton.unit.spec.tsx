@@ -1,7 +1,8 @@
-import "metabase/plugins/builtin";
+import "metabase/auth/plugins";
+import "metabase/plugins/builtin/branding/application-name";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
-import { createMockState } from "metabase/redux/store/mocks";
 
 import { OidcButton } from "./OidcButton";
 

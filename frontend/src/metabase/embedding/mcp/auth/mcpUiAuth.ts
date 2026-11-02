@@ -1,6 +1,6 @@
 import type { App } from "@modelcontextprotocol/ext-apps/react";
 
-import { PLUGIN_API } from "metabase/plugins";
+import { PLUGIN_API } from "metabase/api/client";
 import { retry } from "metabase/utils/retry";
 
 import {

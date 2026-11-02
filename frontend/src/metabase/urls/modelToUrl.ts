@@ -1,3 +1,4 @@
+import { exploration } from "metabase/urls/explorations";
 import type {
   CardId,
   CollectionId,
@@ -11,7 +12,10 @@ import { browseDatabase } from "./browse";
 import { card } from "./cards";
 import { collection } from "./collections";
 import { dashboard } from "./dashboards";
-import { dataStudioPublishedTableMeasure } from "./data-studio";
+import {
+  dataStudioGlossary,
+  dataStudioPublishedTableMeasure,
+} from "./data-studio";
 import { document } from "./documents";
 import { indexedEntity } from "./indexed-entities";
 import { metric } from "./metrics";
@@ -76,6 +80,7 @@ export function modelToUrl(item: UrlableModel): string {
     case "transform":
       return transform(item.id);
     case "indexed-entity":
+      // Unjustified type cast. FIXME
       return indexedEntity(item as IndexedEntity);
     case "action":
       if (item.model_id != null) {
@@ -92,6 +97,10 @@ export function modelToUrl(item: UrlableModel): string {
         return dataStudioPublishedTableMeasure(item.table_id, item.id);
       }
       return NOT_FOUND_URL;
+    case "exploration":
+      return exploration(item.id);
+    case "glossary":
+      return dataStudioGlossary();
     default:
       return NOT_FOUND_URL;
   }

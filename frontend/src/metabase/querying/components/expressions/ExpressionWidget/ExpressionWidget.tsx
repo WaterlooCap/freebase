@@ -60,6 +60,7 @@ export const ExpressionWidget = (props: ExpressionWidgetProps) => {
   } = props;
 
   const [name, setName] = useState(initialName || "");
+  // Unjustified type cast. FIXME
   const [clause, setClause] = useState<Lib.ExpressionClause | null>(
     (initialClause ?? null) as Lib.ExpressionClause | null,
   );
@@ -209,7 +210,7 @@ export const ExpressionWidget = (props: ExpressionWidgetProps) => {
       />
 
       <LayoutFooter>
-        <Flex gap="xs" align="center" justify="end" p="0" pr="sm">
+        <Flex gap="xxs" align="center" justify="end" p="0" pr="sm">
           {withName && (
             <NameInput
               value={name}

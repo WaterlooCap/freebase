@@ -1,6 +1,6 @@
 ```ts
 type ActionResultForDelete = {
-  rows-deleted: readonly (null | string | number | false | true | object)[];
+  rows-deleted: readonly RowValue[];
 };
 ```
 
@@ -10,8 +10,8 @@ Response from a single-row delete — the affected primary keys.
 
 <!-- [<snippet properties>] -->
 
-| Property                                 | Type                                                                         |
-| :--------------------------------------- | :--------------------------------------------------------------------------- |
-| <a id="rows-deleted"></a> `rows-deleted` | readonly (`null` \| `string` \| `number` \| `false` \| `true` \| `object`)[] |
+| Property                                 | Type                                       |
+| :--------------------------------------- | :----------------------------------------- |
+| <a id="rows-deleted"></a> `rows-deleted` | readonly [`RowValue`](./api/RowValue.md)[] |
 
 <!-- [<endsnippet properties>] -->

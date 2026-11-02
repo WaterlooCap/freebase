@@ -8,17 +8,17 @@ import {
   useGetDatabaseQuery,
   useGetFieldTableIdsQuery,
   useGetTableQuery,
-  useSubmitMetabotSourceFeedbackMutation,
 } from "metabase/api";
+import type { GeneratedCard } from "metabase/api/ai-streaming/schemas";
 import { ForwardRefLink } from "metabase/common/components/Link";
 import { useToast } from "metabase/common/hooks";
 import { deserializeCardFromQuery } from "metabase/common/utils/card";
+import { getMetabotId } from "metabase/metabot/state";
 import {
   getCollectionLocationLabel,
   getCollectionLocationParts,
   getDatabaseLocationParts,
-} from "metabase/common/utils/source-location";
-import { getMetabotId } from "metabase/metabot/state";
+} from "metabase/metabot/utils/source-location";
 import { useSelector } from "metabase/redux";
 import {
   ActionIcon,
@@ -39,11 +39,12 @@ import type {
   MetabotCodeEdit,
   MetabotCodeEditorBufferContext,
   MetabotSourceFeedback,
-  NativeDatasetQuery,
   TemplateTags,
 } from "metabase-types/api";
 
-import S from "./MetabotAgentDataPartMessage.module.css";
+import { useSubmitMetabotSourceFeedbackMutation } from "../../api";
+
+import S from "./MetabotAgentDataPart.module.css";
 
 type DecodedQuery =
   | {
@@ -68,34 +69,31 @@ type SourceFeedbackTarget = Pick<
   "source_id" | "source_type"
 >;
 
-const isNativeDatasetQuery = (
-  datasetQuery: DatasetQuery,
-): datasetQuery is NativeDatasetQuery =>
-  "type" in datasetQuery && datasetQuery.type === "native";
-
-const decodeQueryFromPath = (path: string): DecodedQuery => {
+const decodeQuery = (datasetQuery: DatasetQuery | undefined): DecodedQuery => {
   try {
-    const datasetQuery = deserializeCardFromQuery(path).dataset_query;
     if (!datasetQuery) {
-      return { kind: "none" };
-    }
-
-    if (isNativeDatasetQuery(datasetQuery)) {
-      const sql = datasetQuery.native.query;
-      const databaseId = datasetQuery.database;
-      if (typeof sql === "string" && typeof databaseId === "number") {
-        return {
-          kind: "native",
-          databaseId,
-          sql,
-          templateTags: datasetQuery.native["template-tags"],
-        };
-      }
       return { kind: "none" };
     }
 
     const question = Question.create({ dataset_query: datasetQuery });
     const query = question.query();
+    const isNativeOnly =
+      Lib.queryDisplayInfo(query).isNative && Lib.stageCount(query) === 1;
+
+    if (isNativeOnly) {
+      const databaseId = Lib.databaseID(query);
+      if (databaseId == null) {
+        return { kind: "none" };
+      }
+      const templateTags = Lib.templateTags(query);
+      return {
+        kind: "native",
+        databaseId,
+        sql: Lib.rawNativeQuery(query),
+        templateTags:
+          Object.keys(templateTags).length > 0 ? templateTags : undefined,
+      };
+    }
 
     const tableIds = uniqueNumbers(Lib.allSourceTableIds(query));
     const cardIds = uniqueNumbers(Lib.allSourceCardIds(query));
@@ -242,17 +240,17 @@ const SourceItemSkeleton = ({ hasFeedback }: { hasFeedback?: boolean }) => {
     >
       <Flex direction="column" gap="0.375rem" miw={0} maw="100%">
         <Flex gap="sm" align="center" miw={0} maw="100%">
-          <Skeleton w={12} h={12} radius="xs" />
-          <Skeleton w="7rem" h="0.75rem" radius="xs" />
+          <Skeleton w={12} h={12} radius="xxs" />
+          <Skeleton w="7rem" h="0.75rem" radius="xxs" />
         </Flex>
         <Flex pl="1.25rem">
-          <Skeleton w="10rem" h="0.75rem" radius="xs" />
+          <Skeleton w="10rem" h="0.75rem" radius="xxs" />
         </Flex>
       </Flex>
       {hasFeedback && (
-        <Flex gap="xs" align="center" style={{ flexShrink: 0 }}>
-          <Skeleton w={24} h={24} radius="sm" />
-          <Skeleton w={24} h={24} radius="sm" />
+        <Flex gap="xxs" align="center" style={{ flexShrink: 0 }}>
+          <Skeleton w={24} h={24} radius="xs" />
+          <Skeleton w={24} h={24} radius="xs" />
         </Flex>
       )}
     </Flex>
@@ -294,7 +292,7 @@ const SourceFeedbackButtons = ({
   };
 
   return (
-    <Flex gap="xs" align="center" style={{ flexShrink: 0 }}>
+    <Flex gap="xxs" align="center" style={{ flexShrink: 0 }}>
       <Tooltip label={t`Source is correct`}>
         <ActionIcon
           aria-label={t`Source is correct`}
@@ -302,7 +300,7 @@ const SourceFeedbackButtons = ({
           variant="default"
           className={S.sourceFeedbackButton}
           data-active={feedback === true || undefined}
-          bdrs="sm"
+          bdrs="xs"
           style={{
             boxShadow: "0 1px 3px 0 #00000012",
           }}
@@ -321,7 +319,7 @@ const SourceFeedbackButtons = ({
           variant="default"
           className={S.sourceFeedbackButton}
           data-active={feedback === false || undefined}
-          bdrs="sm"
+          bdrs="xs"
           style={{
             boxShadow: "0 1px 3px 0 #00000012",
           }}
@@ -606,14 +604,14 @@ const NativeSourcesRow = ({
   );
 };
 
-export const NavigateToTablePills = ({
+const DatasetQueryTablePills = ({
   messageId,
-  path,
+  datasetQuery,
 }: {
   messageId?: string;
-  path: string;
+  datasetQuery: DatasetQuery | undefined;
 }) => {
-  const decoded = useMemo(() => decodeQueryFromPath(path), [path]);
+  const decoded = useMemo(() => decodeQuery(datasetQuery), [datasetQuery]);
 
   if (decoded.kind === "none") {
     return null;
@@ -645,6 +643,39 @@ export const NavigateToTablePills = ({
       fieldIds={decoded.fieldIds}
       messageId={messageId}
     />
+  );
+};
+
+export const GeneratedCardTablePills = ({
+  messageId,
+  value,
+}: {
+  messageId?: string;
+  value: GeneratedCard;
+}) => (
+  <DatasetQueryTablePills
+    messageId={messageId}
+    datasetQuery={value.query.query}
+  />
+);
+
+export const NavigateToTablePills = ({
+  messageId,
+  path,
+}: {
+  messageId?: string;
+  path: string;
+}) => {
+  const datasetQuery = useMemo(() => {
+    try {
+      return deserializeCardFromQuery(path).dataset_query;
+    } catch {
+      return undefined;
+    }
+  }, [path]);
+
+  return (
+    <DatasetQueryTablePills messageId={messageId} datasetQuery={datasetQuery} />
   );
 };
 

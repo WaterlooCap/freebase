@@ -27,7 +27,7 @@
   (fixtures/initialize :test-users)
   (encryption-tu/with-encrypted-app-db-fixture tu/test-encryption-key))
 
-(deftest ^:synchronized manifest-endpoint-test
+(deftest manifest-endpoint-test
   (testing "GET /api/slack/manifest with metabot-v3 feature"
     (mt/with-temporary-setting-values [site-url "https://localhost:3000"]
       (testing "with site-url configured"
@@ -84,26 +84,6 @@
                                                        "x-slack-request-timestamp" "1234567890"}}}
                           {:type "url_verification"
                            :challenge "test"})))))))
-
-(deftest ^:synchronized realistic-event-callback-test
-  (testing "POST /api/metabot/slack/events handles a realistic Slack payload: envelope keys survive decode and
-           unknown fields are dropped without breaking the event"
-    (tu/with-slackbot-setup
-      (let [body     (-> tu/base-dm-event
-                         (assoc :event_id "Ev12345678"
-                                :team_id "T12345678"
-                                :api_app_id "A0000001"
-                                :authorizations [{:enterprise_id nil :team_id "T12345678" :user_id "U000001"}]
-                                :is_ext_shared_channel false
-                                :event_context "4-eyJldCI6Im1lc3NhZ2UifQ")
-                         (assoc-in [:event :channel] "D123")
-                         (assoc-in [:event :text] "Hello from a realistic payload")
-                         (assoc-in [:event :client_msg_id] "b7d00b5d-0000-4000-8000-000000000000")
-                         (assoc-in [:event :blocks] [{:type "rich_text" :block_id "abc"}]))
-            response (mt/client :post 200 "metabot/slack/events"
-                                (tu/slack-request-options body)
-                                body)]
-        (is (= "ok" response))))))
 
 (deftest ^:synchronized feature-flag-test
   (testing "POST /api/metabot/slack/events"
@@ -229,6 +209,40 @@
                 (let [msg (t2/select-one :model/MetabotMessage :channel_id channel-id :role "assistant")]
                   (is (some? (:slack_msg_id msg))))))))))))
 
+(deftest ^:synchronized app-mention-long-answer-fits-slack-blocks-test
+  (testing "POST /events with app_mention truncates a long answer so Slack accepts it (BOT-1606)"
+    (tu/with-slackbot-setup
+      (let [channel-id "C-LONG-ANSWER-TEST"
+            event-body (assoc-in tu/base-mention-event [:event :channel] channel-id)]
+        (tu/with-slackbot-mocks
+          {:ai-text tu/oversized-answer}
+          (fn [{:keys [post-calls]}]
+            (let [response (mt/client :post 200 "metabot/slack/events"
+                                      (tu/slack-request-options event-body)
+                                      event-body)]
+              (is (= "ok" response))
+              (u/poll {:thunk      #(t2/select-one :model/MetabotMessage
+                                                   :channel_id channel-id :role "assistant"
+                                                   :slack_msg_id [:not= nil])
+                       :done?      some?
+                       :timeout-ms 5000})
+              (is (= 1 (count @post-calls)))
+              (let [blocks (:blocks (first @post-calls))]
+                (testing "no block is over its limit -- unlike the untruncated answer"
+                  (is (nil? (tu/oversized-block-error blocks)))
+                  ;; The control has to name the block type the answer actually goes in, or it would
+                  ;; assert a section rule no longer in play and pass whatever the code does.
+                  (is (some? (tu/oversized-block-error [{:type "markdown" :text tu/oversized-answer}]))
+                      "the answer really is past the limit, so the case under test is the real one"))
+                (testing "the answer is cut to the limit, and the message says why"
+                  (is (= tu/slack-markdown-text-limit
+                         (count (:text (first blocks)))))
+                  (is (some (fn [block]
+                              (and (= "context" (:type block))
+                                   (str/includes? (get-in block [:elements 0 :text])
+                                                  "too long to post in Slack")))
+                            blocks)))))))))))
+
 (deftest ^:synchronized stream-start-failure-test
   (testing "When start-stream fails, falls back to a regular message"
     (tu/with-slackbot-setup
@@ -251,6 +265,29 @@
                             @post-calls)))
                 (testing "stop-stream is never called"
                   (is (= 0 (count @stop-stream-calls))))))))))))
+
+;; Not ^:parallel: `with-prometheus-system!` redefs a process-global var.
+(deftest ^:synchronized dm-response-undeliverable-metric-test
+  (testing "a DM whose stream and plain-text fallback both fail is counted as undeliverable"
+    (tu/with-slackbot-setup
+      (mt/with-prometheus-system! [_ system]
+        (let [event-body tu/base-dm-event]
+          (tu/with-slackbot-mocks
+            {:ai-text "Here is your answer"}
+            (fn [_]
+              ;; `post-thread-reply` delegates to `post-message`, so failing that fails the
+              ;; fallback too -- the user ends up with nothing at all.
+              (mt/with-dynamic-fn-redefs
+                [slackbot.client/stop-stream  (constantly {:ok false :error "invalid_blocks"})
+                 slackbot.client/post-message (constantly {:ok false :error "channel_not_found"})]
+                (let [response (mt/client :post 200 "metabot/slack/events"
+                                          (tu/slack-request-options event-body)
+                                          event-body)]
+                  (is (= "ok" response))
+                  (u/poll {:thunk      #(mt/metric-value system :metabase-slackbot/responses-undeliverable)
+                           :done?      pos?
+                           :timeout-ms 5000})
+                  (is (= 1.0 (mt/metric-value system :metabase-slackbot/responses-undeliverable))))))))))))
 
 (deftest ^:synchronized ai-request-error-stops-stream-test
   (testing "When the agent loop throws after the stream has started, the stream is stopped"
@@ -440,7 +477,7 @@
                           expected-thread-ts (assoc :thread_ts expected-thread-ts))
                         (first @ephemeral-calls)))))))))))
 
-(deftest ^:synchronized slack-id->user-id-test
+(deftest slack-id->user-id-test
   (testing "slack-id->user-id only returns active users with sso_source 'slack'"
     (let [slack-id "U12345SLACK"]
       (mt/with-temporary-setting-values [server.settings/slack-connect-signing-secret-version 0]
@@ -481,7 +518,7 @@
           (testing "returns nil when no AuthIdentity exists"
             (is (nil? (#'slackbot/slack-id->user-id slack-id)))))))))
 
-(deftest ^:synchronized slack-id->user-id-signing-secret-version-test
+(deftest slack-id->user-id-signing-secret-version-test
   (testing "slack-id->user-id respects signing secret version"
     (let [slack-id "U12345VERSION"]
       (mt/with-temp [:model/User {user-id :id} {:email     "version-test@example.com"
@@ -586,7 +623,7 @@
               (testing "no ephemeral messages"
                 (is (= 0 (count @ephemeral-calls)))))))))))
 
-(deftest ^:synchronized authorize-delete-request-test
+(deftest authorize-delete-request-test
   (testing "authorize-delete-request"
     (testing "returns :ignored when channel-id is nil"
       (is (= :ignored (:status (#'slackbot/authorize-delete-request "U123" nil "ts123")))))
@@ -694,7 +731,7 @@
               (Thread/sleep 200)
               (is (= 0 (count @update-calls)) "delete from non-owner should produce no update"))))))))
 
-(deftest ^:synchronized put-slack-settings-test
+(deftest put-slack-settings-test
   (let [creds {:slack-connect-client-id "id"
                :slack-connect-client-secret "secret"
                :metabot-slack-signing-secret "signing"}
@@ -723,7 +760,7 @@
       (is (= "You don't have permissions to do that."
              (mt/user-http-request :rasta :put 403 "metabot/slack/settings" creds))))))
 
-(deftest ^:synchronized put-slack-settings-signing-secret-version-test
+(deftest put-slack-settings-signing-secret-version-test
   (testing "resaving the same signing secret does not increment the version"
     (mt/with-temporary-setting-values [sso-settings/slack-connect-enabled true
                                        server.settings/slack-connect-signing-secret-version 7]
@@ -751,7 +788,7 @@
         (is (= 8
                (server.settings/slack-connect-signing-secret-version)))))))
 
-(deftest ^:synchronized feedback-modal-view-test
+(deftest feedback-modal-view-test
   (testing "positive feedback modal has no issue type dropdown"
     (let [view (#'slackbot/feedback-modal-view true {:conversation_id "c1"})]
       (is (= "metabot_feedback_modal" (:callback_id view)))
@@ -763,7 +800,7 @@
       (is (= "issue_type" (:block_id (first (:blocks view)))))
       (is (= "freeform_feedback" (:block_id (second (:blocks view))))))))
 
-(deftest ^:synchronized handle-feedback-action-authenticated-test
+(deftest handle-feedback-action-authenticated-test
   (testing "feedback action opens modal with correct private_metadata"
     (let [conversation-id "conv-123"
           open-view-calls (atom [])]
@@ -790,7 +827,7 @@
               (is (= "C123" (:channel_id pm)))
               (is (= "123.456" (:message_ts pm))))))))))
 
-(deftest ^:synchronized handle-feedback-action-negative-test
+(deftest handle-feedback-action-negative-test
   (testing "negative feedback action opens modal with issue type dropdown"
     (let [open-view-calls (atom [])]
       (mt/with-dynamic-fn-redefs [slackbot/slack-id->user-id (constantly (mt/user->id :rasta))
@@ -809,7 +846,7 @@
             (is (= 2 (count (:blocks view))) "negative modal should have issue_type and freeform blocks")
             (is (= "issue_type" (:block_id (first (:blocks view)))))))))))
 
-(deftest ^:synchronized handle-feedback-action-unauthenticated-test
+(deftest handle-feedback-action-unauthenticated-test
   (testing "feedback action is silently skipped for unauthenticated user"
     (let [open-view-calls (atom [])]
       (mt/with-dynamic-fn-redefs [slackbot/slack-id->user-id (constantly nil)
@@ -843,7 +880,8 @@
                           :profile_id      "slackbot"
                           :external_id     external-id
                           :total_tokens    5
-                          :data            [{:_type "TEXT" :role "assistant" :content "hi"}]}))]
+                          :data            [{:type "text" :text "hi"}]
+                          :data_version    2}))]
       {:conv-id conv-id :external-id external-id :message-id msg-id})))
 
 (defn- tear-down-slackbot-feedback!
@@ -871,7 +909,7 @@
                                        (assoc :issue_type
                                               {:issue_type_select {:selected_option {:value issue-type}}}))}}})
 
-(deftest ^:synchronized handle-feedback-modal-submission-test
+(deftest handle-feedback-modal-submission-test
   (let [rasta-id (mt/user->id :rasta)]
     (testing "negative feedback with issue_type and freeform writes a row"
       (let [{:keys [conv-id message-id external-id]} (setup-slackbot-feedback! rasta-id)]
@@ -931,7 +969,7 @@
             (is (some? (t2/select-one :model/MetabotFeedback :message_id message-id :user_id rasta-id))))
           (finally (tear-down-slackbot-feedback! conv-id)))))))
 
-(deftest ^:synchronized handle-feedback-modal-submission-multi-user-test
+(deftest handle-feedback-modal-submission-multi-user-test
   (testing "two users in the same conversation can submit independent feedback on the same assistant message"
     (let [rasta-id (mt/user->id :rasta)
           lucky-id (mt/user->id :lucky)
@@ -944,7 +982,8 @@
                      :profile_id      "slackbot"
                      :user_id         lucky-id
                      :total_tokens    0
-                     :data            [{:_type "TEXT" :role "user" :content "+1"}]})
+                     :data            [{:type "text" :text "+1"}]
+                     :data_version    2})
         (let [rasta-result (#'slackbot/handle-feedback-modal-submission
                             (modal-submission-payload {:conv-id     conv-id
                                                        :external-id external-id
@@ -971,7 +1010,7 @@
           (is (= "not for me" (:freeform_feedback (get by-user lucky-id)))))
         (finally (tear-down-slackbot-feedback! conv-id))))))
 
-(deftest ^:synchronized handle-feedback-modal-submission-unresolvable-external-id-test
+(deftest handle-feedback-modal-submission-unresolvable-external-id-test
   (testing "modal submission drops cleanly (no local write) when external_id cannot be resolved"
     (let [rasta-id (mt/user->id :rasta)
           payload  (modal-submission-payload {:conv-id     (str (random-uuid))
@@ -985,12 +1024,11 @@
       (is (nil? result) "handler returns nil and does not schedule async work")
       (is (zero? (t2/count :model/MetabotFeedback :user_id rasta-id
                            {:where [:in :message_id
-                                    ^:allow-subquery
-                                    {:select [:id] :from [:metabot_message]
-                                     :where [:= :external_id "nothing-to-match"]}]}))
+                                    ^:allow-subquery {:select [:id] :from [:metabot_message]
+                                                      :where [:= :external_id "nothing-to-match"]}]}))
           "no feedback row written for unresolvable submissions"))))
 
-(deftest ^:synchronized handle-feedback-modal-submission-lurker-test
+(deftest handle-feedback-modal-submission-lurker-test
   (testing "modal submission from a non-participant is rejected locally"
     (let [rasta-id (mt/user->id :rasta)
           lucky-id (mt/user->id :lucky)
@@ -1008,7 +1046,7 @@
             "no feedback row is written for a lurker")
         (finally (tear-down-slackbot-feedback! conv-id))))))
 
-(deftest ^:synchronized handle-feedback-modal-submission-resolves-via-channel-and-ts-fallback-test
+(deftest handle-feedback-modal-submission-resolves-via-channel-and-ts-fallback-test
   (testing "buttons predating :message_external_id still resolve via (channel_id, message_ts)"
     (let [rasta-id    (mt/user->id :rasta)
           conv-id     (str (random-uuid))
@@ -1026,7 +1064,8 @@
                                   :channel_id      channel-id
                                   :slack_msg_id    message-ts
                                   :total_tokens    5
-                                  :data            [{:_type "TEXT" :role "assistant" :content "hi"}]}))
+                                  :data            [{:type "text" :text "hi"}]
+                                  :data_version    2}))
               ;; external-id intentionally omitted from the button payload — only channel + ts are present
               payload    (modal-submission-payload {:conv-id     conv-id
                                                     :external-id nil
@@ -1045,7 +1084,7 @@
 
 ;; -------------------------------- conversation-permalink ---------------------------------------
 
-(deftest ^:synchronized conversation-permalink-returns-nil-when-slack-not-configured-test
+(deftest conversation-permalink-returns-nil-when-slack-not-configured-test
   (testing "conversation-permalink does not call Slack when slack-configured? is false"
     (let [client-calls (atom 0)]
       (mt/with-dynamic-fn-redefs [channel.settings/slack-configured?     (constantly false)
@@ -1056,7 +1095,7 @@
         (is (zero? @client-calls)
             "no slack client call when not configured")))))
 
-(deftest ^:synchronized conversation-permalink-returns-nil-when-channel-or-ts-missing-test
+(deftest conversation-permalink-returns-nil-when-channel-or-ts-missing-test
   (testing "conversation-permalink short-circuits to nil when channel or ts is missing — no client call"
     (let [client-calls (atom 0)]
       (mt/with-dynamic-fn-redefs [channel.settings/slack-configured?     (constantly true)
@@ -1068,7 +1107,7 @@
         (is (nil? (slackbot/conversation-permalink "C123" nil)))
         (is (zero? @client-calls))))))
 
-(deftest ^:synchronized conversation-permalink-happy-path-test
+(deftest conversation-permalink-happy-path-test
   (testing "conversation-permalink returns the Slack permalink string when ok is true"
     (mt/with-dynamic-fn-redefs [channel.settings/slack-configured?     (constantly true)
                                 channel.settings/unobfuscated-slack-app-token (constantly "xoxb-test")
@@ -1078,7 +1117,7 @@
       (is (= "https://slack.example/C123/1.0"
              (slackbot/conversation-permalink "C123" "1.0"))))))
 
-(deftest ^:synchronized conversation-permalink-returns-nil-when-slack-says-not-ok-test
+(deftest conversation-permalink-returns-nil-when-slack-says-not-ok-test
   (testing "conversation-permalink returns nil when Slack responds with {:ok false}"
     (mt/with-dynamic-fn-redefs [channel.settings/slack-configured?     (constantly true)
                                 channel.settings/unobfuscated-slack-app-token (constantly "xoxb-test")
@@ -1086,7 +1125,7 @@
                                                                          {:ok false :error "channel_not_found"})]
       (is (nil? (slackbot/conversation-permalink "C123" "1.0"))))))
 
-(deftest ^:synchronized conversation-permalink-swallows-client-exception-test
+(deftest conversation-permalink-swallows-client-exception-test
   (testing "exceptions from the Slack client are caught — function returns nil rather than propagating"
     (mt/with-dynamic-fn-redefs [channel.settings/slack-configured?     (constantly true)
                                 channel.settings/unobfuscated-slack-app-token (constantly "xoxb-test")

@@ -2,16 +2,14 @@
   (:require
    [clojure.data :as data]
    [metabase.models.interface :as mi]
+   [metabase.revisions.db :as revisions.db]
    [metabase.util.i18n :refer [deferred-tru]]
-   [metabase.util.match :as match]
-   [toucan2.core :as t2]))
+   [metabase.util.match :as match]))
 
 (defn- readable-name
-  "The name of the `model` with `id`, for use in a revision description -- but only to a reader allowed to see it.
-  Anyone can read a revision of an object they can read, and its history may name containers they cannot."
   [model id]
   (when id
-    (when-let [instance (t2/select-one model :id id)]
+    (when-let [instance (revisions.db/entity model id)]
       (when (mi/can-read? instance)
         (:name instance)))))
 

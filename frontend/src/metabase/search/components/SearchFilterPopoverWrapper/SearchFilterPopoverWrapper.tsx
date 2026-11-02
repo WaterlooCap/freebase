@@ -33,8 +33,8 @@ export const SearchFilterPopoverWrapper = ({
 }: SearchFilterPopoverWrapperProps) => {
   if (isLoading) {
     return (
-      <Center p="lg">
-        <Loader data-testid="loading-indicator" />
+      <Center p="xl">
+        <Loader />
       </Center>
     );
   }

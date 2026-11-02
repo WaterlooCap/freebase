@@ -225,11 +225,14 @@
                                                                    org.apache.hadoop.thirdparty/hadoop-shaded-guava]}
 
   ;; Third-party deps required by hive-jdbc at runtime, pinned at safe versions.
-  org.apache.thrift/libthrift                        {:mvn/version "0.16.0"
-                                                      :exclusions [org.apache.commons/commons-lang3
-                                                                   ;; pinned in and resolved from /deps.edn
-                                                                   org.apache.httpcomponents/httpclient
-                                                                   org.apache.httpcomponents/httpcore]}
+  ;; libthrift 0.24.0 declares runtime deps (httpclient5, httpcore5, jakarta.servlet-api)
+  ;; that only serve its THttpClient/TServlet classes; hive-jdbc is built against
+  ;; httpclient 4.x and cannot use them, so exclude them to keep the jar lean.
+  org.apache.thrift/libthrift                        {:mvn/version "0.25.0"
+                                                      :exclusions [jakarta.servlet/jakarta.servlet-api
+                                                                   org.apache.commons/commons-lang3
+                                                                   org.apache.httpcomponents.client5/httpclient5
+                                                                   org.apache.httpcomponents.core5/httpcore5]}
   org.apache.zookeeper/zookeeper                     {:mvn/version "3.8.7"
                                                       :exclusions [ch.qos.logback/logback-classic
                                                                    ch.qos.logback/logback-core

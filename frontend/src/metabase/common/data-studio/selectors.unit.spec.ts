@@ -1,22 +1,22 @@
-import { createMockState } from "metabase/redux/store/mocks";
+import { createMockState } from "__support__/state";
 import { createMockUser } from "metabase-types/api/mocks";
 
 import { canAccessDataStudio } from "./selectors";
 
-jest.mock("metabase/selectors/embed", () => ({
-  getIsEmbeddingIframe: jest.fn(() => false),
+jest.mock("metabase/utils/iframe", () => ({
+  isWithinIframe: jest.fn(() => false),
 }));
 
-const { getIsEmbeddingIframe } = jest.requireMock("metabase/selectors/embed");
+const { isWithinIframe } = jest.requireMock("metabase/utils/iframe");
 
 describe("canAccessDataStudio", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    getIsEmbeddingIframe.mockReturnValue(false);
+    isWithinIframe.mockReturnValue(false);
   });
 
   it("returns false when in embedding iframe", () => {
-    getIsEmbeddingIframe.mockReturnValue(true);
+    isWithinIframe.mockReturnValue(true);
     const state = createMockState({
       currentUser: createMockUser({ is_superuser: true }),
     });

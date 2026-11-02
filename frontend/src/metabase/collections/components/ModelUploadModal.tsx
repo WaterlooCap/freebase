@@ -63,6 +63,7 @@ export function ModelUploadModal({
 
       return onUpload({
         tableId: Number(tableId),
+        // Unjustified type cast. FIXME
         modelId: modelForTableId?.id as number,
         uploadMode: uploadMode,
       });
@@ -104,23 +105,24 @@ export function ModelUploadModal({
       title={t`Select upload destination`}
       onClose={onClose}
     >
-      <Stack mb="lg">
+      <Stack mb="xl">
         <Text>
           {t`If your CSV has the same columns as a model from a previously uploaded file, you can append data to that model. Otherwise, you can create a new model.`}
         </Text>
         <Radio.Group
           value={uploadMode}
+          // Unjustified type cast. FIXME
           onChange={(val) => setUploadMode(val as UploadMode)}
           pl="1px"
         >
           <Radio label={t`Create a new model`} value={UploadMode.create} />
           <Radio
-            mt="md"
+            mt="lg"
             label={t`Append to a model`}
             value={UploadMode.append}
           />
           <Radio
-            mt="md"
+            mt="lg"
             label={t`Replace data in a model`}
             value={UploadMode.replace}
           />

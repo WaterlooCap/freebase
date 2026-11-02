@@ -44,6 +44,8 @@
   "Resolves enterprise command by symbol and calls with args, or else throws error if not EE"
   [symb & args]
   (let [f (try
+            ;; Enterprise command symbols are fixed at the call sites below.
+            #_{:clj-kondo/ignore [:metabase/modules]}
             (classloader/require (symbol (namespace symb)))
             (or (resolve symb)
                 (throw (ex-info (trs "{0} does not exist" symb) {})))
@@ -90,7 +92,7 @@
       (println "Dump complete")
       (system-exit! 0))
     (catch Throwable e
-      (log/errorf "Failed to dump application database to H2 file: %s" (ex-message e))
+      (log/error e "Failed to dump application database to H2 file")
       (system-exit! 1))))
 
 (defn ^:command reset-password
@@ -165,12 +167,42 @@
   (classloader/require 'metabase.cmd.config-file-gen)
   ((resolve 'metabase.cmd.config-file-gen/generate-config-file-doc!)))
 
+(defn ^:command ai-providers-documentation
+  "Generates a markdown file listing the AI providers Metabase can connect to, the credentials each one needs, and the
+  models each one offers. This is written to a file called `docs/ai/providers.md`."
+  []
+  (classloader/require 'metabase.cmd.ai-provider-dox)
+  ((resolve 'metabase.cmd.ai-provider-dox/generate-dox!)))
+
+(defn ^:command mcp-tools-documentation
+  "Generates `docs/ai/mcp-tools.md`, the reference for the tools Metabase's MCP server exposes to AI clients."
+  []
+  (classloader/require 'metabase.cmd.mcp-tools-dox)
+  ((resolve 'metabase.cmd.mcp-tools-dox/generate-dox!)))
+
 (defn ^:command command-documentation
   "Generates a markdown file containing documentation for all CLI commands. This is written to a file called
   `docs/installation-and-operation/commands.md`."
   []
   (classloader/require 'metabase.cmd.command-dox)
   ((resolve 'metabase.cmd.command-dox/generate-dox!)))
+
+(def ^:private doc-generators
+  "The commands that `all-documentation` runs, in order.
+  Commands that load only their own namespaces run first. The two settings generators load every Metabase namespace,
+  so they run last and cannot change the output of the others."
+  [#'mcp-tools-documentation
+   #'ai-providers-documentation
+   #'api-documentation
+   #'command-documentation
+   #'config-template
+   #'environment-variables-documentation])
+
+(defn ^:command all-documentation
+  "Runs every documentation command in one process."
+  []
+  (doseq [generator doc-generators]
+    (generator)))
 
 (defn ^:command driver-methods
   "Print a list of all multimethods available for a driver to implement, optionally with their docstrings."
@@ -207,19 +239,6 @@
   [path & options]
   (call-enterprise 'metabase-enterprise.serialization.cmd/v2-dump! path (get-parsed-options #'export options)))
 
-(defn ^:command seed-entity-ids
-  "Add entity IDs for instances of serializable models that don't already have them."
-  []
-  (when-not (call-enterprise 'metabase-enterprise.serialization.cmd/seed-entity-ids!)
-    (throw (Exception. "Error encountered while seeding entity IDs"))))
-
-(defn ^:command drop-entity-ids
-  "Drop entity IDs for instances of serializable models. Useful for migrating from v1 serialization (x.46 and earlier)
-  to v2 (x.47+)."
-  []
-  (when-not (call-enterprise 'metabase-enterprise.serialization.cmd/drop-entity-ids!)
-    (throw (Exception. "Error encountered while dropping entity IDs"))))
-
 (defn ^:command rotate-encryption-key
   "Rotate the encryption key of a metabase database. The MB_ENCRYPTION_SECRET_KEY environment variable has to be set to
   the current key, and the parameter `new-key` has to be the new key. `new-key` has to be at least 16 chars."
@@ -230,7 +249,7 @@
     (log/info "Encryption key rotation OK.")
     (system-exit! 0)
     (catch Throwable e
-      (log/errorf "ERROR ROTATING KEY: %s" (ex-message e))
+      (log/error e "ERROR ROTATING KEY.")
       (system-exit! 1))))
 
 (defn ^:command enable-encryption
@@ -263,7 +282,7 @@
     (log/info "Encryption removed OK.")
     (system-exit! 0)
     (catch Throwable e
-      (log/errorf "ERROR REMOVING ENCRYPTION: %s" (ex-message e))
+      (log/error e "ERROR REMOVING ENCRYPTION.")
       (system-exit! 1))))
 
 ;;; ------------------------------------------------ Validate Commands ----------------------------------------------

@@ -17,6 +17,24 @@
 
 (set! *warn-on-reflection* true)
 
+(defn paths->children
+  "The immediate children of directory `path` implied by a flat collection of file `paths`. For snapshots
+  that hold their whole file list in memory and so have no tree objects to walk; the git source overrides
+  this with a real subtree read."
+  [paths ^String path]
+  ;; the root is the empty prefix — snapshot paths are repo-relative, so they never start with a slash
+  (let [prefix (if (str/blank? path) "" (str path "/"))]
+    (->> paths
+         (keep (fn [^String p]
+                 (when (str/starts-with? p prefix)
+                   (let [child (subs p (count prefix))]
+                     (str prefix (if-let [idx (str/index-of child "/")]
+                                   (subs child 0 idx)
+                                   child))))))
+         distinct
+         sort
+         vec)))
+
 ;; A read-only, path-filtered view over a snapshot, used to scope ingestion to a set of path regexes:
 ;; files (and reads) outside the filters are omitted. It is not a write target — exports write to the
 ;; unfiltered source snapshot — so the write methods throw rather than silently filtering writes.
@@ -27,6 +45,11 @@
     (filter (fn [file-path]
               (some (fn [path-filter] (re-matches path-filter file-path)) path-filters))
             (source.p/list-files original-snapshot)))
+
+  ;; Derived from this view's own (filtered) file list rather than delegated, so a child filtered out of
+  ;; `list-files` can't reappear here.
+  (list-dir [this path]
+    (paths->children (source.p/list-files this) path))
 
   (read-file [_ path]
     (when (some (fn [path-filter] (re-matches path-filter path)) path-filters)
@@ -45,6 +68,11 @@
                                             (atom nil) (atom []))
     (seq root-dependencies) (ingestable/wrap-root-dep-ingestable root-dependencies)))
 
+(defn storage-context
+  "The serdes storage context for git sync: a Table's user settings file stands in for the Table's own."
+  []
+  (assoc (serdes/storage-base-context) :inline-user-settings true))
+
 (defn entity->path
   "The repo-relative path an extracted `entity` serializes to, using storage context `opts`."
   [opts entity]
@@ -61,7 +89,7 @@
 
 (defn entity->file-spec
   "Serializes a single extracted entity into a `{:path :content}` file spec, using storage context
-  `opts` (from `serdes/storage-base-context`)."
+  `opts` (from [[storage-context]])."
   [opts entity]
   {:path    (entity->path opts entity)
    :content (entity->content entity)})
@@ -76,25 +104,32 @@
   can't be extracted. Hashes the live DB serialization (never on-disk bytes), so it's stable across sync points."
   [row]
   (when-let [entity (first (spec/extract-entities-for-rows [row]))]
-    (content-hash (:content (entity->file-spec (serdes/storage-base-context) entity)))))
+    (content-hash (:content (entity->file-spec (storage-context) entity)))))
 
 (defn serialize-specs
   "Serializes a stream of entities into an eager vector of `{:path :content}` file specs. Reports progress
   via `task-id` as specs are produced; pass nil for `task-id` to serialize without progress reporting
   (e.g. for a dry-run merge preview).
 
+  `stream` is traversed exactly once. Progress needs a denominator: pass `:total` (see
+  [[metabase-enterprise.remote-sync.spec/exportable-entity-count]]) to keep an uncounted stream such as the
+  extraction eduction streaming; without it an uncounted stream is realized first.
+
   Throws Exception if any entity in the stream is an Exception instance."
-  [stream task-id]
-  (let [opts (serdes/storage-base-context)
-        stream-count (bounded-count 10000 stream)]
+  [stream task-id & {:keys [total]}]
+  (let [opts   (storage-context)
+        stream (if (or (nil? task-id) total (counted? stream)) stream (vec stream))
+        total  (or total (when task-id (count stream)))
+        report (if (and task-id (pos? total))
+                 (fn [n]
+                   (remote-sync.task/update-progress! task-id (-> n (/ total) (min 1) (* 0.65) (+ 0.3))))
+                 (constantly nil))]
     (into []
           (map-indexed (fn [idx entity]
                          (when (instance? Exception entity)
                            (throw entity))
                          (let [spec (entity->file-spec opts entity)]
-                           (when task-id
-                             (remote-sync.task/update-progress!
-                              task-id (-> (inc idx) (/ stream-count) (* 0.65) (+ 0.3))))
+                           (report (inc idx))
                            spec)))
           stream)))
 
@@ -115,19 +150,19 @@
   "Runs the entity-identity 3-way merge of local state against the remote tip, without writing. Returns
   the raw merge result `{:merged :conflicts :summary}` from [[remote-sync.merge/three-way-merge]], plus
   `:force-push-casualties` (remote content a force push would discard; see
-  [[remote-sync.merge/force-push-casualties]]):
+  [[remote-sync.merge/force-push-casualties]]), via [[remote-sync.merge/merge-with-casualties]]:
   - `base-snapshot` - the last successfully synced state (the merge base)
   - `stream`        - the local state to serialize (ours)
   - `snapshot`      - the current remote tip (theirs)
 
   `:merged` is the full reconciled set of `{:path :content}` specs. The export path writes it to the
-  remote; the local-only pull merge loads it into the app DB via [[specs->snapshot]]."
-  [stream snapshot base-snapshot task-id]
-  (let [ours   (serialize-specs stream task-id)
+  remote; the local-only pull merge loads it into the app DB via [[specs->snapshot]]. `:total` is passed
+  through to [[serialize-specs]]."
+  [stream snapshot base-snapshot task-id & {:keys [total]}]
+  (let [ours   (serialize-specs stream task-id :total total)
         base   (snapshot->specs base-snapshot)
         theirs (snapshot->specs snapshot)]
-    (assoc (remote-sync.merge/three-way-merge base ours theirs)
-           :force-push-casualties (remote-sync.merge/force-push-casualties base ours theirs))))
+    (remote-sync.merge/merge-with-casualties base ours theirs)))
 
 (defn specs->snapshot
   "Builds an in-memory read-only SourceSnapshot backed by `specs` (a seq of `{:path :content}`), so merged
@@ -136,6 +171,7 @@
   (let [by-path (into {} (map (juxt :path :content)) specs)]
     (reify source.p/SourceSnapshot
       (list-files [_] (vec (keys by-path)))
+      (list-dir [_ path] (paths->children (keys by-path) path))
       (read-file [_ path] (get by-path path))
       (open-commit [_] (throw (ex-info "in-memory merge snapshot is read-only" {})))
       (version [_] nil))))

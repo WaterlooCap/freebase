@@ -6,11 +6,13 @@
    [clojure.test :refer :all]
    [java-time.api :as t]
    [metabase.actions.models :as action]
+   [metabase.actions.schema :as actions.schema]
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.util :as driver.u]
+   [metabase.lib.core :as lib]
    [metabase.query-processor.test-util :as qp.test-util]
    [metabase.test.data :as data]
    [metabase.test.data.dataset-definitions :as defs]
@@ -175,6 +177,11 @@
               (is (= [[74]]
                      (row-count))))))))))
 
+(defn- insert-action!
+  "Normalizes `action` the way the REST API decodes one and inserts it, returning its id."
+  [action]
+  (action/insert! (lib/normalize ::actions.schema/action.for-insert action)))
+
 (defmulti ^:private create-action*!
   {:arglists '([options-map model-id])}
   (fn [options-map _model-id]
@@ -182,7 +189,7 @@
 
 (defmethod create-action*! :query
   [options-map model-id]
-  (let [action-id (action/insert!
+  (let [action-id (insert-action!
                    (merge {:model_id model-id
                            :name "Query Example"
                            :parameters [{:id "id"
@@ -217,7 +224,7 @@
 
 (defmethod create-action*! :implicit
   [options-map model-id]
-  (let [action-id (action/insert! (merge
+  (let [action-id (insert-action! (merge
                                    {:type :implicit
                                     :name "Update Example"
                                     :kind "row/update"
@@ -230,7 +237,7 @@
 
 (defmethod create-action*! :http
   [options-map model-id]
-  (let [action-id (action/insert! (merge
+  (let [action-id (insert-action! (merge
                                    {:type :http
                                     :name "Echo Example"
                                     :template {:url (client/build-url "testing/echo[[?fail={{fail}}]]" {})
@@ -264,8 +271,7 @@
     (tu/with-model-cleanup [:model/Action]
       (f model))))
 
-;;; TODO FIXME -- rename this to [[with-actions!]] and then remove the Kondo ignore comment below
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO FIXME -- rename this to [[with-actions!]]
 (defmacro with-actions
   "Execute `body` with newly created Actions.
   `binding-forms-and-options-maps` is a vector of even number of elements, binding and options-map,
@@ -326,24 +332,21 @@
   (tu/with-temp-vals-in-db :model/Database db-id {:settings {:database-enable-actions enable?}}
     (thunk)))
 
-;;; TODO -- FIXME, rename this to `with-actions-enabled!` and remove the `:clj-kondo/ignore`
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO -- FIXME, rename this to `with-actions-enabled!`
 (defmacro with-actions-enabled
   "Execute `body` with Actions enabled for the current test Database."
   {:style/indent 0}
   [& body]
   `(do-with-actions-set! (data/id) true (fn [] ~@body)))
 
-;;; TODO -- FIXME, rename this to `with-actions-disabled!` and remove the `:clj-kondo/ignore`
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO -- FIXME, rename this to `with-actions-disabled!`
 (defmacro with-actions-disabled
   "Execute `body` with Actions disabled for the current test Database."
   {:style/indent 0}
   [& body]
   `(do-with-actions-set! (data/id) false (fn [] ~@body)))
 
-;;; TODO FIXME -- rename this to [[with-actions!]] and then remove the Kondo ignore comment below
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO FIXME -- rename this to [[with-actions-test-data-and-actions-enabled!]]
 (defmacro with-actions-test-data-and-actions-enabled
   "Combines [[with-actions-test-data]] and [[with-actions-enabled]]."
   {:style/indent 0}
@@ -351,3 +354,15 @@
   `(with-actions-test-data
      (with-actions-enabled
        ~@body)))
+
+(defn latest-query-execution-id
+  "The id of the newest QueryExecution row, or 0 when there is none: the `since-id` for [[action-executions]]."
+  []
+  (or (t2/select-one-pk :model/QueryExecution {:order-by [[:id :desc]]}) 0))
+
+(defn action-executions
+  "The action-context QueryExecution rows written after `since-id`, oldest first."
+  [since-id]
+  (into []
+        (filter (comp #{:action-execute :public-action-execute} :context))
+        (t2/select :model/QueryExecution {:where [:> :id since-id], :order-by [[:id :asc]]})))

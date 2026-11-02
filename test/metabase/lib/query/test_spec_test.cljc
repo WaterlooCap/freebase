@@ -24,40 +24,6 @@
                            :source-table (meta/id :venues)}]}
               query)))))
 
-(deftest ^:parallel test-query-string-keys-test
-  (testing "test-query accepts a spec exactly as it arrives from a JSON request body: string keys and values"
-    (let [query (lib.query.test-spec/test-query
-                 meta/metadata-provider
-                 {"stages" [{"source" {"type" "table"
-                                       "id"   (meta/id :venues)}}]})]
-      (is (=? {:lib/type :mbql/query
-               :database (meta/id)
-               :stages   [{:lib/type     :mbql.stage/mbql
-                           :source-table (meta/id :venues)}]}
-              query)))))
-
-(deftest ^:parallel test-query-string-keys-full-spec-test
-  (testing "a full string-keyed camelCase spec with aggregations, breakouts, and order bys decodes"
-    (let [query (lib.query.test-spec/test-query
-                 meta/metadata-provider
-                 {"stages" [{"source"       {"type" "table", "id" (meta/id :orders)}
-                             "aggregations" [{"type" "operator", "operator" "count"}
-                                             {"type" "operator", "operator" "sum"
-                                              "args" [{"type" "column", "name" "SUBTOTAL"}]}]
-                             "breakouts"    [{"type" "column", "name" "CREATED_AT"
-                                              "sourceName" "ORDERS", "unit" "year"}]
-                             "orderBys"     [{"direction" "desc", "type" "column"
-                                              "name" "sum", "displayName" "Sum of Subtotal"}]}]})]
-      (is (=? {:lib/type :mbql/query
-               :database (meta/id)
-               :stages   [{:lib/type     :mbql.stage/mbql
-                           :source-table (meta/id :orders)
-                           :aggregation  [[:count {}]
-                                          [:sum {} [:field {} (meta/id :orders :subtotal)]]]
-                           :breakout     [[:field {:temporal-unit :year} (meta/id :orders :created-at)]]
-                           :order-by     [[:desc {} [:aggregation {} string?]]]}]}
-              query)))))
-
 (deftest ^:parallel test-query-with-card-source-test
   (testing "test-query creates a query from a card source"
     (let [query (lib.query.test-spec/test-query
@@ -145,6 +111,17 @@
                             :aggregations [{:type     :operator
                                             :operator :count}]}]})]
       (is (=? [[:count {}]]
+              (lib/aggregations query))))))
+
+(deftest ^:parallel test-query-with-metric-aggregation-test
+  (testing "test-query adds Metrics as aggregations"
+    (let [query (lib.query.test-spec/test-query
+                 lib.tu/metadata-provider-with-metric
+                 {:stages [{:source       {:type :table
+                                           :id   (meta/id :checkins)}
+                            :aggregations [{:type :metric
+                                            :id   1}]}]})]
+      (is (=? [[:metric {} 1]]
               (lib/aggregations query))))))
 
 (deftest ^:parallel test-query-with-breakouts-test
@@ -669,6 +646,17 @@
               (lib/breakouts query)))
       (let [query (lib.query.test-spec/test-query
                    meta/metadata-provider
+                   {:stages [{:source    {:type :table
+                                          :id   (meta/id :orders)}
+                              :breakouts [{:type            :column
+                                           :name            "CATEGORY"
+                                           :source-field-id (meta/id :orders :product-id)}]}]})]
+        (is (=? [[:field
+                  {:source-field (meta/id :orders :product-id)}
+                  (meta/id :products :category)]]
+                (lib/breakouts query))))
+      (let [query (lib.query.test-spec/test-query
+                   meta/metadata-provider
                    {:stages [{:source {:type :table
                                        :id   (meta/id :orders)}
                               :order-bys [{:type :column
@@ -702,6 +690,7 @@
       (is (= 1 (count (lib/filters query 1))))
       (is (= 5 (lib/current-limit query 2))))))
 
+;; intentionally one giant spec: the test-query features compose in one build (:fields covered below)
 #_{:clj-kondo/ignore [:metabase/i-like-making-cams-eyes-bleed-with-horrifically-long-tests]}
 (deftest ^:parallel test-query-comprehensive-all-features-test
   (testing "test-query exercises all functionality in a comprehensive multi-stage query"
@@ -860,7 +849,6 @@
       (is (empty? (lib/fields query 2)))
       (is (= 25 (lib/current-limit query 2))))))
 
-#_{:clj-kondo/ignore [:metabase/i-like-making-cams-eyes-bleed-with-horrifically-long-tests]}
 (deftest ^:parallel test-query-comprehensive-all-features-test-with-fields
   (testing "test-query exercises all functionality in a comprehensive multi-stage query, with fields clause"
     (let [query (lib.query.test-spec/test-query
@@ -1196,7 +1184,7 @@
                 :display-name "Custom Name"
                 :default      "Foo"
                 :required     true
-                :widget-type  "string/contains"
+                :widget-type  :string/contains
                 :id           string?}]
               (lib/template-tags query))))))
 
@@ -1230,7 +1218,7 @@
                 :display-name "Custom Name"
                 :default      "Foo"
                 :required     true
-                :widget-type  "string/contains"
+                :widget-type  :string/contains
                 :id           string?}]
               (lib/template-tags query))))))
 
@@ -1253,6 +1241,6 @@
                 :display-name "Custom Name"
                 :default      "Foo"
                 :required     true
-                :widget-type  "string/contains"
+                :widget-type  :string/contains
                 :id           string?}]
               (lib/template-tags query))))))

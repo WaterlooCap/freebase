@@ -1,6 +1,7 @@
 (ns metabase.test.util
   "Helper functions and macros for writing unit tests."
   (:require
+   [clojure.core.memoize :as memoize]
    [clojure.java.io :as io]
    [clojure.set :as set]
    [clojure.string :as str]
@@ -129,10 +130,12 @@
              :visualization_settings {}}))
 
    :model/Collection
-   (fn [_] (default-created-at-timestamped {:name (u.random/random-name)}))
+   (fn [_] (default-created-at-timestamped {:entity_id (u/generate-nano-id)
+                                            :name (u.random/random-name)}))
 
    :model/Action
-   (fn [_] {:creator_id (rasta-id)})
+   (fn [_] {:creator_id (rasta-id)
+            :entity_id (u/generate-nano-id)})
 
    :model/Channel
    (fn [_] (default-timestamped
@@ -149,17 +152,19 @@
    (fn [_] (default-timestamped
             {:target_type "document"
              :creator_id  (rasta-id)
-             :content     {:text (u.random/random-name)}}))
+             :content     {:type "text", :text (u.random/random-name)}}))
 
    :model/Dashboard
    (fn [_] (default-timestamped
             {:creator_id (rasta-id)
+             :entity_id (u/generate-nano-id)
              :name (u.random/random-name)}))
 
    :model/DashboardCard
    (fn [_] (default-timestamped
             {:row 0
              :col 0
+             :entity_id (u/generate-nano-id)
              :size_x 4
              :size_y 4}))
 
@@ -169,7 +174,8 @@
    :model/DashboardTab
    (fn [_]
      (default-timestamped
-      {:name (u.random/random-name)
+      {:entity_id (u/generate-nano-id)
+       :name (u.random/random-name)
        :position 0}))
 
    :model/Database
@@ -184,12 +190,14 @@
 
    :model/Dimension
    (fn [_] (default-timestamped
-            {:name (u.random/random-name)
+            {:entity_id (u/generate-nano-id)
+             :name (u.random/random-name)
              :type "internal"}))
 
    :model/Document
    (fn [_] (default-timestamped
-            {:name (u.random/random-name)
+            {:entity_id (u/generate-nano-id)
+             :name (u.random/random-name)
              :document {:type "doc"
                         :content [{:attrs {:_id (str (random-uuid))}
                                    :type "paragraph"
@@ -201,6 +209,17 @@
                                               :text "World"}]}]}
              :content_type "application/json+vnd.prose-mirror"
              :creator_id (rasta-id)}))
+
+   :model/Exploration
+   (fn [_] (default-timestamped
+            {:creator_id (rasta-id)
+             :name (u.random/random-name)}))
+
+   :model/ExplorationQuery
+   (fn [_] (default-timestamped
+            {:database_id (data/id)
+             :query_type "default"
+             :status "pending"}))
 
    :model/Field
    (fn [_] (default-timestamped
@@ -220,6 +239,7 @@
    (fn [_] (default-timestamped
             {:creator_id (rasta-id)
              :definition {}
+             :entity_id (u/generate-nano-id)
              :name "Mock Measure"
              :table_id (data/id :checkins)}))
 
@@ -232,7 +252,8 @@
    (fn [_] {:role         "assistant"
             :profile_id   "gpt-5"
             :total_tokens 0
-            :data         []})
+            :data         []
+            :data_version 2})
 
    :model/AiUsageLog
    (fn [_] {:source            "test"
@@ -244,6 +265,7 @@
    :model/NativeQuerySnippet
    (fn [_] (default-timestamped
             {:creator_id (user-id :crowberto)
+             :entity_id (u/generate-nano-id)
              :name (u.random/random-name)
              :content "1 = 1"}))
 
@@ -285,7 +307,8 @@
             :creator_id (rasta-id)})
 
    :model/PermissionsGroup
-   (fn [_] {:name (u.random/random-name)})
+   (fn [_] {:entity_id (u/generate-nano-id)
+            :name (u.random/random-name)})
 
    :model/PermissionsGroupMembership
    (fn [_] {:__test-only-sigil-allowing-direct-insertion-of-permissions-group-memberships true})
@@ -293,10 +316,12 @@
    :model/Pulse
    (fn [_] (default-timestamped
             {:creator_id (rasta-id)
+             :entity_id (u/generate-nano-id)
              :name (u.random/random-name)}))
 
    :model/PulseCard
    (fn [_] {:position 0
+            :entity_id (u/generate-nano-id)
             :include_csv false
             :include_xls false})
 
@@ -304,6 +329,7 @@
    (fn [_] (default-timestamped
             {:channel_type :email
              :details {}
+             :entity_id (u/generate-nano-id)
              :schedule_type :daily
              :schedule_hour 15}))
 
@@ -318,6 +344,7 @@
             {:creator_id (rasta-id)
              :definition {}
              :description "Lookin' for a blueberry"
+             :entity_id (u/generate-nano-id)
              :name "Toucans in the rainforest"
              :table_id (data/id :checkins)}))
 
@@ -344,7 +371,8 @@
    :model/Timeline
    (fn [_]
      (default-timestamped
-      {:name "Timeline of bird squawks"
+      {:entity_id (u/generate-nano-id)
+       :name "Timeline of bird squawks"
        :default false
        :icon timeline-event/default-icon
        :creator_id (rasta-id)}))
@@ -361,7 +389,8 @@
 
    :model/Transform
    (fn [_]
-     {:name (str "Test Transform " (u/generate-nano-id))
+     {:entity_id (u/generate-nano-id)
+      :name (str "Test Transform " (u/generate-nano-id))
       :source {:type  "query"
                :query (lib/native-query (data/metadata-provider) "SELECT 1 as num")}
       :target {:type "table"
@@ -371,7 +400,8 @@
    :model/TransformJob
    (fn [_]
      (default-timestamped
-      {:name            (str "Test Transform Job " (u/generate-nano-id))
+      {:entity_id       (u/generate-nano-id)
+       :name            (str "Test Transform Job " (u/generate-nano-id))
        :schedule        "0 0 * * * ?"
        :ui_display_type :cron/raw}))
 
@@ -385,7 +415,8 @@
    :model/TransformTag
    (fn [_]
      (default-timestamped
-      {:name (str "test-tag-" (u/generate-nano-id))}))
+      {:entity_id (u/generate-nano-id)
+       :name (str "test-tag-" (u/generate-nano-id))}))
 
    :model/Tenant
    (fn [_]
@@ -396,27 +427,48 @@
    (fn [_] {:first_name (u.random/random-name)
             :last_name (u.random/random-name)
             :email (u.random/random-email)
+            :entity_id (u/generate-nano-id)
             :date_joined (t/zoned-date-time)
-            :updated_at (t/zoned-date-time)})
-
-   :model/Workspace
-   (fn [_] (default-timestamped
-            {:name       (u.random/random-name)
-             :creator_id (rasta-id)}))
-
-   :model/WorkspaceDatabase
-   (fn [_] (default-timestamped
-            {:database_id      (data/id)
-             :database_details {}
-             :input_schemas    []
-             :output_namespace ""
-             :status           :unprovisioned}))})
+            :updated_at (t/zoned-date-time)})})
 
 ;; `with-temp` cleanup calls `t2/delete!` directly, which would hit our before-delete guard.
 ;; Bind `*allow-direct-deletion*` so with-temp cleanup works.
 (methodical/defmethod t2.with-temp/do-with-temp* :around :model/PermissionsGroupMembership
   [model explicit-attributes f]
   (binding [pgm/*allow-direct-deletion* true]
+    (next-method model explicit-attributes f)))
+
+;; A Personal Collection created within `with-temp` is rolled back, but the production cache assumes it cannot be
+;; deleted. Evicting only the temporary User's entry is insufficient: a committed User's collection may be created
+;; inside another User's `with-temp` scope. Clear the cache whenever a `with-temp` scope exits.
+;; Use a unique method key because [[metabase.test.redefs]] already defines `:around :default`. Methods with the same
+;; key overwrite one another, which would disable either this eviction or the rollback-only transaction wrapper.
+(methodical/add-aux-method-with-unique-key!
+ #'t2.with-temp/do-with-temp* :around :default
+ (fn [next-method model explicit-attributes f]
+   (next-method model explicit-attributes
+                (fn [temp-object]
+                  (try
+                    (f temp-object)
+                    (finally
+                      (memoize/memo-clear! @#'collection/user->personal-collection-id))))))
+ ::evict-personal-collection-cache)
+
+(def ^:private dimension-lock
+  "Serialises temporary Dimensions against each other.
+
+  A Dimension names a Field the whole suite shares, and it lives until its scope ends. Two threads creating one at
+  once deadlock on the unique index over `dimension.field_id`: each holds the record lock the other's uniqueness
+  check wants, while asking for the insert-intention gap in front of it. MySQL and MariaDB pick a victim and roll
+  it back, taking its savepoints with it.
+
+  Tests that create no Dimension keep running in parallel alongside these."
+  (Object.))
+
+(methodical/defmethod t2.with-temp/do-with-temp* :around :model/Dimension
+  [model explicit-attributes f]
+  ;; `locking` is reentrant, so nesting Dimensions in one `with-temp` is fine.
+  (locking dimension-lock
     (next-method model explicit-attributes f)))
 
 (defn- set-with-temp-defaults! []
@@ -604,7 +656,6 @@
                                 e))))))))))
 
 ;;; TODO FIXME -- either rename this to `with-temporary-setting-values!` or fix it and make it thread-safe
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro with-temporary-setting-values
   "Temporarily bind the site-wide values of one or more `Settings`, execute body, and re-establish the original values.
   This works much the same way as `binding`.
@@ -625,7 +676,6 @@
           ~@body)))))
 
 ;;; TODO FIXME -- either rename this to `with-temporary-raw-setting-values!` or fix it and make it thread-safe
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro with-temporary-raw-setting-values
   "Like [[with-temporary-setting-values]] but works with raw value and it allows settings that are not defined
   using [[metabase.settings.models.setting/defsetting]]."
@@ -651,7 +701,6 @@
     settings)))
 
 ;;; TODO FIXME -- either rename this to `with-discarded-setting-changes!` or fix it and make it thread-safe
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro discard-setting-changes
   "Execute `body` in a try-finally block, restoring any changes to listed `settings` to their original values at its
   conclusion.
@@ -976,7 +1025,6 @@
 
 (deftest with-model-cleanup-test
   (testing "Make sure the with-model-cleanup macro actually works as expected"
-    #_{:clj-kondo/ignore [:discouraged-var]}
     (t2.with-temp/with-temp [:model/Card other-card]
       (let [card-count-before (t2/count :model/Card)
             card-name (u.random/random-name)]
@@ -999,18 +1047,18 @@
     (let [attempts (atom 0)]
       ;; Diehard also consults `:retry-if` on success, with a nil exception — a `(constantly true)` stub would retry
       ;; the successful attempt too. The real predicate returns false for nil.
-      (with-redefs [transient-error/transient-error? (fn [_db-type e] (some? e))
-                    search/reindex!                  (fn [& _]
-                                                       (when (= 1 (swap! attempts inc))
-                                                         (throw (java.sql.SQLException. "Deadlock detected"))))]
+      (dynamic-redefs/with-dynamic-fn-redefs [transient-error/transient-error? (fn [_db-type e] (some? e))
+                                              search/reindex!                  (fn [& _]
+                                                                                 (when (= 1 (swap! attempts inc))
+                                                                                   (throw (java.sql.SQLException. "Deadlock detected"))))]
         (#'reindex-search-index!)
         (is (= 2 @attempts)))))
   (testing "any other failure is not"
     (let [attempts (atom 0)]
-      (with-redefs [transient-error/transient-error? (constantly false)
-                    search/reindex!                  (fn [& _]
-                                                       (swap! attempts inc)
-                                                       (throw (java.sql.SQLException. "Syntax error")))]
+      (dynamic-redefs/with-dynamic-fn-redefs [transient-error/transient-error? (constantly false)
+                                              search/reindex!                  (fn [& _]
+                                                                                 (swap! attempts inc)
+                                                                                 (throw (java.sql.SQLException. "Syntax error")))]
         (is (thrown? java.sql.SQLException (#'reindex-search-index!)))
         (is (= 1 @attempts))))))
 
@@ -1077,6 +1125,7 @@
         called-query? (promise)
         pause-query (promise)
         query-thunk (fn []
+                      ;; legacy query builder; helper not yet migrated to Lib
                       #_{:clj-kondo/ignore [:deprecated-var]}
                       (data/run-mbql-query checkins
                         {:aggregation [[:count]]}))
@@ -1163,7 +1212,6 @@
     `(do-with-discard-model-updates! ~models (fn [] ~@body))))
 
 (deftest with-discard-model-changes-test
-  #_{:clj-kondo/ignore [:discouraged-var]}
   (t2.with-temp/with-temp
     [:model/Card {card-id :id :as card} {:name "A Card"}
      :model/Dashboard {dash-id :id :as dash} {:name "A Dashboard"}]
@@ -1245,7 +1293,6 @@
 
   For most use cases see the macro [[with-all-users-permission]]."
   [permission-path thunk]
-  #_{:clj-kondo/ignore [:discouraged-var]}
   (t2.with-temp/with-temp [:model/Permissions _ {:group_id (:id (perms/all-users-group))
                                                  :object permission-path}]
     (thunk)))
@@ -1307,8 +1354,6 @@
   [locale-tag & body]
   `(call-with-locale! ~locale-tag (fn [] ~@body)))
 
-;;; TODO -- this could be made thread-safe if we made [[with-temp-vals-in-db]] thread-safe which I think is pretty
-;;; doable (just do it in a transaction?)
 (defn do-with-column-remappings! [orig->remapped thunk]
   (transduce
    identity
@@ -1323,7 +1368,6 @@
           ;; remap is integer => fk remap
           (let [remapped (t2/select-one :model/Field :id (u/the-id remap))]
             (fn []
-              #_{:clj-kondo/ignore [:discouraged-var]}
               (t2.with-temp/with-temp [:model/Dimension _ {:field_id (:id original)
                                                            :name (format "%s [external remap]" (:display_name original))
                                                            :type :external
@@ -1343,7 +1387,6 @@
                                     (testing (format "With human readable values remapping %s -> %s\n"
                                                      (describe-field original) (pr-str values-map))
                                       (thunk)))]
-                #_{:clj-kondo/ignore [:discouraged-var]}
                 (t2.with-temp/with-temp [:model/Dimension _ {:field_id (:id original)
                                                              :name (format "%s [internal remap]" (:display_name original))
                                                              :type :internal}]
@@ -1351,7 +1394,6 @@
                     (with-temp-vals-in-db :model/FieldValues preexisting-id {:values (keys values-map)
                                                                              :human_readable_values (vals values-map)}
                       (testing-thunk))
-                    #_{:clj-kondo/ignore [:discouraged-var]}
                     (t2.with-temp/with-temp [:model/FieldValues _ {:field_id (:id original)
                                                                    :values (keys values-map)
                                                                    :human_readable_values (vals values-map)}]
@@ -1368,6 +1410,7 @@
          (= (first x) 'values-of))
     (let [[_ table+field] x
           [table field] (str/split (str table+field) #"\.")]
+      ;; legacy query builder; helper not yet migrated to Lib
       #_{:clj-kondo/ignore [:deprecated-var]}
       `(into {} (get-in (data/run-mbql-query ~(symbol table)
                           {:fields [~'$id ~(symbol (str \$ field))]})
@@ -1377,7 +1420,6 @@
     x))
 
 ;;; TODO FIXME -- either rename this to `with-column-remappings!` or fix it and make it thread-safe.
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro with-column-remappings
   "Execute `body` with column remappings in place. Can create either FK \"external\" or human-readable-values
   \"internal\" remappings:
@@ -1442,7 +1484,6 @@
         (thunk)))))
 
 ;;; TODO FIXME -- either rename this to `with-env-keys-renamed-by!` or fix it and make it thread-safe
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro with-env-keys-renamed-by
   "Evaluates body with the current core.environ/env being redefined, its keys having been renamed by the given
   rename-fn."
@@ -1548,12 +1589,10 @@
 
 (defn do-with-user-in-groups
   ([f groups-or-ids]
-   #_{:clj-kondo/ignore [:discouraged-var]}
    (t2.with-temp/with-temp [:model/User user]
      (do-with-user-in-groups f user groups-or-ids)))
   ([f user [group-or-id & more]]
    (if group-or-id
-     #_{:clj-kondo/ignore [:discouraged-var]}
      (t2.with-temp/with-temp [:model/PermissionsGroupMembership _ {:group_id (u/the-id group-or-id), :user_id (u/the-id user)}]
        (do-with-user-in-groups f user more))
      (f user))))
@@ -1573,7 +1612,6 @@
   [[& bindings] & body]
   (if (> (count bindings) 2)
     (let [[group-binding group-definition & more] bindings]
-      #_{:clj-kondo/ignore [:discouraged-var]}
       `(t2.with-temp/with-temp [:model/PermissionsGroup ~group-binding ~group-definition]
          (with-user-in-groups ~more ~@body)))
     (let [[user-binding groups-or-ids-to-put-user-in] bindings]
@@ -1808,3 +1846,14 @@
   "Given a mapping from (say) parents to children, return the corresponding mapping from parents to descendants."
   [adj-map]
   (:descendants (reduce-kv (fn [h p children] (reduce #(transitive* %1 %2 p) h children)) nil adj-map)))
+
+(deftype DeferredStr [deferred]
+  java.lang.Object
+  (toString [_] (str @deferred)))
+
+(defmacro deferred-str
+  "Return an opaque deferred computable object that, when `str` is called on it, realizes itself and produces a string.
+  Useful for wrapping expensive context strings in `testing` macro when the context string is only needed to be
+  computed when the test fails."
+  [& body]
+  `(->DeferredStr (delay ~@body)))

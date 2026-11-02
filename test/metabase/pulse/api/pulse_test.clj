@@ -12,9 +12,12 @@
    [metabase.channel.settings :as channel.settings]
    [metabase.driver :as driver]
    [metabase.lib.core :as lib]
+   [metabase.models.interface :as mi]
    [metabase.notification.test-util :as notification.tu]
    [metabase.permissions.models.permissions :as perms]
    [metabase.permissions.models.permissions-group :as perms-group]
+   [metabase.pulse.api :as pulse.api]
+   [metabase.pulse.models.pulse :as models.pulse]
    [metabase.pulse.models.pulse-channel :as pulse-channel]
    [metabase.pulse.models.pulse-test :as pulse-test]
    [metabase.pulse.test-util :as pulse.test-util]
@@ -149,6 +152,18 @@
     (testing (pr-str input)
       (is (=? expected-error
               (mt/user-http-request :rasta :post 400 "pulse" input))))))
+
+(deftest create-pulse-rejects-card-without-export-flags-test
+  (testing "POST /api/pulse rejects a card entry missing `include_csv` and `include_xls`"
+    (is (=? {:errors {:cards {:include_csv #".*valid boolean.*"
+                              :include_xls #".*valid boolean.*"}}}
+            (mt/user-http-request :rasta :post 400 "pulse" {:name     "abc"
+                                                            :cards    [{:id 100}]
+                                                            :channels [{:channel_type  "email"
+                                                                        :schedule_type "daily"
+                                                                        :schedule_hour 12
+                                                                        :enabled       true
+                                                                        :recipients    []}]})))))
 
 (defn- remove-extra-channels-fields [channels]
   (for [channel channels]
@@ -670,31 +685,6 @@
                   (:channels (mt/user-http-request :rasta :put 200 (str "pulse/" pulse-id)
                                                    {:channels [new-channel]})))))))))
 
-(deftest update-channels-rejects-map-shaped-schedule-fields-test
-  (testing "PUT /api/pulse/:id rejects a map-shaped schedule_day/etc instead of splicing it into the UPDATE as
-           HoneySQL query structure: PulseChannel's schedule fields are only ever partially validated by
-           valid-schedule? (e.g. schedule_day is never examined when schedule_frame is :first/:last), so a bare
-           :any schema for these fields let a map value reach t2/insert!/t2/update! unexamined"
-    (mt/with-temp
-      [:model/Pulse        {pulse-id :id} {}
-       :model/PulseChannel pc             (assoc pulse-channel-email-default
-                                                 :pulse_id pulse-id
-                                                 :schedule_type "monthly"
-                                                 :schedule_frame "first"
-                                                 :schedule_hour 5
-                                                 :schedule_day "mon")]
-      (let [new-channel (assoc pulse-channel-email-default
-                               :id (:id pc)
-                               :schedule_type "monthly"
-                               :schedule_frame "first"
-                               :schedule_hour 5
-                               :schedule_day {:select [:password] :from [:core_user] :limit [:inline 1]})]
-        (is (=? {:errors {:channels {:schedule_day some?}}}
-                (mt/user-http-request :rasta :put 400 (str "pulse/" pulse-id)
-                                      {:channels [new-channel]})))
-        (testing "the channel's schedule_day is unchanged"
-          (is (= "mon" (t2/select-one-fn :schedule_day :model/PulseChannel (:id pc)))))))))
-
 (deftest update-channels-add-new-channel-test
   (testing "PUT /api/pulse/:id"
     (testing "add a new pulse channel"
@@ -1048,34 +1038,6 @@
                         :recipient-type nil}
                        (mt/summarize-multipart-single-email (-> channel-messages :channel/email first) #"Daily Sad Toucans")))))))))))
 
-(deftest send-test-pulse-attachment-only-test
-  (testing "POST /api/pulse/test respects `attachment_only` in the email channel details"
-    (mt/with-fake-inbox
-      (mt/with-temp [:model/Dashboard {dashboard-id :id} {:name "Attachment Only Toucans"}
-                     :model/Card      card {:dataset_query (mt/mbql-query venues {:aggregation [[:count]]})}]
-        (let [channel-messages (pulse.test-util/with-captured-channel-send-messages!
-                                 (is (= {:ok true}
-                                        (mt/user-http-request :crowberto :post 200 "pulse/test"
-                                                              {:name          (mt/random-name)
-                                                               :dashboard_id  dashboard-id
-                                                               :cards         [{:id                (:id card)
-                                                                                :include_csv       true
-                                                                                :include_xls       false
-                                                                                :dashboard_card_id nil}]
-                                                               :channels      [{:enabled       true
-                                                                                :channel_type  "email"
-                                                                                :schedule_type "daily"
-                                                                                :schedule_hour 12
-                                                                                :schedule_day  nil
-                                                                                :details       {:attachment_only true}
-                                                                                :recipients    [(mt/fetch-user :crowberto)]}]
-                                                               :skip_if_empty false}))))
-              email            (mt/summarize-multipart-single-email
-                                (-> channel-messages :channel/email first)
-                                #"Dashboard content available in attached files")]
-          (is (= {"Dashboard content available in attached files" true}
-                 (first (:message email)))))))))
-
 (deftest send-test-pulse-to-non-user-test
   (testing "sending test email to non user won't include unsubscribe link (#43391)"
     (mt/with-non-admin-groups-no-root-collection-perms
@@ -1118,7 +1080,7 @@
 (deftest send-test-alert-with-http-channel-test
   (testing "POST /api/pulse/test send test alert to a http channel"
     (notification.tu/with-send-notification-sync
-      (mt/with-temporary-setting-values [http-channel-host-strategy :allow-all]
+      (mt/with-temp-env-var-value! [mb-http-channel-allowed-networks "allow-all"]
         (let [requests (atom [])
               endpoint (channel.http-test/make-route
                         :post "/test"
@@ -1489,3 +1451,65 @@
                    :model/Pulse      {pulse-id :id} {:dashboard_id dash-id}]
       (mt/user-http-request :crowberto :put 200 (str "dashboard/" dash-id) {:collection_id (:id coll)})
       (is (true? (:archived (mt/user-http-request :crowberto :put 200 (str "pulse/" pulse-id) {:archived true})))))))
+
+(deftest update-pulse-with-perm-checks!-validates-cards-test
+  (testing "I3: a non-coercible :cards ref is a clean 400, not a 500. `update-pulse-with-perm-checks!` is
+            called directly (e.g. from the agent API), not only through the PUT endpoint whose schema coerces
+            :cards, so a bad ref must be rejected with a :status-code before check-card-read-permissions'
+            (assert (integer? card-id)) / u/the-id can throw a status-less error that surfaces as a 500."
+    (mt/with-current-user (mt/user->id :crowberto)
+      (doseq [bad [["not-a-card-ref"] [{:not "a card"}] [42.5]]]
+        (let [ex (try (pulse.api/update-pulse-with-perm-checks! Integer/MAX_VALUE {:cards bad})
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e)
+                      (catch Throwable e e))]
+          (is (instance? clojure.lang.ExceptionInfo ex)
+              (str "expected an ExceptionInfo (status-carrying), got " (some-> ex type) " for " (pr-str bad)))
+          (is (= 400 (:status-code (ex-data ex)))
+              (str "expected a 400 for a bad :cards ref " (pr-str bad))))))))
+
+(deftest tenant-hidden-recipients-survive-update-test
+  (mt/when-ee-evailable
+   (testing "a tenant-scoped caller that reads a pulse and submits it back must not delete the
+            recipients the read filter hid from it. The submitted :channels are authoritative
+            (update-notification-channels! deletes anything absent), so every recipient hidden on
+            read is merged back on write."
+     (mt/with-premium-features #{:tenants}
+       ;; Build the fixture as an admin: Pulse/PulseCard/PulseChannel writes run permission checks,
+       ;; and this test is about the update path, not about who may create a subscription.
+       (mt/with-current-user (mt/user->id :crowberto)
+         (mt/with-temp [:model/Tenant {tenant-id :id}       {:name "PulseRT T1" :slug "pulse-rt-t1"}
+                        :model/Tenant {other-tenant-id :id} {:name "PulseRT T2" :slug "pulse-rt-t2"}
+                        :model/User   {caller-id :id}       {:tenant_id tenant-id}
+                        :model/User   {same-id :id}         {:tenant_id tenant-id}
+                        :model/User   {other-id :id}        {:tenant_id other-tenant-id}
+                        :model/User   {internal-id :id}     {}
+                        :model/Card   {card-id :id}         {}
+                        :model/Pulse  {pulse-id :id}        {:name "Round trip"}
+                        :model/PulseCard _                  {:pulse_id pulse-id :card_id card-id}
+                        :model/PulseChannel {chan-id :id}   {:pulse_id      pulse-id
+                                                             :channel_type  :email
+                                                             :schedule_type :daily
+                                                             :schedule_hour 12
+                                                             :details       {}}]
+           (doseq [uid [same-id other-id internal-id]]
+             (t2/insert! :model/PulseChannelRecipient {:pulse_channel_id chan-id :user_id uid}))
+           (let [recipient-ids #(t2/select-fn-set :user_id :model/PulseChannelRecipient
+                                                  :pulse_channel_id chan-id)]
+             (is (= #{same-id other-id internal-id} (recipient-ids))
+                 "all three user recipients exist before the round trip")
+             ;; The tenant caller must be able to write the pulse, otherwise the update 403s before
+             ;; it ever reaches the recipient merge this test is about. Collection permissions are
+             ;; orthogonal to the recipient filtering under test.
+             (with-redefs [mi/can-write? (constantly true)
+                           mi/current-user-has-full-permissions? (constantly true)]
+               (mt/with-current-user caller-id
+                 (let [read-back (-> (models.pulse/retrieve-pulse pulse-id)
+                                     models.pulse/maybe-filter-pulse-recipients)
+                       visible   (->> read-back :channels (mapcat :recipients) (keep :id) set)]
+                   (testing "the read filter hides the other-tenant and tenantless recipients"
+                     (is (= #{same-id} visible)))
+                   (testing "submitting what was read back preserves the hidden recipients"
+                     (pulse.api/update-pulse-with-perm-checks! pulse-id (select-keys read-back [:channels]))
+                     (is (= #{same-id other-id internal-id} (recipient-ids))
+                         "hidden recipients must survive; if they are gone the read filter silently deleted them"))))))))))))

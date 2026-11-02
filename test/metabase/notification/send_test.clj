@@ -48,7 +48,7 @@
                                    :channel_id   (:id chn-2)
                                    :recipients   [{:type    :notification-recipient/user
                                                    :user_id (mt/user->id :rasta)}]}])
-              notification-info (assoc n :payload {:event_info  {:test true}
+              notification-info (assoc n :payload {:event_info  {}
                                                    :event_topic :event/test})
               expected-notification-payload (mt/malli=?
                                              [:map
@@ -195,6 +195,28 @@
                                                                                    [:message :string]]])}}
                       (latest-task-history-entry "channel-send"))))))))))
 
+(deftest notification-send-inactive-channel-humanized-error-test
+  (notification.tu/with-notification-testing-setup!
+    (mt/with-temp [:model/Channel chn notification.tu/default-can-connect-channel]
+      (let [n (models.notification/create-notification!
+               {:payload_type :notification/testing}
+               nil
+               [{:channel_type notification.tu/test-channel-type
+                 :channel_id   (:id chn)
+                 :recipients   [{:type :notification-recipient/user :user_id (mt/user->id :crowberto)}]}])]
+        (testing "sending to a deactivated channel fails with a human-readable error, without retries (#76802)"
+          (t2/update! :model/Channel (:id chn) {:active false})
+          (let [send-count (atom 0)]
+            (with-redefs [channel/send! (fn [& _] (swap! send-count inc))]
+              (#'notification.send/send-notification-sync! n))
+            (testing "channel/send! is never invoked"
+              (is (zero? @send-count))))
+          (is (=? {:task         "channel-send"
+                   :status       :failed
+                   :task_details {:message           #"The channel this notification is set to send to no longer exists or is inactive\."
+                                  :attempted_retries 0}}
+                  (latest-task-history-entry "channel-send"))))))))
+
 (def ^:private fake-email-notification
   {:subject      "test-message"
    :recipients   ["whoever@example.com"]
@@ -205,7 +227,7 @@
   (testing "send email succeeds w/o retry"
     (let [[hook state] (rt/retry-analytics-config-hook)]
       (binding [retry/*test-time-config-hook* hook]
-        (with-redefs [email/send-email! mt/fake-inbox-email-fn]
+        (mt/with-dynamic-fn-redefs [email/send-email! mt/fake-inbox-email-fn]
           (mt/with-temporary-setting-values [email-smtp-host "fake_smtp_host"
                                              email-smtp-port 587]
             (mt/reset-inbox!)
@@ -227,7 +249,7 @@
   (testing "send email fails b/c retry limit"
     (let [[hook state] (rt/retry-analytics-config-hook {:max-retries 1})]
       (binding [retry/*test-time-config-hook* hook]
-        (with-redefs [email/send-email! (tu/works-after 2 mt/fake-inbox-email-fn)]
+        (mt/with-dynamic-fn-redefs [email/send-email! (tu/works-after 2 mt/fake-inbox-email-fn)]
           (mt/with-temporary-setting-values [email-smtp-host "fake_smtp_host"
                                              email-smtp-port 587]
             (mt/reset-inbox!)
@@ -237,7 +259,7 @@
   (testing "send email succeeds w/ retry"
     (let [[hook state] (rt/retry-analytics-config-hook {:max-retries 1})]
       (binding [retry/*test-time-config-hook* hook]
-        (with-redefs [email/send-email! (tu/works-after 1 mt/fake-inbox-email-fn)]
+        (mt/with-dynamic-fn-redefs [email/send-email! (tu/works-after 1 mt/fake-inbox-email-fn)]
           (mt/with-temporary-setting-values [email-smtp-host "fake_smtp_host"
                                              email-smtp-port 587]
             (mt/reset-inbox!)
@@ -268,13 +290,13 @@
     (testing "post slack message fails b/c retry limit"
       (let [[hook state] (rt/retry-analytics-config-hook {:max-retries 1})]
         (binding [retry/*test-time-config-hook* hook]
-          (with-redefs [slack/post-chat-message! (tu/works-after 2 (constantly nil))]
+          (mt/with-dynamic-fn-redefs [slack/post-chat-message! (tu/works-after 2 (constantly nil))]
             (#'notification.send/channel-send-retrying! 1 :notification/card {:channel_type :channel/slack} fake-slack-notification)
             (is (= {:success false, :retries 1} @state))))))
     (testing "post slack message succeeds with retry"
       (let [[hook state] (rt/retry-analytics-config-hook {:max-retries 1})]
         (binding [retry/*test-time-config-hook* hook]
-          (with-redefs [slack/post-chat-message! (tu/works-after 1 (constantly nil))]
+          (mt/with-dynamic-fn-redefs [slack/post-chat-message! (tu/works-after 1 (constantly nil))]
             (#'notification.send/channel-send-retrying! 1 :notification/card {:channel_type :channel/slack} fake-slack-notification)
             (is (= {:success true, :retries 1} @state))))))
     (testing "post slack message to missing channel fails without retry"
@@ -470,6 +492,7 @@
                                         :timeout-ms  1000})]
       ;; dispatcher spawns its own worker threads that don't inherit *local-redefs* —
       ;; use with-redefs to swap the root so worker threads see the replacement.
+      ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
       #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
       (with-redefs [notification.send/send-notification-sync! (fn [notification]
                                                                 ;; fake latency
@@ -507,7 +530,6 @@
             (reset! sent-notifications [])
             (let [error-thrown (atom false)]
               ;; dispatcher worker thread — see note above
-              #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
               (with-redefs [notification.send/send-notification-sync!
                             (fn [notification]
                               (if (= "F" (:test-value notification))
@@ -661,6 +683,7 @@
           queue-size (notification.settings/notification-thread-pool-size)]
       ;; notification thread pool workers don't inherit *local-redefs* — the root swap from
       ;; with-redefs is required so the patched fns are visible to the worker threads.
+      ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
       #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
       (with-redefs [notification.payload/notification-payload (fn [& _]
                                                                 (assert false))
@@ -717,6 +740,7 @@
           dispatch-fn             (:dispatch-fn dispatcher)
           shutdown-fn             (:shutdown-fn dispatcher)]
       ;; dispatcher spawns worker threads without our dynamic binding
+      ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
       #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
       (with-redefs [notification.send/send-notification-sync!
                     (fn [notification]

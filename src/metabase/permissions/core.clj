@@ -2,6 +2,7 @@
   "`permissions` module API namespace."
   {:clj-kondo/config '{:linters {:missing-docstring {:level :off}}}}
   (:require
+   [metabase.permissions.data-access-token]
    [metabase.permissions.models.application-permissions-revision]
    [metabase.permissions.models.collection-permission-graph-revision]
    [metabase.permissions.models.collection.graph]
@@ -29,6 +30,7 @@
   metabase.permissions.models.permissions-group/keep-me
   metabase.permissions.models.permissions-group-membership/keep-me
   metabase.permissions.models.permissions-revision/keep-me
+  metabase.permissions.data-access-token/keep-me
   metabase.permissions.path/keep-me
   metabase.permissions.published-tables/keep-me
   metabase.permissions.user/keep-me
@@ -40,6 +42,8 @@
   at-least-as-permissive?
   batch-delete-permissions!
   batch-insert-permissions!
+  data-app-group-ids
+  data-app-view-data-permission-level
   disable-perms-cache
   download-perms-level
   full-database-permission-for-user
@@ -81,6 +85,7 @@
   visible-database-filter-select
   visible-table-filter-select
   visible-table-filter-with-cte
+  visible-table-filter-subquery-clause
   select-tables-and-groups-granting-perm]
  [metabase.permissions.models.permissions
   namespace-clause
@@ -89,6 +94,7 @@
   collection-based-visibility-search-models
   collection-id-only-read-method
   collection-id-only-read-models
+  collection-read-access-group-ids
   current-user-has-application-permissions?
   define-collection-based-visibility!
   grant-application-permissions!
@@ -133,8 +139,10 @@
   impersonated-user?
   impersonation-enforced-for-db?
   log-permissions-changes
+  routed-user?
   sandboxed-or-impersonated-user?
   sandboxed-user?
+  sandboxed-user-for-db?
   increment-implicit-perms-revision!
   save-perms-revision!]
  [metabase.permissions.validation
@@ -149,10 +157,16 @@
   can-access-via-collection?
   user-published-table-permission
   user-has-any-published-table-permission?
-  user-has-published-table-permission-for-database?
-  published-table-visible-clause])
+  user-has-published-table-permission-for-database?])
 
 (p/import-vars [metabase.permissions.settings use-tenants])
+
+(p/import-vars
+ [metabase.permissions.data-access-token
+  data-access-token
+  data-access-compatible?
+  data-access-token-transform
+  routing-token-for-db])
 
 ;;; import these vars with different names to make their purpose more obvious.
 (p/import-def metabase.permissions.models.permissions-group/all-users                    all-users-group)
@@ -163,3 +177,7 @@
 (p/import-def metabase.permissions.models.permissions-revision/latest-id                 latest-permissions-revision-id)
 (p/import-def metabase.permissions.models.data-permissions/least-permissive-value        least-permissive-data-perms-value)
 (p/import-def metabase.permissions.models.permissions-group/all-external-users           all-external-users-group)
+
+(p/import-vars [metabase.permissions.models.permissions-group
+                check-tenant-groups-visible!
+                hidden-tenant-group-ids])

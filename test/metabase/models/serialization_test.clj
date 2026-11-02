@@ -2,8 +2,10 @@
   (:require
    [clojure.test :refer :all]
    [metabase.lib.core :as lib]
+   [metabase.lib.normalize :as lib.normalize]
    [metabase.lib.test-metadata :as meta]
-   [metabase.models.serialization :as serdes]))
+   [metabase.models.serialization :as serdes]
+   [metabase.util.malli.registry :as mr]))
 
 (defn- fake-uuid
   "Deterministic placeholder `:lib/uuid` for tests, e.g. `(fake-uuid 1)` => \"00000000-0000-0000-0000-000000000001\"."
@@ -155,6 +157,38 @@
                                             (fake-uuid 0)]]]}]}
               (serdes/import-mbql query))))))
 
+(deftest ^:parallel import-mbql-legacy-query-test
+  (binding [serdes/*import-database-fk* (constantly 1)
+            serdes/*import-table-fk*    (constantly 2)
+            serdes/*import-field-fk*    (constantly 3)]
+    (testing "a legacy MBQL query is converted to MBQL 5, keeping integer literals in comparisons and aggregations as literals"
+      (is (=? {:lib/type :mbql/query
+               :database 1
+               :stages   [{:source-table 2
+                           :filters      [[:= {} [:field {} 3] 1]
+                                          [:= {} 1 1]
+                                          [:< {} 4 5]]
+                           :aggregation  [[:sum-where {} [:field {} 3] [:= {} 6 6]]]
+                           :joins        [{:alias      "J"
+                                           :conditions [[:= {} 1 1]]}]}]}
+              (serdes/import-mbql
+               {:database "DB"
+                :type     "query"
+                :query    {:source-table ["DB" "SCHEMA" "TABLE"]
+                           :filter       ["and"
+                                          ["=" ["field" ["DB" "SCHEMA" "TABLE" "FIELD"] nil] 1]
+                                          ["=" 1 1]
+                                          ["<" 4 5]]
+                           :aggregation  [["sum-where" ["field" ["DB" "SCHEMA" "TABLE" "FIELD"] nil] ["=" 6 6]]]
+                           :joins        [{:source-table ["DB" "SCHEMA" "TABLE"]
+                                           :alias        "J"
+                                           :condition    ["=" 1 1]}]}}))))
+    (testing "a legacy native query is not converted"
+      (is (=? {:database 1
+               :type     "native"
+               :native   {:query "SELECT 1"}}
+              (serdes/import-mbql {:database "DB", :type "native", :native {:query "SELECT 1"}}))))))
+
 (deftest ^:parallel hydrate-mbql-5-uuids-on-import-test-2
   (binding [serdes/*import-field-fk* (constantly 3)]
     (are [x expected] (=? expected
@@ -182,6 +216,17 @@
 
         ["fk->" ["field-id" 1] ["field-id" 2]]
         ["fk->" [:field-id ["A" "B" "C" "D"]] [:field-id ["A" "B" "C" "D"]]]))))
+
+(deftest ^:parallel normalize-field-ref-reuses-cached-coercer-test
+  (testing "normalizing :field refs hits the registry coercer cache after the first call"
+    (let [misses (atom 0)]
+      (binding [mr/*cache-miss-hook* (fn [k _schema _value]
+                                       (when (= k ::lib.normalize/coercer)
+                                         (swap! misses inc)))]
+        (dotimes [_ 3]
+          (#'serdes/normalize-mbql-ref [:field 1 nil])
+          (#'serdes/normalize-mbql-ref [:field {:lib/uuid (fake-uuid 1)} 1])))
+      (is (<= @misses 1)))))
 
 (deftest ^:parallel export-visualization-settings-test
   (binding [serdes/*export-field-fk* (constantly ["A" "B" "C" "D"])
@@ -265,7 +310,36 @@
   (testing "template tag :table-id contributes only its Database dependency — the referenced Table itself is not a
             dependency (it's synthesized on import if missing)"
     (is (= #{[{:model "Database" :id "DB"}]}
-           (#'serdes/mbql-deps-map {:table-id ["DB" "SCHEMA" "TABLE"]})))))
+           (#'serdes/mbql-deps-map false {:table-id ["DB" "SCHEMA" "TABLE"]})))))
+
+(deftest ^:parallel mbql-deps-format-parity-test
+  (testing "mbql-deps finds each reference on both the serialized (portable) and the raw (numeric) form of a query.
+            serialization-dependencies runs on raw entities and existence-checks the referenced Table/Field;
+            deserialization-dependencies runs on the serialized form, where Table/Field are synthesized on import, so
+            it reports only their Database. Every other ref type resolves to the same model in both forms. This is the
+            parity guard for the two dependency codepaths sharing mbql-deps."
+    (let [models (fn [deps] (into #{} (map (comp :model last)) deps))
+          eid    (fn [c] (apply str (repeat 21 c)))]
+      (testing "MBQL ref clauses"
+        (doseq [[label serialized raw ser-models raw-models]
+                [["field (MBQL 5)"  [:field {} ["DB" "S" "T" "F"]] [:field {} 53]  #{"Database"} #{"Field"}]
+                 ["field (legacy)" [:field ["DB" "S" "T" "F"] {}] [:field 53 {}]  #{"Database"} #{"Field"}]
+                 ["metric"         [:metric {} (eid \a)]          [:metric {} 99] #{"Card"}     #{"Card"}]
+                 ["segment"        [:segment {} (eid \b)]         [:segment {} 5]  #{"Segment"}  #{"Segment"}]
+                 ["measure"        [:measure {} (eid \c)]         [:measure {} 3]  #{"Measure"}  #{"Measure"}]]]
+          (testing label
+            (is (= ser-models (models (serdes/mbql-deps false serialized))) "serialized (portable) form")
+            (is (= raw-models (models (serdes/mbql-deps true raw)))
+                "raw (numeric) form"))))
+      (testing "MBQL map keys"
+        (doseq [[label serialized raw ser-models raw-models]
+                [["source-table" {:source-table ["DB" "S" "T"]} {:source-table 9} #{"Database"}           #{"Table"}]
+                 ["source-card"  {:source-card (eid \d)}         {:source-card 7}  #{"Card"}               #{"Card"}]
+                 ["snippet-id"   {:snippet-id (eid \e)}          {:snippet-id 2}   #{"NativeQuerySnippet"} #{"NativeQuerySnippet"}]]]
+          (testing label
+            (is (= ser-models (models (#'serdes/mbql-deps-map false serialized))) "serialized")
+            (is (= raw-models (models (#'serdes/mbql-deps-map true raw)))
+                "raw")))))))
 
 (deftest ^:parallel export-parameters-test
   (binding [serdes/*export-fk*       (fn [id model]

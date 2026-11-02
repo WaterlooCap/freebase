@@ -1,12 +1,11 @@
 import type { ReactNode } from "react";
 
-import type { CurrencyStyle } from "metabase/utils/formatting";
-
 import type { InputSettingType } from "./actions";
 import type { DashboardId } from "./dashboard";
 import type { DatabaseId } from "./database";
 import type { SdkIframeEmbedSetupTheme } from "./embedding-theme";
-import type { GroupId } from "./group";
+import type { CurrencyStyle } from "./formatting";
+import type { GroupMappings } from "./group";
 import type { MetabotLimitPeriod, MetabotLimitType } from "./metabot";
 import type { NotificationRecipient } from "./notification";
 import type { UserId } from "./user";
@@ -165,22 +164,14 @@ export interface EngineSourceContact {
 }
 
 export interface ScheduleSettings {
-  schedule_type?: ScheduleType | null;
+  schedule_type: ScheduleType;
   schedule_day?: ScheduleDayType | null;
   schedule_frame?: ScheduleFrameType | null;
   schedule_hour?: number | null;
   schedule_minute?: number | null;
 }
 
-export type ScheduleType =
-  | "every_n_minutes"
-  | "hourly"
-  | "daily"
-  | "weekly"
-  | "monthly"
-  // 'cron' type implies usage of more complex expressions represented
-  // by raw cron string.
-  | "cron";
+export type ScheduleType = "hourly" | "daily" | "weekly" | "monthly";
 
 export type ScheduleDayType =
   | "sun"
@@ -215,11 +206,27 @@ export interface VersionInfoRecord {
   announcement_url?: string;
 }
 
+export interface AlertUpgradeVersion {
+  min: string;
+  fixed: string;
+  message: string;
+  id?: string;
+}
+
+export interface MajorVersionSupport {
+  major: number;
+  released: string;
+  lts: boolean;
+  eol: string;
+}
+
 export interface VersionInfo {
   nightly?: VersionInfoRecord;
   beta?: VersionInfoRecord;
   latest?: VersionInfoRecord;
   older?: VersionInfoRecord[];
+  alert_upgrade_versions?: AlertUpgradeVersion[];
+  major_version_support?: MajorVersionSupport[];
 }
 
 export type LocaleData = [string, string];
@@ -372,6 +379,7 @@ export const tokenFeatures = [
   "etl_connections_pg",
   "table_data_editing",
   "remote_sync",
+  "data-apps",
   "dependencies",
   "schema-viewer",
   "semantic_search",
@@ -384,7 +392,6 @@ export const tokenFeatures = [
   "writable_connection",
   "admin_security_center",
   "ai_controls",
-  "workspaces",
 ] as const;
 
 export type TokenFeature = (typeof tokenFeatures)[number];
@@ -399,6 +406,8 @@ export type PasswordComplexity = {
 };
 
 export type SessionCookieSameSite = "lax" | "strict" | "none";
+
+export type MfaEnforcement = "off" | "optional" | "required";
 
 export interface SettingDefinition<
   Key extends EnterpriseSettingKey = EnterpriseSettingKey,
@@ -540,12 +549,20 @@ interface SettingsManagerSettings {
   "llm-openrouter-api-key"?: string | null;
   "llm-zai-api-key"?: string | null;
   "llm-mistral-api-key"?: string | null;
+  "llm-moonshot-api-key"?: string | null;
+  "llm-deepseek-api-key"?: string | null;
   "llm-azure-api-key"?: string | null;
   "llm-azure-api-base-url"?: string | null;
+  "llm-google-service-account-key"?: string | null;
+  "llm-google-oauth-access-token"?: string | null;
+  "llm-google-project-id"?: string | null;
+  "llm-google-location"?: string | null;
   "llm-bedrock-access-key-id"?: string | null;
   "llm-bedrock-secret-access-key"?: string | null;
   "llm-bedrock-region"?: string | null;
   "llm-bedrock-session-token"?: string | null;
+  "llm-vllm-api-base-url"?: string | null;
+  "llm-vllm-api-key"?: string | null;
   "openai-api-key": string | null;
   "openai-available-models"?: OpenAiModel[];
   "openai-model": string | null;
@@ -573,7 +590,9 @@ interface PublicSettings {
   "application-name": string;
   "application-favicon-url": string;
   "available-fonts": string[];
-  "available-locales": LocaleData[] | null;
+  // Non-null: :public visibility and a total getter (computed from the jar's
+  // bundled translation resources), so every viewer always receives a list.
+  "available-locales": LocaleData[];
   "available-timezones": string[] | null;
   "bug-reporting-enabled": boolean;
   "check-for-updates": boolean;
@@ -584,9 +603,11 @@ interface PublicSettings {
   "custom-homepage-dashboard": DashboardId | null;
   "development-mode?": boolean;
   "llm-metabot-configured?"?: boolean | null;
+  "llm-metabot-supports-reasoning?"?: boolean | null;
   "email-configured?": boolean;
   "embedding-app-origin": string | null;
-  "mfa-enforcement"?: "off" | "optional";
+  "mfa-enforcement": MfaEnforcement;
+  "mfa-requirement-deadline": string | null;
   "embedding-app-origins-sdk": string | null;
   "embedding-app-origins-interactive": string | null;
   "enable-password-login": boolean;
@@ -616,8 +637,8 @@ interface PublicSettings {
   "ldap-attribute-lastname": string | null;
   "ldap-group-sync": boolean;
   "ldap-group-base": string | null;
-  "ldap-group-mappings": Record<string /*ldap group name */, GroupId[]> | null;
-  "ldap-group-membership-filter"?: string;
+  "ldap-group-mappings": GroupMappings | null;
+  "ldap-group-membership-filter"?: string | null;
   "ldap-user-provisioning-enabled?": boolean;
   "oidc-user-provisioning-enabled?": boolean;
   "free-oidc-enabled": boolean;
@@ -636,7 +657,7 @@ interface PublicSettings {
   "report-timezone": string | null;
   "report-timezone-long": string;
   "report-timezone-short": string;
-  "session-cookies": boolean | null;
+  "session-cookies": boolean;
   "setup-token": string | null;
   "metabot-enabled?": boolean;
   "metabot-name": string;
@@ -661,6 +682,7 @@ interface PublicSettings {
   "token-features": TokenFeatures;
   "tracing-enabled": boolean;
   "transforms-enabled": boolean;
+  "transforms-setup-complete": boolean;
   version: Version;
   "version-info-last-checked": string | null;
   "airgap-enabled": boolean;
@@ -680,6 +702,7 @@ export type UserSettings = {
   "dismissed-excel-pivot-exports-banner"?: boolean;
   "dismissed-collection-cleanup-banner"?: boolean;
   "dismissed-browse-models-banner"?: boolean;
+  "dismissed-research-mode-banner"?: boolean;
   "dismissed-custom-dashboard-toast"?: boolean;
   "last-used-native-database-id"?: number | null;
   "notebook-native-preview-sidebar-width"?: number | null;
@@ -726,7 +749,7 @@ export type UserSettings = {
  *
  * To further complicate things, there are two endpoints for fetching settings:
  *  - `GET /api/setting` that _can only be used by admins!_ — returns `403` for non-admins.
- *  - `GET /api/session/properties` that can be used by any user (returns `200`), but some settings might be omitted (unavailable).
+ *  - `GET /api/session/properties` that can be used by any user (returns `200`), but some settings might be omitted.
  */
 export type Settings = InstanceSettings &
   PublicSettings &
@@ -780,9 +803,13 @@ export interface EnterpriseSettings extends Settings {
   "llm-openai-api-key"?: string;
   "llm-openai-model"?: string;
   "llm-metabot-configured?"?: boolean | null;
+  "llm-metabot-supports-reasoning?"?: boolean | null;
+  "llm-metabot-supports-fast-mode?"?: boolean | null;
   "llm-openrouter-api-key"?: string | null;
   "llm-zai-api-key"?: string | null;
   "llm-mistral-api-key"?: string | null;
+  "llm-moonshot-api-key"?: string | null;
+  "llm-deepseek-api-key"?: string | null;
   "session-timeout": TimeoutValue | null;
   "search-engine": SearchEngineSettingValue | null;
   "scim-enabled"?: boolean | null;
@@ -802,6 +829,8 @@ export interface EnterpriseSettings extends Settings {
   "jwt-group-sync": boolean | null;
   "oidc-enabled": boolean;
   "oidc-configured": boolean;
+  // sensitive, so only the admin settings list carries it; pages use /api/ee/sso/oidc
+  "oidc-providers"?: string | null;
   "saml-enabled": boolean;
   "saml-configured": boolean;
   "saml-user-provisioning-enabled?": boolean;
@@ -818,7 +847,8 @@ export interface EnterpriseSettings extends Settings {
   "saml-attribute-tenant": string | null;
   "saml-attribute-group": string | null;
   "saml-group-sync": boolean | null;
-  "saml-group-mappings": Record<string, GroupId[]> | null;
+  "saml-group-mappings": GroupMappings | null;
+  "jwt-group-mappings": GroupMappings | null;
   "database-replication-enabled": boolean | null;
   "database-replication-connections"?: DatabaseReplicationConnections | null;
   "embedding-hub-test-embed-snippet-created": boolean;
@@ -838,6 +868,8 @@ export interface EnterpriseSettings extends Settings {
   "python-runner-timeout-seconds"?: number | null;
   "python-runner-test-run-timeout-seconds"?: number | null;
   "llm-metabot-provider"?: string | null;
+  "llm-mini-model"?: string | null;
+  "llm-fast-mode"?: boolean | null;
   "llm-anthropic-api-key"?: string | null;
   "llm-anthropic-model": string;
   "llm-proxy-configured?"?: boolean | null;

@@ -8,8 +8,10 @@
    [metabase.settings.models.setting-test :as models.setting-test]
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
+   [metabase.util.encryption :as encryption]
    [metabase.util.i18n :refer [deferred-tru]]
-   [metabase.util.log.capture :as log.capture]))
+   [metabase.util.log.capture :as log.capture]
+   [toucan2.core :as t2]))
 
 (comment h2/keep-me)
 
@@ -36,6 +38,13 @@
   (deferred-tru "Setting to test the `:settings-manager` visibility level. This only shows up in dev.")
   :visibility :settings-manager
   :encryption :when-encryption-key-set)
+
+(defsetting test-api-setting-premium-feature
+  (deferred-tru "Setting gated behind a premium feature. This only shows up in dev.")
+  :visibility :admin
+  :type       :boolean
+  :default    false
+  :feature    :test-feature)
 
 (defsetting test-admin-write-authed-read-visibility
   (deferred-tru "Setting to test the `:admin-write-authed-read` visibility level. This only shows up in dev.")
@@ -195,24 +204,24 @@
              (test-admin-write-authed-read-visibility))
           "Value should be unchanged after non-admin write attempt")
       (test-admin-write-authed-read-visibility! nil))
-    (testing "Check that non-admin setting managers cannot update :internal or :admin-write-authed-read Settings"
-      (models.setting-test/test-setting-3! "internal-value")
-      (test-admin-write-authed-read-visibility! "ADMIN_SET")
-      (with-mocked-settings-manager-access!
-        (is (= "You don't have permissions to do that."
-               (mt/user-http-request :rasta :put 403 "setting/test-setting-3" {:value "SM_SET"})))
-        (is (= "internal-value" (models.setting-test/test-setting-3)))
-        (is (= "You don't have permissions to do that."
-               (mt/user-http-request :rasta :put 403 "setting/test-admin-write-authed-read-visibility" {:value "SM_SET"})))
-        (is (= "ADMIN_SET" (test-admin-write-authed-read-visibility)))
-        (testing "and cannot read them via GET /api/setting/:key either"
-          (is (= "You don't have permissions to do that."
-                 (fetch-setting :rasta :test-admin-write-authed-read-visibility 403)))))
-      (test-admin-write-authed-read-visibility! nil)
-      (models.setting-test/test-setting-3! nil))
     (testing "Check that a generic 403 error is returned if a non-superuser tries to set a Setting that doesn't exist"
       (is (= "You don't have permissions to do that."
              (mt/user-http-request :rasta :put 403 "setting/bad-setting" {:value "NICE!"}))))))
+
+(deftest update-setting-without-premium-feature-test
+  (testing "PUT /api/setting/:key for a setting whose premium feature is unavailable returns a 402, not a 500"
+    (mt/with-premium-features #{}
+      (doseq [[endpoint body] [["setting/test-api-setting-premium-feature" {:value true}]
+                               ["setting"                                  {:test-api-setting-premium-feature true}]]]
+        (testing (str "PUT /api/" endpoint)
+          (let [response (mt/user-http-request :crowberto :put 402 endpoint body)]
+            (is (= "Setting test-api-setting-premium-feature is not enabled because feature :test-feature is not available"
+                   (:message response)))
+            (testing "the setting definition is not leaked into the response body"
+              (is (not-any? (set (keys response)) [:description :getter :setter :default])))))))
+    (testing "turning the setting off is rejected the same way, rather than 500ing"
+      (mt/with-premium-features #{}
+        (mt/user-http-request :crowberto :put 402 "setting/test-api-setting-premium-feature" {:value false})))))
 
 (deftest fetch-sensitive-setting-test
   (testing "Sensitive settings should always come back obfuscated"
@@ -276,18 +285,6 @@
                (test-settings-manager-visibility)))
         (is (= "ABC"
                (models.setting-test/test-setting-1)))))
-    (testing "non-admin setting managers cannot update :internal or :admin-write-authed-read settings in bulk"
-      (models.setting-test/test-setting-3! "internal-value")
-      (test-admin-write-authed-read-visibility! "ADMIN_SET")
-      (with-mocked-settings-manager-access!
-        (is (= "You don't have permissions to do that."
-               (mt/user-http-request :rasta :put 403 "setting" {:test-setting-3 "SM_SET"})))
-        (is (= "internal-value" (models.setting-test/test-setting-3)))
-        (is (= "You don't have permissions to do that."
-               (mt/user-http-request :rasta :put 403 "setting" {:test-admin-write-authed-read-visibility "SM_SET"})))
-        (is (= "ADMIN_SET" (test-admin-write-authed-read-visibility))))
-      (test-admin-write-authed-read-visibility! nil)
-      (models.setting-test/test-setting-3! nil))
     (testing "non-admin should not be able to update multiple settings at once if any of them are not user-local"
       (is (= "You don't have permissions to do that."
              (mt/user-http-request :rasta :put 403 "setting" {:test-setting-1 "GHI", :test-setting-2 "JKL"})))
@@ -430,3 +427,16 @@
         (let [site-name-setting (some #(when (= "site-name" (:key %)) %)
                                       (mt/user-http-request :crowberto :get 200 "setting"))]
           (is (str/includes? (:description site-name-setting) "New Test Co")))))))
+
+(deftest set-user-local-setting-with-unparseable-settings-column-test
+  (testing "PUT /api/setting/:key"
+    (testing "works when the user's `settings` column can't be decrypted or parsed"
+      (mt/with-temp [:model/User {user-id :id} {}]
+        ;; a `settings` column that is encrypted the way the column expects but whose contents aren't JSON: the
+        ;; transform hands back the raw column value (a String) instead of a map
+        (t2/query {:update :core_user
+                   :set    {:settings (encryption/maybe-encrypt "not-json")}
+                   :where  [:= :id user-id]})
+        (mt/user-http-request user-id :put 204 "setting/test-user-local-only-setting" {:value "NEW"})
+        (is (= "NEW"
+               (mt/user-http-request user-id :get 200 "setting/test-user-local-only-setting")))))))

@@ -49,8 +49,6 @@
    (java.time.format DateTimeFormatter)
    (java.time.temporal ChronoField Temporal)))
 
-;; `:sql-jdbc` is also declared as the parent in the plugin manifest, so production has it either way; naming it here
-;; too keeps the hierarchy right when the namespace is loaded without the manifest (source-classpath test runs).
 (driver/register! :starburst, :parent #{:sql-jdbc ::sql-jdbc.legacy/use-legacy-classes-for-read-and-set})
 
 (defmethod driver/host-carrying-parameters :starburst
@@ -77,6 +75,7 @@
                               :convert-timezone                true
                               :connection/multiple-databases   true
                               :metadata/key-constraints        false
+                              :native-pivot-tables             true
                               :now                             true
                               :database-routing                true
                               :connection-impersonation        true}]
@@ -119,7 +118,6 @@
 
 ;;; The Starburst JDBC driver DOES NOT support the `.getImportedKeys` method so just return `nil` here so the
 ;;; implementation doesn't try to use it.
-#_{:clj-kondo/ignore [:deprecated-var]}
 (defmethod driver/describe-fks :starburst
   [_driver _database & {:as _options}]
   ;; starburst does not support finding foreign key metadata tables, but some connectors support foreign keys.
@@ -303,30 +301,30 @@
   [:raw (if bool "TRUE" "FALSE")])
 
 (defmethod sql.qp/->honeysql [:starburst :regex-match-first]
-  [driver [_ arg pattern]]
+  [driver [_ _opts arg pattern]]
   [:regexp_extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern)])
 
 (defmethod sql.qp/->honeysql [:starburst :median]
-  [driver [_ arg]]
+  [driver [_ _opts arg]]
   [:approx_percentile (sql.qp/->honeysql driver arg) 0.5])
 
 (defmethod sql.qp/->honeysql [:starburst :percentile]
-  [driver [_ arg p]]
+  [driver [_ _opts arg p]]
   [:approx_percentile (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver p)])
 
 (defmethod sql.qp/->honeysql [:starburst :log]
-  [driver [_ field]]
+  [driver [_ _opts field]]
   ;; recent starburst versions have a `log10` function (not `log`)
   [:log10 (sql.qp/->honeysql driver field)])
 
 (defmethod sql.qp/->honeysql [:starburst :count-where]
-  [driver [_ pred]]
+  [driver [_ _opts pred]]
   ;; starburst will use the precision given here in the final expression, which chops off digits
   ;; need to explicitly provide two digits after the decimal
-  (sql.qp/->honeysql driver [:sum-where 1.00M pred]))
+  (sql.qp/->honeysql driver [:sum-where {} 1.00M pred]))
 
 (defmethod sql.qp/->honeysql [:starburst :time]
-  [_ [_ t]]
+  [_ [_ _opts t]]
   ;; Convert t to locale time, then format as sql. Then add cast.
   (h2x/cast :time (u.date/format-sql (t/local-time t))))
 
@@ -372,7 +370,7 @@
      (->at-time-zone y)]))
 
 (defmethod sql.qp/->honeysql [:starburst :convert-timezone]
-  [driver [_ arg target-timezone source-timezone]]
+  [driver [_ _opts arg target-timezone source-timezone]]
   (let [expr         (sql.qp/->honeysql driver (cond-> arg
                                                  (string? arg) u.date/parse))
         with_timezone? (or (sql.qp.u/field-with-tz? arg)
@@ -920,7 +918,23 @@
    :kerberos-config-path "KerberosConfigPath"
    :kerberos-delegation "KerberosDelegation"})
 
+(defn- check-kerberos-file-paths!
+  "The keytab, config and credential-cache paths are files on the Metabase host that an admin types in, so they have
+  to be somewhere `readable-paths` allows. A credential cache may also be named by type: `FILE:`/`DIR:` name a path,
+  the others (`KEYRING:`, `MEMORY:`, `KCM:`, ...) name no file."
+  [details]
+  (doseq [k     [:kerberos-keytab-path :kerberos-config-path :kerberos-credential-cache-path]
+          :let  [v    (some-> (get details k) str str/trim)
+                 path (cond
+                        (str/blank? v)                    nil
+                        (re-find #"(?i)^(FILE|DIR):" v)   (str/replace v #"(?i)^(FILE|DIR):" "")
+                        (re-find #"^[A-Za-z]{2,}:" v)     nil
+                        :else                             v)]
+          :when path]
+    (driver-api/ensure-readable-path! path)))
+
 (defn- details->kerberos-url-params [details]
+  (check-kerberos-file-paths! details)
   (let [remove-blank-vals (fn [m] (into {} (remove (comp str/blank? val) m)))
         ks                (keys kerb-props->url-param-names)]
     (-> (select-keys details ks)
@@ -947,6 +961,11 @@
               details)]
     ;; in any case, remove the standalone Kerberos properties from details map
     (apply dissoc (cons det (keys kerb-props->url-param-names)))))
+
+;; `jdbc-spec` splices the schema into the URL path after the catalog
+(defmethod driver/url-building-detail-keys :starburst
+  [driver]
+  (conj ((get-method driver/url-building-detail-keys :default) driver) :schema))
 
 (defn- jdbc-spec
   "Creates a spec for `clojure.java.jdbc` to use for connecting to starburst via JDBC, from the given `opts`."
@@ -1010,7 +1029,7 @@
 
 (defmethod sql.qp/inline-value [:starburst String]
   [_ ^String s]
-  (str \' (sql.u/escape-sql s :ansi) \'))
+  (sql.u/quote-literal s :ansi))
 
 (defmethod sql.qp/inline-value [:starburst Time]
   [driver t]
@@ -1043,8 +1062,8 @@
   (.setSessionUser ^TrinoConnection (.unwrap conn TrinoConnection) role))
 
 (defmethod sql.qp/->honeysql [:starburst ::sql.qp/cast-to-text]
-  [driver [_ expr]]
-  (sql.qp/->honeysql driver [::sql.qp/cast expr "varchar"]))
+  [driver [_ _opts expr]]
+  (sql.qp/->honeysql driver [::sql.qp/cast {} expr "varchar"]))
 
 ;; starburst returns line numbers in error messages which will be off by 1 if
 ;; the remark is prepended (#64133)

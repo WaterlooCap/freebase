@@ -1,25 +1,4 @@
-export type MetabaseFontFamily =
-  | "Roboto"
-  | "Merriweather"
-  | "Open Sans"
-  | "Lato"
-  | "Inter"
-  | "Noto Sans"
-  | "Roboto Slab"
-  | "Source Sans Pro"
-  | "Raleway"
-  | "Slabo 27px"
-  | "PT Sans"
-  | "Poppins"
-  | "PT Serif"
-  | "Roboto Mono"
-  | "Roboto Condensed"
-  | "Playfair Display"
-  | "Oswald"
-  | "Ubuntu"
-  | "Montserrat"
-  | "Lora"
-  | "Custom";
+import type { MetabaseFontFamily } from "metabase-types/api/fonts";
 
 type PredefinedFontName = Exclude<MetabaseFontFamily, "Custom">;
 
@@ -53,6 +32,7 @@ export const PREDEFINED_FONT_FAMILIES_FALLBACK_MAP: Record<
   "PT Sans": '"Lato", sans-serif',
   Poppins: '"Montserrat", sans-serif',
   "PT Serif": '"Lora", serif',
+  "JetBrains Mono": "monospace",
   "Roboto Mono": "monospace",
   "Roboto Condensed": "sans-serif",
   "Playfair Display": "serif",

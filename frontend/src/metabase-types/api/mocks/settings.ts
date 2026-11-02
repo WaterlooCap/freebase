@@ -1,5 +1,4 @@
-import dayjs from "dayjs";
-
+import { dayjs } from "metabase/dayjs";
 import type {
   Engine,
   EngineField,
@@ -7,6 +6,7 @@ import type {
   EnterpriseSettingKey,
   EnterpriseSettings,
   FontFile,
+  MajorVersionSupport,
   SettingDefinition,
   Settings,
   TokenFeatures,
@@ -83,6 +83,16 @@ export const createMockVersionInfo = (
   ...opts,
 });
 
+export const createMockMajorVersionSupport = (
+  opts?: Partial<MajorVersionSupport>,
+): MajorVersionSupport => ({
+  major: 56,
+  released: "2025-04-15",
+  lts: false,
+  eol: "2027-06-01",
+  ...opts,
+});
+
 export const createMockTokenStatus = (
   opts?: Partial<TokenStatus>,
 ): TokenStatus => ({
@@ -144,6 +154,7 @@ export const createMockTokenFeatures = (
   table_data_editing: false,
   semantic_search: false,
   remote_sync: false,
+  "data-apps": false,
   "transforms-basic": false,
   "transforms-python": false,
   library: false,
@@ -153,7 +164,6 @@ export const createMockTokenFeatures = (
   writable_connection: false,
   admin_security_center: false,
   ai_controls: false,
-  workspaces: false,
   ...opts,
 });
 
@@ -376,13 +386,14 @@ export const createMockSettings = (
   "saml-attribute-group": null,
   "saml-group-sync": null,
   "saml-group-mappings": null,
+  "jwt-group-mappings": null,
   "scim-enabled": false,
   "scim-base-url": "http://localhost:3000/api/ee/scim/v2/",
   "snowplow-url": "",
   "search-engine": "appdb",
   "search-typeahead-enabled": true,
   "setup-token": null,
-  "session-cookies": null,
+  "session-cookies": false,
   "session-cookie-samesite": "lax",
   "session-timeout": null,
   "slack-bug-report-channel": null,
@@ -425,6 +436,7 @@ export const createMockSettings = (
   "token-status": null,
   "tracing-enabled": false,
   "transforms-enabled": false,
+  "transforms-setup-complete": false,
   version: createMockVersion(),
   "version-info": createMockVersionInfo(),
   "version-info-last-checked": null,
@@ -455,5 +467,6 @@ export const createMockSettings = (
   "mcp-apps-cors-custom-origins": "",
   "transforms-meter-locked": null,
   "mfa-enforcement": "off",
+  "mfa-requirement-deadline": null,
   ...opts,
 });

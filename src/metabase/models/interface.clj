@@ -15,9 +15,13 @@
    [clojure.string :as str]
    [clojure.walk :as walk]
    [medley.core :as m]
+   [metabase.app-db.core :as mdb]
+   ;; Toucan out-transforms normalize stored legacy MBQL on read; needed until the app db is MBQL 5
    ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.legacy-mbql.normalize :as mbql.normalize]
+   ;; stored card queries/refs are still legacy MBQL; validated against the legacy schema on read/write
    ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.lib.core :as lib]
+   [metabase.models.db :as models.db]
    [metabase.models.dispatch :as models.dispatch]
    [metabase.models.json-migration :as jm]
    [metabase.models.resolution]
@@ -37,7 +41,6 @@
    [toucan2.protocols :as t2.protocols]
    [toucan2.tools.before-insert :as t2.before-insert]
    [toucan2.tools.hydrate :as t2.hydrate]
-   [toucan2.tools.identity-query :as t2.identity-query]
    [toucan2.util :as t2.u])
   (:import
    (java.sql Blob)
@@ -58,8 +61,8 @@
 
 (def ^:dynamic *deserializing?*
   "This is dynamically bound to true when deserializing. A few pieces of the Toucan magic are undesirable for
-  deserialization. Most notably, we don't want to generate an `:entity_id`, as that would lead to duplicated entities
-  on a future deserialization."
+  deserialization and are skipped based on this var. (Entity ids are not one of them: the insert hook generates an
+  `:entity_id` whenever it is missing, deserializing or not — ingested entities carry their own.)"
   false)
 
 (def ^{:arglists '([x & _args])} dispatch-on-model
@@ -212,6 +215,7 @@
 (def ^{:deprecated "0.57.0"} transform-legacy-field-ref
   "Transform field refs"
   {:in  json-in
+   ;; inside the deprecated transform itself; legacy refs from the app DB need the legacy normalizer
    :out (comp (catch-normalization-exceptions #_{:clj-kondo/ignore [:deprecated-var]} mbql.normalize/normalize-field-ref)
               json-out-with-keywordization)})
 
@@ -252,23 +256,23 @@
 
 (mu/defn assert-enum
   "Assert that a value is one of the values in `enum`."
-  [enum :- [:set :any]
-   value]
+  [enum  :- [:set [:maybe [:or :keyword :string]]]
+   value :- [:maybe [:or :keyword :string]]]
   (when-not (contains? enum value)
     (throw (ex-info (format "Invalid value %s. Must be one of %s" value (str/join ", " enum)) {:status-code 400
                                                                                                :value       value}))))
 
 (mu/defn assert-optional-enum
   "Assert that a value is one of the values in `enum` or `nil`."
-  [enum :- [:set :any]
-   value :- :any]
+  [enum :- [:set [:or :keyword :string]]
+   value :- [:maybe [:or :keyword :string]]]
   (when (some? value)
     (assert-enum enum value)))
 
 (mu/defn assert-namespaced
   "Assert that a value is a namespaced keyword under `qualified-ns`."
   [qualified-ns :- string?
-   value]
+   value        :- [:or :keyword :string]]
   (when-not (= qualified-ns (-> value keyword namespace))
     (throw (ex-info (format "Must be a namespaced keyword under :%s, got: %s" qualified-ns value) {:status-code 400
                                                                                                    :value       value}))))
@@ -549,7 +553,7 @@
   and H2 and `now(6)` for MySQL/MariaDB (`now()` for MySQL only return second resolution; `now(6)` uses the
   max (nanosecond) resolution)."
   []
-  (h2x/current-datetime-honeysql-form ((requiring-resolve 'metabase.app-db.core/db-type))))
+  (h2x/current-datetime-honeysql-form (mdb/db-type)))
 
 (defn- add-created-at-timestamp [obj & _]
   (cond-> obj
@@ -593,12 +597,8 @@
       add-updated-at-timestamp))
 
 (defn- add-entity-id [obj & _]
-  (if (or (contains? obj :entity_id)
-          *deserializing?*)
-    ;; Don't generate a new entity_id if either: (a) there's already one set; or (b) we're deserializing.
-    ;; Generating them at deserialization time can lead to duplicated entities if they're deserialized again.
-    obj
-    (assoc obj :entity_id (u/generate-nano-id))))
+  (cond-> obj
+    (nil? (:entity_id obj)) (assoc :entity_id (u/generate-nano-id))))
 
 (t2/define-before-insert :hook/entity-id
   [instance]
@@ -622,7 +622,7 @@
   {:pre [(map? row-map)]}
   (let [model (t2/resolve-model modelable)]
     (try
-      (t2/select-one model (t2.identity-query/identity-query [row-map]))
+      (models.db/after-select-via-identity-query {:model model :row row-map})
       (catch Throwable e
         (throw (ex-info (format "Error doing after-select for model %s: %s" model (ex-message e))
                         {:model model}
@@ -692,6 +692,7 @@
   ([model pk]
    (can-read? model pk)))
 
+;; only reached through the :can_write hydration key, never called by name
 #_{:clj-kondo/ignore [:unused-private-var]}
 (define-simple-hydration-method ^:private hydrate-can-write
   :can_write
@@ -773,17 +774,19 @@
     a-model       :- qualified-keyword?
     object-id     :- [:or pos-int? string?]]
    (or (current-user-has-root-permissions?)
-       (check-perms-with-fn fn-symb read-or-write (t2/select-one a-model (first (t2/primary-keys a-model)) object-id))))
+       (check-perms-with-fn fn-symb read-or-write (models.db/entity-by-pk a-model (first (t2/primary-keys a-model)) object-id))))
 
   ([fn-symb       :- qualified-symbol?
     read-or-write :- [:enum :read :write]
-    object        :- :map]
+    object        :- [:maybe [:fn {:error/message "a Toucan instance or model-like record"}
+                              #(some? (t2.protocols/model %))]]]
    (and object
         (check-perms-with-fn fn-symb (perms-objects-set object read-or-write))))
 
   ([fn-symb   :- qualified-symbol?
     perms-set :- [:set :string]]
-   (let [f (requiring-resolve fn-symb)]
+   ;; resolves the permissions implementation lazily to avoid a models -> permissions load cycle
+   (let [f #_{:clj-kondo/ignore [:metabase/modules]} (requiring-resolve fn-symb)]
      (assert f)
      (u/prog1 (f (current-user-permissions-set) perms-set)
        (log/tracef "Perms check: %s -> %s" (pr-str (list fn-symb (current-user-permissions-set) perms-set)) <>)))))
@@ -867,6 +870,11 @@
   [_original-model dest-key _hydrated-key]
   [(u/->snake_case_en (keyword (str (name dest-key) "_id")))])
 
+(mr/def ::hydratable-item
+  "An item to hydrate: usually a Toucan instance, but callers may pass a plain map (or nil, for a sparse position)
+  since this helper only assocs a hydration key onto it."
+  [:maybe [:map {:closed false, ::mr/deliberately-open true, :description "a Toucan instance or a plain map"}]])
+
 (mu/defn instances-with-hydrated-data
   ;; TODO: this example is wrong, we don't get a vector of tables
   "Helper function to write batched hydrations.
@@ -881,11 +889,13 @@
            {:id 2 :tables [...tables-from-db-2]}]
 
   - key->hydrated-items-fn: is a function that returns a map with key is `instance-key` and value is the hydrated data of that instance."
-  [instances                      :- [:sequential :any]
+  [instances                      :- [:sequential ::hydratable-item]
    hydration-key                  :- :keyword
    instance-key->hydrated-data-fn :- fn?
    instance-key                   :- :keyword
-   & [{:keys [default] :as _options}]]
+   & [{:keys [default] :as _options}] :- [:* [:map {:closed true}
+                                              [:default {:optional true}
+                                               [:maybe [:or :boolean number? [:map {:closed true}] [:= []]]]]]]]
   (when (seq instances)
     (let [key->hydrated-items (instance-key->hydrated-data-fn)]
       (for [item instances]

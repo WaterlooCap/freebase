@@ -1,15 +1,15 @@
 import { createAction } from "redux-actions";
 import { t } from "ttag";
 
-import { getActionErrorMessage } from "metabase/actions/utils";
 import { subscriptionApi } from "metabase/api";
+import { findErrorMessage } from "metabase/api/utils/errors";
 import { createThunkAction } from "metabase/redux";
-import type { DraftDashboardSubscription } from "metabase/redux/store";
 import { addUndo } from "metabase/redux/undo";
 import type {
   ChannelApiResponse,
   CreateSubscriptionRequest,
   DashboardSubscription,
+  DraftDashboardSubscription,
   UpdateSubscriptionRequest,
 } from "metabase-types/api";
 
@@ -42,18 +42,22 @@ export const saveEditingPulse = createThunkAction(
         if (isEdit) {
           return await dispatch(
             subscriptionApi.endpoints.updateSubscription.initiate(
+              // Unjustified type cast. FIXME
               editingPulse as unknown as UpdateSubscriptionRequest,
             ),
           ).unwrap();
         } else {
           return await dispatch(
             subscriptionApi.endpoints.createSubscription.initiate(
+              // Unjustified type cast. FIXME
               editingPulse as unknown as CreateSubscriptionRequest,
             ),
           ).unwrap();
         }
       } catch (error) {
-        const errorMessage = getActionErrorMessage(error);
+        const errorMessage =
+          findErrorMessage(error) ??
+          t`Something went wrong while saving your subscription`;
 
         dispatch(
           addUndo({

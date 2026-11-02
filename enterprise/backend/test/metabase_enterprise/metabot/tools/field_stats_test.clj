@@ -2,7 +2,6 @@
   (:require
    [clojure.test :refer :all]
    [metabase-enterprise.impersonation.util-test :as impersonation.util-test]
-   [metabase-enterprise.sandbox.test-util :as sandbox.tu]
    [metabase-enterprise.test :as met]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
@@ -25,6 +24,11 @@
                       {:entity-type "table", :entity-id table-id, :field-id field-id, :limit 10})]
           (testing "returns sandboxed field values"
             (is (= ["African" "American"] (get-in result [:structured-output :value_metadata :field_values])))))
+        (testing "a truncated sample counts only the values the sandbox lets the user see"
+          (is (=? {:field_values ["African"] :field_values_total 2}
+                  (get-in (metabot.tools.field-stats/field-values
+                           {:entity-type "table", :entity-id table-id, :field-id field-id, :limit 1})
+                          [:structured-output :value_metadata]))))
         (finally
           (t2/delete! :model/FieldValues :field_id field-id :type :advanced))))))
 
@@ -49,22 +53,6 @@
           (finally
             (t2/update! :model/Field field-id {:fingerprint original-fp})))))))
 
-(deftest sandbox-restricted-column-on-own-table-is-not-drillable-test
-  (testing "a column the sandbox's source card omits is not drillable on the sandboxed table itself"
-    (met/with-gtaps! {:gtaps {:venues {:query (sandbox.tu/restricted-column-query (mt/id))}}}
-      (let [name-field-id (mt/id :venues :name)]
-        (try
-          (testing "PRICE is outside the sandbox's column set"
-            (is (thrown-with-msg?
-                 clojure.lang.ExceptionInfo #"You don't have permissions to do that."
-                 (metabot.tools.field-stats/field-values
-                  {:entity-type "table" :entity-id (mt/id :venues) :field-id (mt/id :venues :price)}))))
-          (testing "a column the sandbox does expose is still drillable"
-            (is (=? {:structured-output {:field_id name-field-id}}
-                    (metabot.tools.field-stats/field-values
-                     {:entity-type "table" :entity-id (mt/id :venues) :field-id name-field-id}))))
-          (finally
-            (t2/delete! :model/FieldValues :field_id name-field-id :type :advanced)))))))
 (deftest fingerprint-withheld-for-sandboxed-user-test
   (testing "An existing global fingerprint is withheld from a sandboxed user, even though it's already
             computed and would otherwise just be read as-is."

@@ -11,12 +11,11 @@ import {
   getParameterValues,
 } from "metabase/dashboard/selectors";
 import { getActionIsEnabledInDatabase } from "metabase/dashboard/utils";
-import { connect, useSelector } from "metabase/redux";
+import { useQuestionFromCard } from "metabase/metadata-store";
+import { connect } from "metabase/redux";
 import type { Dispatch, State } from "metabase/redux/store";
-import { getMetadata } from "metabase/selectors/metadata";
 import { Tooltip } from "metabase/ui";
 import type { VisualizationProps } from "metabase/visualizations/types";
-import Question from "metabase-lib/v1/Question";
 import type {
   ActionDashboardCard,
   Dashboard,
@@ -63,10 +62,10 @@ const ActionComponent = ({
   const { data: card } = useGetCardQuery(
     dashcard.action?.model_id ? { id: dashcard.action.model_id } : skipToken,
   );
-  const metadata = useSelector(getMetadata);
+  const buildQuestion = useQuestionFromCard();
   const model = useMemo(
-    () => (card ? new Question(card, metadata) : undefined),
-    [card, metadata],
+    () => (card ? buildQuestion(card) : undefined),
+    [card, buildQuestion],
   );
 
   const actionSettings = dashcard.action?.visualization_settings;
@@ -129,6 +128,7 @@ const ActionComponent = ({
 
   return (
     <ActionVizForm
+      // Unjustified type cast. FIXME
       action={dashcard.action as WritebackAction}
       dashboard={dashboard}
       dashcard={dashcard}
@@ -202,5 +202,4 @@ function getErrorTooltip({
   return t`Something’s gone wrong`;
 }
 
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default connect(mapStateToProps)(ActionFn);
+export const Action = connect(mapStateToProps)(ActionFn);

@@ -51,6 +51,7 @@
                               :expression-literals              true
                               :identifiers-with-spaces          false
                               :metadata/key-constraints         false
+                              :native-pivot-tables              true
                               :nested-fields                    false
                               :regex/lookaheads-and-lookbehinds false
                               :test/jvm-timezone-setting        false
@@ -71,6 +72,11 @@
   "Returns the endpoint URL for a specific region"
   [region]
   (str "//athena." region ".amazonaws.com" (when (str/starts-with? region "cn-") ".cn") ":443"))
+
+;; the URL is built from the hostname, or from the region when there is none; everything else is a property
+(defmethod driver/url-building-detail-keys :athena
+  [_driver]
+  [:hostname :region])
 
 (defmethod driver/connection-hosts :athena
   [_driver {:keys [hostname region]}]
@@ -170,8 +176,8 @@
     ((get-method sql-jdbc.execute/read-column-thunk [:sql-jdbc Types/OTHER]) driver rs rsmeta i)))
 
 (defmethod sql.qp/->honeysql [:athena ::sql.qp/cast-to-text]
-  [driver [_ expr]]
-  (sql.qp/->honeysql driver [::sql.qp/cast expr "varchar"]))
+  [driver [_ _opts expr]]
+  (sql.qp/->honeysql driver [::sql.qp/cast {} expr "varchar"]))
 
 (defmethod sql-jdbc.execute/read-column-thunk [:athena Types/TIMESTAMP_WITH_TIMEZONE]
   [_driver ^ResultSet rs _rs-meta ^Long i]
@@ -350,7 +356,7 @@
   [:date_parse expr (h2x/literal "%Y%m%d%H%i%S")])
 
 (defmethod sql.qp/->honeysql [:athena :datetime-diff]
-  [driver [_ x y unit]]
+  [driver [_ _opts x y unit]]
   (let [x (sql.qp/->honeysql driver x)
         y (sql.qp/->honeysql driver y)]
     (case unit
@@ -361,17 +367,15 @@
 
 ;; Support for median/percentile functions
 (defmethod sql.qp/->honeysql [:athena :median]
-  [driver [_ arg]]
+  [driver [_ _opts arg]]
   [:approx_percentile (sql.qp/->honeysql driver arg) 0.5])
 
 (defmethod sql.qp/->honeysql [:athena :percentile]
-  [driver [_ arg p]]
+  [driver [_ _opts arg p]]
   [:approx_percentile (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver p)])
 
 (defmethod sql.qp/->honeysql [:athena :regex-match-first]
-  [driver [_ arg pattern]]
-  ;; compile the pattern through ->honeysql so a non-string pattern (e.g. a stored [:raw ...] form spliced in from a
-  ;; source card) is rejected at multimethod dispatch instead of being emitted verbatim as SQL.
+  [driver [_ _opts arg pattern]]
   [:regexp_extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern)])
 
 (defn- run-query
@@ -458,10 +462,23 @@
 (defn- table-has-nested-fields? [columns]
   (some #(= "struct" (:type_name %)) columns))
 
+(defn- escape-metadata-pattern
+  "Escape a literal schema or table name for JDBC metadata pattern arguments."
+  [^DatabaseMetaData metadata entity-name]
+  (when entity-name
+    (let [escape (.getSearchStringEscape metadata)]
+      (-> entity-name
+          (str/replace escape (str escape escape))
+          (str/replace "_" (str escape "_"))
+          (str/replace "%" (str escape "%"))))))
+
 (defn- get-columns
   [^DatabaseMetaData metadata catalog schema table-name]
   (try
-    (with-open [rs (.getColumns metadata catalog schema table-name nil)]
+    (with-open [rs (.getColumns metadata catalog
+                                (escape-metadata-pattern metadata schema)
+                                (escape-metadata-pattern metadata table-name)
+                                nil)]
       (jdbc/metadata-result rs))
     (catch Throwable e
       (log/warnf "`.getColumns` failed for catalog `%s`, schema `%s`, table name `%s` with message: `%s`"
@@ -505,7 +522,10 @@
      database
      nil
      (fn [^Connection conn]
-       (let [metadata (.getMetaData conn)]
+       (let [metadata (.getMetaData conn)
+             catalog  (if (and (str/blank? catalog) (not (str/blank? dbname)))
+                        (.getCatalog conn)
+                        catalog)]
          (assoc (select-keys table [:name :schema])
                 :fields (try
                           (describe-table-fields metadata database driver table catalog dbname)
@@ -515,15 +535,20 @@
 (defn- get-tables
   [^DatabaseMetaData metadata, ^String schema-or-nil, ^String db-name-or-nil]
   ;; tablePattern "%" = match all tables
-  (with-open [rs (.getTables metadata db-name-or-nil schema-or-nil "%"
+  (with-open [rs (.getTables metadata db-name-or-nil
+                             (escape-metadata-pattern metadata schema-or-nil) "%"
                              (into-array String ["TABLE"
                                                  "VIEW"]))]
     (vec (jdbc/metadata-result rs))))
 
-#_:clj-kondo/ignore
+;; one-off REPL script kept for reference; requires test namespaces a driver module can't normally use
+#_{:clj-kondo/ignore [:discouraged-var :metabase/modules]}
 (comment
+  (require
+   '[metabase.test.data.dataset-definitions]
+   '[metabase.test.data.interface])
   ;; Script on following lines was used to get available table types, used in the `get-tables` implementation.
-  (with-open [conn (clojure.java.jdbc/get-connection
+  (with-open [conn (jdbc/get-connection
                     (sql-jdbc.conn/connection-details->spec
                      :athena
                      (metabase.test.data.interface/dbdef->connection-details

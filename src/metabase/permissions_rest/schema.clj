@@ -9,8 +9,6 @@
    [metabase.util.malli.schema :as ms]))
 
 (defn- kw-int->int-decoder
-  "Decode the `:123` shape an integer id takes when it arrives as a JSON object key. Anything else is handed on
-  untouched for validation to reject."
   [kw-int]
   (cond
     (int? kw-int)                           kw-int
@@ -18,9 +16,7 @@
     :else                                   kw-int))
 
 (mr/def ::decodable-keyword-int
-  "Integer malli schema that knows how to decode itself from the :123 sort of shape used in perm-graphs. Decodes under
-  `:api`, so a request body carrying a graph can be typed with these schemas and left to `metabase.api.macros` to
-  decode."
+  "Integer malli schema that knows how to decode itself from the :123 sort of shape used in perm-graphs"
   [:schema {:decode/api kw-int->int-decoder} ms/PositiveInt])
 
 (mr/def ::id       ::decodable-keyword-int)
@@ -46,12 +42,6 @@
    :unrestricted])
 
 (defn- named-or-granular
-  "A permission given either by name at the level it is written at, or broken down by `granular-schema` into the
-  level below -- a database's into its schemas, a schema's into its tables.
-
-  Dispatched on `map?` rather than written as an `[:or [:ref ::perms] granular-schema]`: `:or` runs every child's
-  decoder, and a `:map-of` decoder reduces over whatever it is handed, so a scalar there throws out of the decoder
-  and turns a bad request body into a 500."
   [granular-schema]
   [:multi {:dispatch map?}
    [true  granular-schema]
@@ -59,7 +49,7 @@
 
 (mr/def ::table-perms
   (named-or-granular
-   [:map
+   [:map {:closed true}
     [:read  {:optional true} [:enum :all :none]]
     [:query {:optional true} [:enum :all :none :segmented]]]))
 
@@ -72,8 +62,6 @@
      (mu/refuse #(tru "Invalid DB permissions: unrecognized permissions for a table."))]]))
 
 (defn- kw->name-decoder
-  "Decode the keyword a JSON object key arrives as back into the schema name it stands for. Anything else is handed on
-  untouched for validation to reject -- this runs over request bodies, so it can't assume `name` will work."
   [schema-name]
   (cond-> schema-name
     (keyword? schema-name) name))
@@ -104,7 +92,7 @@
            :no]]])
 
 (mr/def ::data-perms
-  [:map
+  [:map {:closed true}
    [:native  {:optional true} [:ref ::native]]
    [:schemas {:optional true} [:ref ::schemas]]])
 
@@ -117,8 +105,6 @@
     (fn [{:keys [native schemas]}]
       (not (and (= native :write) schemas (not (#{:all :impersonated} schemas)))))]])
 
-;;; closed: a per-database key the graph update doesn't act on is a request we can't honour, not one to apply the rest
-;;; of
 (mr/def ::db-perms
   "the permissions one group has on one database"
   [:map {:closed true}
@@ -131,8 +117,6 @@
    [:transforms     {:optional true} [:enum :yes :no]]])
 
 (defn- valid-db-perms?
-  "Whether the permissions a group has on one database hang together: 'view-data' may not be 'blocked' when
-  'create-queries' is 'query-builder-and-native'."
   [{:keys [create-queries view-data]}]
   (not (and (= create-queries :query-builder-and-native) (= view-data :blocked))))
 
@@ -148,24 +132,17 @@
 
 (mr/def ::data-permissions-graph
   "Used to transform, and verify data permissions graph"
-  [:map
-   [:groups [:map-of [:ref ::group-id] [:maybe [:ref ::strict-db-graph]]]]])
-
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                     PUT /api/permissions/graph REQUEST BODY                                     |
-;;; +----------------------------------------------------------------------------------------------------------------+
-
-;;; Docstrings stay short from here on: `metabase.api.macros` describes the schema back to the caller in the 400.
+  [:map {:closed true}
+   [:groups   [:map-of [:ref ::group-id] [:maybe [:ref ::strict-db-graph]]]]
+   [:revision {:optional true} [:maybe ms/Int]]])
 
 (mr/def ::attribute-name
   "a user attribute name"
-  ;; attribute names reach us as keywords, JSON object keys having been keywordized on the way in
   [:schema {:decode/normalize (fn [attribute]
                                 (cond-> attribute
                                   (keyword? attribute) u/qualified-name))}
    ms/NonBlankString])
 
-;;; The same shape `:metabase-enterprise.sandbox.schema/attribute-remappings` gives the column for `/api/mt/gtap`.
 (mr/def ::attribute-remapping
   "a field name, a field id, or a parameter target"
   [:orn
@@ -173,8 +150,6 @@
    [:field-id         ::lib.schema.id/field]
    [:parameter-target [:ref ::lib.schema.parameter/target]]])
 
-;;; A remapping the schema can't read is refused rather than left to be pruned: a sandbox stored without the
-;;; remapping that was meant to restrict it is a sandbox that filters nothing.
 (mr/def ::attribute-remappings
   "a map of user attribute name -> the field or parameter target it is remapped onto"
   [:map-of
@@ -183,12 +158,10 @@
    [:or [:ref ::attribute-remapping]
     (mu/refuse #(tru "Invalid attribute remappings: a user attribute must be remapped onto a field name, a field id, or a parameter target."))]])
 
-;;; One without an `:id` is created, one with an `:id` is updated -- and only in the keys the request actually
-;;; carries, so `:card_id`/`:attribute_remappings` have to keep their present/absent distinction.
 (mr/def ::sandbox-update
   "a sandbox to write alongside a permissions graph update"
   [:and
-   [:map
+   [:map {:closed true}
     [:id                   {:optional true} ms/PositiveInt]
     [:group_id             {:optional true} ms/PositiveInt]
     [:table_id             {:optional true} ms/PositiveInt]
@@ -201,14 +174,14 @@
 
 (mr/def ::impersonation-update
   "a connection impersonation policy to write alongside a permissions graph update"
-  [:map
+  [:map {:closed true}
    [:group_id  ms/PositiveInt]
    [:db_id     ms/PositiveInt]
    [:attribute ms/NonBlankString]])
 
 (mr/def ::graph-update-request
   "the permissions graph, plus the sandboxes and connection impersonations to write with it"
-  [:map
+  [:map {:closed true}
    [:groups [:and
              [:multi {:dispatch map?}
               [true [:map-of

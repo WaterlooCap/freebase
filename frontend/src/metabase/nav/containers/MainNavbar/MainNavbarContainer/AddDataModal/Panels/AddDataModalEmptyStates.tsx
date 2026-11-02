@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router";
 import { match } from "ts-pattern";
 import { c, t } from "ttag";
 
+import { Link } from "metabase/common/components/Link";
 import { StoragePurchaseButton } from "metabase/common/components/upsells/StoragePurchaseModal";
 import { useSelector } from "metabase/redux";
-import { getSetting } from "metabase/selectors/settings";
+import { getSetting } from "metabase/settings";
 import {
   Alert,
   Box,
@@ -99,10 +99,13 @@ export const ContactAdminAlert = ({ reason }: { reason: ContactReason }) => {
     .exhaustive();
 
   return (
-    <Alert icon={<Icon name="info" />} maw={CONTENT_MAX_WIDTH}>
-      <Text fz="md" lh="lg">
-        {getAlertCopy}
-      </Text>
+    <Alert
+      size="compact"
+      variant="light"
+      icon={<Icon name="info" />}
+      maw={CONTENT_MAX_WIDTH}
+    >
+      {getAlertCopy}
     </Alert>
   );
 };
@@ -130,10 +133,10 @@ const AddDataEmptyState = ({
   secondaryAction,
 }: EmptyStateProps) => {
   return (
-    <Stack gap="lg" align="center" justify="center" pt="2.5rem">
+    <Stack gap="xl" align="center" justify="center" pt="2.5rem">
       {illustration}
       <Box component="header" ta="center" maw={CONTENT_MAX_WIDTH}>
-        <Title order={2} size="h4" mb="xs">
+        <Title order={2} size="h4" mb="xxs">
           {title}
         </Title>
         <Text c="text-secondary">{subtitle}</Text>

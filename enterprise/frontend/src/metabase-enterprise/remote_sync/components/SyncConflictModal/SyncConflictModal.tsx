@@ -1,10 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 import { t } from "ttag";
 
-import { useGetSettingsQuery } from "metabase/api";
-import { useSetting } from "metabase/common/hooks";
-import { useMetadataToasts } from "metabase/metadata/hooks";
+import { useMetadataToasts } from "metabase/common/hooks";
 import { useSelector } from "metabase/redux";
+import { useGetSettingsQuery, useSetting } from "metabase/settings";
 import { Box, Button, Group, Icon, Modal } from "metabase/ui";
 import {
   useGetBranchesQuery,
@@ -46,6 +45,7 @@ import {
 
 interface UnsyncedWarningModalProps {
   currentBranch: string;
+  /** switch-branch variant only: the branch to switch to once the chosen action resolves local changes. */
   nextBranch?: string | null;
   onClose: VoidFunction;
   variant: RemoteSyncConflictVariant;
@@ -99,6 +99,7 @@ export const SyncConflictModal = (props: UnsyncedWarningModalProps) => {
   const markLibraryAndTransformsAsSynced = useCallback(async () => {
     try {
       const remoteSyncSettings: RemoteSyncConfigurationSettings = {
+        // Unjustified type cast. FIXME
         [COLLECTIONS_KEY]: (settingValues as RemoteSyncConfigurationSettings)[
           COLLECTIONS_KEY
         ],
@@ -158,8 +159,9 @@ export const SyncConflictModal = (props: UnsyncedWarningModalProps) => {
     }
 
     if (optionValue === "discard") {
-      // nextBranch is set on a switch-branch discard; currentBranch is the branch we're on now and is
-      // asserted against the setting to catch a stale tab.
+      // nextBranch is set on a switch-branch discard (the branch we're switching to); otherwise we discard
+      // and reload the current branch. currentBranch is the expected-branch assertion (caught if a stale tab
+      // switched under us).
       await discardChangesAndImport(
         nextBranch || currentBranch,
         currentBranch,
@@ -189,12 +191,12 @@ export const SyncConflictModal = (props: UnsyncedWarningModalProps) => {
     <Modal
       onClose={onClose}
       opened
-      padding="xl"
+      padding="xxl"
       styles={{ title: { lineHeight: "2rem" } }}
       title={getModalTitle(variant, canMerge)}
       withCloseButton={false}
     >
-      <Box pt="md">
+      <Box pt="lg">
         {variant === "setup" ? (
           <SetupConflictInfo />
         ) : conflicts && conflicts.length > 0 ? (
@@ -230,7 +232,7 @@ export const SyncConflictModal = (props: UnsyncedWarningModalProps) => {
 
         {/* Pushing (merge / force / new branch) needs a commit message; pull/switch/setup don't. */}
         {variant === "push" && optionValue && optionValue !== "discard" && (
-          <Box mt="lg">
+          <Box mt="xl">
             <CommitMessageSection
               value={commitMessage}
               onChange={setCommitMessage}
@@ -238,7 +240,7 @@ export const SyncConflictModal = (props: UnsyncedWarningModalProps) => {
           </Box>
         )}
 
-        <Group gap="sm" justify="end" mt="lg">
+        <Group gap="sm" justify="end" mt="xl">
           <Button onClick={onClose} variant="subtle">
             {t`Cancel`}
           </Button>

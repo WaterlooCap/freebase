@@ -7,7 +7,7 @@ import {
   isAdminGroup,
   isDataAnalystGroup,
   isDefaultGroup,
-} from "metabase/admin/utils/groups";
+} from "metabase/common/utils/groups";
 import { PLUGIN_GROUP_MANAGERS, PLUGIN_TENANTS } from "metabase/plugins";
 import { Box, Divider, Flex, Icon, Popover } from "metabase/ui";
 import { isNotNull } from "metabase/utils/types";
@@ -109,7 +109,7 @@ export const MembershipSelect = ({
         style={{ cursor: isDisabled ? "not-allowed" : "pointer" }}
       >
         <span>{getGroupNameLocalized(group)}</span>
-        <Flex pl="md" align="center" justify="end">
+        <Flex pl="lg" align="center" justify="end">
           {canEditMembershipType && (
             <PLUGIN_GROUP_MANAGERS.UserTypeToggle
               tooltipPlacement="bottom"

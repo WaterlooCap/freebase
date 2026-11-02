@@ -29,10 +29,10 @@
   (cond-> v
     (instance? Blob v) blob->bytes))
 
-;; All columns whose whole value is encrypted at rest (via `mi/transform-encrypted-json` or `mi/transform-encrypted-text`).
-;; The on-disk format is `encrypt(string)`, so rotating the key only requires decrypting the raw value with the current
-;; key and re-encrypting the resulting string. We list raw table names (not models) so this also works for enterprise
-;; models (e.g. WorkspaceDatabase) that aren't loaded in every edition.
+;; All columns whose whole value is encrypted at rest (via `mi/transform-encrypted-json`, or the encrypted-text/EDN
+;; transforms in explorations). The on-disk format is `encrypt(string)`, so rotating the key only requires decrypting
+;; the raw value with the current key and re-encrypting the resulting string. We list raw table names (not models) so
+;; this also works for enterprise models that aren't loaded in every edition.
 (def ^:private encrypted-string-columns
   [[:metabase_database :details]
    [:metabase_database :settings]
@@ -41,8 +41,10 @@
    [:core_user :settings]
    [:channel :details]
    [:api_key :key]
-   [:workspace_database :database_details]
    [:auth_identity :credentials]
+   [:exploration_query_result :chart_stats]
+   [:exploration_query_result :metric_description]
+   [:exploration_query_result :chart_description]
    [:report_card :public_uuid]
    [:report_dashboard :public_uuid]
    [:action :public_uuid]
@@ -55,7 +57,8 @@
   the string/JSON columns above these hold raw bytes, so encryption and key rotation must decrypt-and-re-encrypt them as
   bytes. Any such column omitted here would keep whatever plaintext it held before a key was set, and the strict read
   would then reject it."
-  [[:secret :value]])
+  [[:secret :value]
+   [:stored_result :result_data]])
 
 ;; Older versions of dump-to-h2 and key rotation only processed `metabase_database.details` (plus settings and
 ;; secrets), skipping every other encrypted JSON column. A dump or rotation from such a version left the skipped
@@ -288,7 +291,7 @@
 
 (defn- reencrypt-encrypted-bytes-column!
   "Re-encrypt a `^bytes` `column` for every row in `table` using `encrypt-bytes-fn`. See `encrypted-bytes-columns`.
-  Streams the rows so a large column does not have to be held in memory all at
+  Streams the rows so a large column (e.g. `stored_result.result_data`) does not have to be held in memory all at
   once. A value that cannot be decrypted with the current key aborts rather than being re-encrypted: re-encrypting it
   would produce `encrypt_new(encrypt_old(x))`, permanently unrecoverable."
   [table column encrypt-bytes-fn]

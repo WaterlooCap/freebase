@@ -4,8 +4,8 @@ import fetchMock from "fetch-mock";
 
 import { setupBugReportEndpoints } from "__support__/server-mocks/bug-report";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders } from "__support__/ui";
-import { createMockState } from "metabase/redux/store/mocks";
 import {
   createMockCard,
   createMockDatasetData,
@@ -28,7 +28,7 @@ const defaultErrorPayload: ErrorPayload = {
       process_uuid: "123",
       fqns: "metabase.query-processor.middleware.catch-exceptions",
       msg: "Backend error 1",
-      exception: "Backend error 1 stacktrace",
+      exception: ["Backend error 1 stacktrace"],
     },
   ],
   userLogs: [
@@ -38,7 +38,7 @@ const defaultErrorPayload: ErrorPayload = {
       process_uuid: "123",
       fqns: "metabase.query-processor.middleware.catch-exceptions",
       msg: "Backend error 1",
-      exception: "Backend error 1 stacktrace",
+      exception: ["Backend error 1 stacktrace"],
     },
   ],
   logs: [
@@ -48,7 +48,7 @@ const defaultErrorPayload: ErrorPayload = {
       process_uuid: "123",
       fqns: "metabase.query-processor.middleware.catch-exceptions",
       msg: "Backend error 1",
-      exception: "Backend error 1 stacktrace",
+      exception: ["Backend error 1 stacktrace"],
     },
   ],
   entityName: "question",

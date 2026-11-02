@@ -5,6 +5,7 @@
    [clojure.string :as str]
    [clojure.test :refer :all]
    [honey.sql :as sql]
+   [metabase-enterprise.sso.api.interface :as sso.i]
    [metabase-enterprise.sso.integrations.token-utils :as token-utils]
    [metabase-enterprise.sso.providers.jwt :as providers.jwt]
    [metabase-enterprise.sso.settings :as sso-settings]
@@ -13,6 +14,7 @@
    [metabase.appearance.settings :as appearance.settings]
    [metabase.auth-identity.provider :as auth-identity.provider]
    [metabase.test :as mt]
+   [metabase.test.data.users :as test.users]
    [metabase.test.fixtures :as fixtures]
    [metabase.test.http-client :as client]
    [metabase.util :as u]
@@ -144,41 +146,6 @@
               redirect-url (get-in result [:headers "Location"])]
           (is (str/includes? redirect-url "&return_to=")))))))
 
-(deftest login!-ignores-caller-supplied-user-id-real-jwt-provider-test
-  (testing (str "A caller-supplied :user-id must not name the account, even on a successful JWT login. "
-                "JWT's authenticate resolves identity from :user-data and returns no :user-id of its own, "
-                "so an injected one survives the merge and wins resolution, which reads it before the email "
-                "branch. Drives login! directly rather than /auth/sso because the exposure is a key at the "
-                "request root: the integrations forward the whole Ring request, while Ring namespaces params "
-                "under :params, so an HTTP-level injection never reaches the root and would assert nothing.")
-    (with-jwt-default-setup!
-      (mt/with-temp [:model/User {admin-id :id} {:is_active true, :is_superuser true}]
-        (mt/with-model-cleanup [:model/User]
-          (let [victim-email "jwt-victim@metabase.com"
-                token        (jwt/sign {:email      victim-email
-                                        :first_name "Jay"
-                                        :last_name  "Doubleyou"}
-                                       default-jwt-secret)
-                result       (auth-identity.provider/login!
-                              :provider/jwt
-                              {:token       token
-                               ;; the injection: names an admin the JWT says nothing about
-                               :user-id     admin-id
-                               :device-info {:device_id          "test-device"
-                                             :device_description "Test Browser"
-                                             :ip_address         "127.0.0.1"
-                                             :embedded           false
-                                             :token_exchange     false}})
-                resolved-id  (get-in result [:user :id])]
-            (is (true? (:success? result))
-                "the JWT is valid, so authentication genuinely succeeds")
-            (is (= victim-email (t2/select-one-fn :email :model/User :id resolved-id))
-                "the account logged into is the one the JWT asserted")
-            (is (not= admin-id resolved-id)
-                "the caller-supplied :user-id must not name the account")
-            (is (zero? (t2/count :model/Session :user_id admin-id))
-                "and no session may be minted for the injected admin")))))))
-
 (deftest jwt-saml-both-enabled-test
   (with-jwt-default-setup!
     (sso.test-setup/with-saml-default-setup!
@@ -273,6 +240,37 @@
            (= {"extra" "keypairs", "are" "also present"}
               (t2/select-one-fn :jwt_attributes :model/User :email "rasta@metabase.com"))))))))
 
+(deftest login-with-existing-session-test
+  (testing "a JWT login from a client that already carries a Metabase session succeeds"
+    (with-jwt-default-setup!
+      (let [response (client/client-real-response (test.users/username->token :rasta)
+                                                  :get 302 "/auth/sso" {:request-options {:redirect-strategy :none}}
+                                                  :return_to default-redirect-uri
+                                                  :jwt
+                                                  (jwt/sign
+                                                   {:email      "rasta@metabase.com"
+                                                    :first_name "Rasta"
+                                                    :last_name  "Toucan"}
+                                                   default-jwt-secret))]
+        (is (sso.test-setup/successful-login? response))
+        (is (= default-redirect-uri
+               (get-in response [:headers "Location"])))))))
+
+(deftest request-jwt-test
+  (let [token "some.jwt.token"]
+    (testing "GET reads jwt from query params"
+      (is (= token (sso.i/request-jwt {:request-method :get :params {:jwt token}}))))
+    (testing "GET ignores jwt in body"
+      (is (nil? (sso.i/request-jwt {:request-method :get :body {:jwt token}}))))
+    (testing "POST reads jwt from JSON body"
+      (is (= token (sso.i/request-jwt {:request-method :post :body {:jwt token}}))))
+    (testing "POST ignores jwt in query params"
+      (is (nil? (sso.i/request-jwt {:request-method :post :params {:jwt token}}))))
+    (testing "other methods return nil"
+      (is (nil? (sso.i/request-jwt {:request-method :put
+                                    :params       {:jwt token}
+                                    :body         {:jwt token}}))))))
+
 (deftest post-jwt-body-happy-path-test
   (testing "Happy path login via POST /auth/sso with JSON body {:jwt ...}, same behavior as GET with query param"
     (with-jwt-default-setup!
@@ -300,6 +298,51 @@
            (= {"extra" "keypairs", "are" "also present"}
               (t2/select-one-fn :jwt_attributes :model/User :email "rasta@metabase.com"))))))))
 
+(deftest post-jwt-query-param-ignored-test
+  (testing "POST /auth/sso does not authenticate when jwt is only in the query string"
+    (with-jwt-default-setup!
+      (let [jwt-payload (jwt/sign
+                         {:email      "rasta@metabase.com"
+                          :first_name "Rasta"
+                          :last_name  "Toucan"
+                          :exp        (+ (buddy-util/now) 3600)
+                          :iat        (buddy-util/now)}
+                         default-jwt-secret)
+            response    (client/client-real-response :post 302 "/auth/sso"
+                                                     {:request-options {:redirect-strategy :none}}
+                                                     {}
+                                                     :return_to default-redirect-uri
+                                                     :jwt       jwt-payload)]
+        (is (not (sso.test-setup/successful-login? response)))))))
+
+(deftest post-jwt-body-precedence-test
+  (testing "POST /auth/sso uses jwt from JSON body, not from query params"
+    (with-jwt-default-setup!
+      (let [body-jwt    (jwt/sign
+                         {:email      "rasta@metabase.com"
+                          :first_name "Rasta"
+                          :last_name  "Toucan"
+                          :source     "body"
+                          :exp        (+ (buddy-util/now) 3600)
+                          :iat        (buddy-util/now)}
+                         default-jwt-secret)
+            query-jwt   (jwt/sign
+                         {:email      "crowberto@metabase.com"
+                          :first_name "Crowberto"
+                          :last_name  "Bird"
+                          :source     "query"
+                          :exp        (+ (buddy-util/now) 3600)
+                          :iat        (buddy-util/now)}
+                         default-jwt-secret)
+            response    (client/client-real-response :post 302 "/auth/sso"
+                                                     {:request-options {:redirect-strategy :none}}
+                                                     {:jwt body-jwt}
+                                                     :return_to default-redirect-uri
+                                                     :jwt       query-jwt)]
+        (is (sso.test-setup/successful-login? response))
+        (is (= {"source" "body"}
+               (t2/select-one-fn :jwt_attributes :model/User :email "rasta@metabase.com")))))))
+
 (deftest no-open-redirect-test
   (testing "Check that we prevent open redirects to untrusted sites"
     (with-jwt-default-setup!
@@ -308,19 +351,17 @@
                             "https:///badsite.com"]]
         (is
          (= "Invalid redirect URL"
-            (->
-             (client/client
-              :get 400 "/auth/sso" {:request-options {:redirect-strategy :none}}
-              :return_to redirect-uri
-              :jwt
-              (jwt/sign
-               {:email      "rasta@metabase.com"
-                :first_name "Rasta"
-                :last_name  "Toucan"
-                :extra      "keypairs"
-                :are        "also present"}
-               default-jwt-secret))
-             :message)))))))
+            (client/client
+             :get 400 "/auth/sso" {:request-options {:redirect-strategy :none}}
+             :return_to redirect-uri
+             :jwt
+             (jwt/sign
+              {:email      "rasta@metabase.com"
+               :first_name "Rasta"
+               :last_name  "Toucan"
+               :extra      "keypairs"
+               :are        "also present"}
+              default-jwt-secret))))))))
 
 (deftest expired-jwt-test
   (testing "Check an expired JWT"
@@ -600,32 +641,6 @@
               (is (= nil
                      (t2/select-one-fn :login_attributes :model/User :email "existinguser@metabase.com"))))))))))
 
-(deftest reactivating-login-does-not-restore-superuser-test
-  (testing "SSO reactivating a deactivated admin must not hand back their admin rights"
-    (with-jwt-default-setup!
-      (mt/with-model-cleanup [:model/User]
-        (let [email "offboarded@metabase.com"
-              sign  #(jwt/sign {:email email :first_name "Off" :last_name "Boarded"} default-jwt-secret)
-              login #(client/client-real-response :get 302 "/auth/sso"
-                                                  {:request-options {:redirect-strategy :none}}
-                                                  :return_to default-redirect-uri
-                                                  :jwt (sign))]
-          (is (sso.test-setup/successful-login? (login)))
-          (t2/update! :model/User :email email {:is_superuser true})
-          (t2/update! :model/User :email email {:is_active false})
-          (is (=? {:is_active false, :is_superuser true}
-                  (t2/select-one [:model/User :is_active :is_superuser] :email email))
-              "deactivation leaves the admin flag alone, which is what makes this reachable")
-          (testing "a valid assertion still reopens the account, but not as an admin"
-            (is (sso.test-setup/successful-login? (login)))
-            (is (=? {:is_active true, :is_superuser false}
-                    (t2/select-one [:model/User :is_active :is_superuser] :email email))))
-          (testing "an admin who was never deactivated keeps their rights when they log in"
-            (t2/update! :model/User :email email {:is_superuser true})
-            (is (sso.test-setup/successful-login? (login)))
-            (is (=? {:is_active true, :is_superuser true}
-                    (t2/select-one [:model/User :is_active :is_superuser] :email email)))))))))
-
 (deftest login-update-account-test
   (testing "An existing user will be reactivated upon login"
     (with-jwt-default-setup!
@@ -659,6 +674,7 @@
         (t2/update! :model/User :email "newuser@metabase.com" {:is_active false})
         (is (not (t2/select-one-fn :is_active :model/User :email "newuser@metabase.com")))
         ;; with-redefs (cross-thread): /auth/sso runs on Jetty workers that don't inherit *local-redefs*
+        ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
         #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
         (with-redefs [sso-settings/jwt-user-provisioning-enabled? (constantly false)
                       appearance.settings/site-name               (constantly "test")]
@@ -851,6 +867,7 @@
                                                       :is_active false}
                        :model/User {existing-email :email} {:tenant_id tenant-id}]
           ;; with-redefs (cross-thread): /auth/sso runs on Jetty workers that don't inherit *local-redefs*
+          ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
           #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
           (with-redefs [sso-settings/jwt-user-provisioning-enabled? (constantly false)]
             (testing "with user provisioning turned off"
@@ -998,6 +1015,7 @@
   (testing "When user provisioning is disabled, throw an error if we attempt to create a new user."
     (with-jwt-default-setup!
       ;; with-redefs (cross-thread): /auth/sso runs on Jetty workers that don't inherit *local-redefs*
+      ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
       #_{:clj-kondo/ignore [:metabase/prefer-with-dynamic-fn-redefs]}
       (with-redefs [sso-settings/jwt-user-provisioning-enabled? (constantly false)
                     appearance.settings/site-name               (constantly "test")]
@@ -1236,7 +1254,7 @@
                                       methodical/add-primary-method dispatch-val method))))))))))))
 
 (deftest jwt-without-tenant-claim-mapped-to-tenant-group-fails-loudly-test
-  (testing (str "a JWT with no @tenant claim whose groups map to a tenant group must not succeed "
+  (testing (str "EMB-2118/#78009: a JWT with no @tenant claim whose groups map to a tenant group must not succeed "
                 "and silently create an internal user with a swallowed group-sync failure. The tenant-group "
                 "mismatch must fail the login and roll back user creation.")
     (with-jwt-default-setup!
@@ -1473,3 +1491,21 @@
                     (is (some? tenant))
                     (testing "tenant created but with no attributes since the value wasn't a map"
                       (is (nil? (:attributes tenant))))))))))))))
+
+(deftest successful-jwt-login-does-not-log-pii-test
+  (testing "Successful JWT authentication should not log user's first or last name"
+    (with-jwt-default-setup!
+      (mt/with-log-messages-for-level [log-messages [metabase-enterprise.sso.providers.jwt :info]]
+        ;; client-full-response uses mock client (in-process, future) so dynamic bindings are conveyed
+        (let [response (client/client-full-response :get 302 "/auth/sso"
+                                                    {:request-options {:redirect-strategy :none}}
+                                                    :return_to default-redirect-uri
+                                                    :jwt
+                                                    (jwt/sign
+                                                     {:email      "rasta@metabase.com"
+                                                      :first_name "Rasta"
+                                                      :last_name  "Toucan"}
+                                                     default-jwt-secret))]
+          (is (sso.test-setup/successful-login? response))
+          (is (not-any? #(re-find #"Rasta|Toucan" (:message %)) (log-messages))
+              "Log messages should not contain user's first or last name"))))))

@@ -150,14 +150,11 @@
                                             (not (:effective-type m)))
                                  (assoc :effective-type (:base-type m))))))}
     [:effective-type ::common/base-type]
-    [:unit {:optional true} [:maybe ::temporal-bucketing/unit]]]])
+    [:unit {:optional true} [:maybe ::temporal-bucketing/unit]]
+    [:coercion-strategy {:optional true} [:maybe ::common/coercion-strategy]]]])
 
 (mr/def ::value.value
-  "The value slot of a `:value` clause: a single literal that is not a Clojure collection. Its concrete type is left
-  open -- literals of many kinds reach this slot (strings, numbers, temporals, UUIDs, byte arrays, ...) -- but it must
-  never be a Clojure collection. A map or sequence here is indistinguishable from Metabase's compiled-query structure
-  and would be spliced into the query as operator/DSL rather than bound as a value; the runtime
-  `check-value-literal` guard enforces the same rule for driver paths that build SQL directly from this slot."
+  "The value slot of a `:value` clause: a single literal that is not a Clojure collection."
   [:fn
    {:error/message "value must be a literal, not a Clojure collection"}
    (complement coll?)])
@@ -177,6 +174,14 @@
    #_tag   [:= {:decode/normalize common/normalize-keyword} :value]
    #_opts  [:ref ::value.options]
    #_value [:ref ::value.value]])
+
+(mr/def ::param-value
+  "A value bound to a native query parameter: a literal or, once the query processor has substituted parameters, a
+  UUID or a `java.time` object."
+  [:or
+   [:ref ::literal]
+   :uuid
+   #?@(:clj [(common/instance-of-class java.time.temporal.Temporal)])])
 
 (mr/def ::literal
   [:or

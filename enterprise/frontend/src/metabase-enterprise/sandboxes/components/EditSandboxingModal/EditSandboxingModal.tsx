@@ -11,16 +11,17 @@ import {
   useGetTableQuery,
   useValidateGroupTableAccessPolicyMutation,
 } from "metabase/api";
+import { getErrorMessage } from "metabase/api/utils/errors";
 import { ActionButton } from "metabase/common/components/ActionButton";
 import {
   QuestionPickerModal,
   getQuestionPickerValue,
 } from "metabase/common/components/Pickers/QuestionPicker";
-import { QuestionLoader } from "metabase/common/components/QuestionLoader";
 import { QuestionName } from "metabase/common/components/QuestionName";
 import { useToggle } from "metabase/common/hooks/use-toggle";
 import { useTranslateContent } from "metabase/content-translation/hooks";
 import CS from "metabase/css/core/index.css";
+import { QuestionLoader } from "metabase/questions/components/QuestionLoader";
 import {
   ActionIcon,
   Box,
@@ -55,13 +56,11 @@ import {
 
 import S from "./EditSandboxingModal.module.css";
 
-// eslint-disable-next-line ttag/no-module-declaration -- see metabase#55045
-const ERROR_MESSAGE = t`An error occurred.`;
-
 const getNormalizedPolicy = (
   policy: GroupTableAccessPolicy | GroupTableAccessPolicyDraft,
   shouldUseSavedQuestion: boolean,
 ): GroupTableAccessPolicy => {
+  // Unjustified type cast. FIXME
   return {
     ...policy,
     card_id: shouldUseSavedQuestion ? policy.card_id : null,
@@ -77,8 +76,8 @@ const getDraftPolicy = ({
   groupId,
 }: GroupTableAccessPolicyParams): GroupTableAccessPolicyDraft => {
   return {
-    table_id: parseInt(tableId),
-    group_id: parseInt(groupId),
+    table_id: parseInt(String(tableId)),
+    group_id: parseInt(String(groupId)),
     card_id: null,
     attribute_remappings: { "": null },
   };
@@ -160,7 +159,7 @@ const EditSandboxingModal = ({
   if (loadingCard || loadingTabe) {
     return (
       <Center p="2rem">
-        <Loader data-testid="loading-indicator" />
+        <Loader />
       </Center>
     );
   }
@@ -339,10 +338,7 @@ const EditSandboxingModal = ({
         </div>
         {error && (
           <div className={cx(CS.flex, CS.alignCenter, CS.my2, CS.textError)}>
-            {typeof error === "string"
-              ? error
-              : // @ts-expect-error provide correct type for error
-                (error.data.message ?? ERROR_MESSAGE)}
+            {getErrorMessage(error, t`An error occurred.`)}
           </div>
         )}
       </div>

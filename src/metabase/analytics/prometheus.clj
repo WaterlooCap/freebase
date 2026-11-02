@@ -6,7 +6,6 @@
   Api is quite simple: [[setup!]] and [[shutdown!]]. After that you can retrieve metrics from
   http://localhost:<prometheus-server-port>/metrics."
   (:require
-   [clojure.java.jmx :as jmx]
    [clojure.string :as str]
    [iapetos.collector :as collector]
    [iapetos.collector.ring :as collector.ring]
@@ -22,6 +21,7 @@
    [potemkin.types :as p.types]
    [ring.adapter.jetty :as ring-jetty])
   (:import
+   (com.mchange.v2.c3p0 C3P0Registry PoolBackedDataSource WrapperConnectionPoolDataSource)
    (io.prometheus.client Collector GaugeMetricFamily SimpleCollector)
    (io.prometheus.client.hotspot
     GarbageCollectorExports
@@ -29,7 +29,6 @@
     StandardExports
     ThreadExports)
    (java.util ArrayList List)
-   (javax.management ObjectName)
    (org.eclipse.jetty.server Server)))
 
 (set! *warn-on-reflection* true)
@@ -134,26 +133,40 @@
         (log/warnf "Unrecognized measurement %s in prometheus stats" raw-label)))
     arr))
 
-(defn- conn-pool-bean-diag-info [acc ^ObjectName jmx-bean]
-  ;; We should not be using specific driver implementations
-  (let [pool-var (requiring-resolve 'metabase.driver.sql-jdbc.connection/pool-cache-key->connection-pool)]
-    ;; Using this `locking` is non-obvious but absolutely required to avoid the deadlock inside c3p0 implementation. The
-    ;; act of JMX attribute reading first locks a DynamicPooledDataSourceManagerMBean object, and then a
-    ;; PoolBackedDataSource object. Conversely, the act of creating a pool (with
-    ;; com.mchange.v2.c3p0.DataSources/pooledDataSource) first locks PoolBackedDataSource and then
-    ;; DynamicPooledDataSourceManagerMBean. We have to lock a common monitor (which `pool-cache-key->connection-pool` is)
-    ;; to prevent the deadlock. Hopefully.
-    ;; Issue against c3p0: https://github.com/swaldman/c3p0/issues/95
-    (locking @pool-var
-      (let [bean-id   (.getCanonicalName jmx-bean)
-            props     [:numConnections :numIdleConnections :numBusyConnections
-                       :minPoolSize :maxPoolSize :numThreadsAwaitingCheckoutDefaultUser]]
-        (assoc acc (jmx/read bean-id :dataSourceName) (jmx/read bean-id props))))))
+(defn- pool-stats
+  "The stats for one c3p0 pool, read with its default-user getters."
+  [^PoolBackedDataSource pool]
+  ;; The pool-size bounds live on the wrapped ConnectionPoolDataSource, not on the pool itself.
+  (let [cpds (.getConnectionPoolDataSource pool)]
+    (cond-> {:numConnections                        (.getNumConnections pool)
+             :numIdleConnections                    (.getNumIdleConnections pool)
+             :numBusyConnections                    (.getNumBusyConnections pool)
+             :numThreadsAwaitingCheckoutDefaultUser (.getNumThreadsAwaitingCheckoutDefaultUser pool)}
+      (instance? WrapperConnectionPoolDataSource cpds)
+      (assoc :minPoolSize (.getMinPoolSize ^WrapperConnectionPoolDataSource cpds)
+             :maxPoolSize (.getMaxPoolSize ^WrapperConnectionPoolDataSource cpds)))))
 
 (defn connection-pool-info
-  "Builds a map of info about the current c3p0 connection pools managed by this Metabase instance."
+  "Builds a map of info about the current c3p0 connection pools managed by this Metabase instance: every unclosed pool
+  of every kind (warehouse, application, Quartz, semantic search), keyed by pool name (the c3p0 `dataSourceName`). A
+  pool closed while this runs is skipped for this call and logged at debug."
   []
-  (reduce conn-pool-bean-diag-info {} (jmx/mbean-names "com.mchange.v2.c3p0:type=PooledDataSource,*")))
+  ;; Read the stats from the pool objects, never through their JMX MBeans. A JMX attribute read locks the MBean and
+  ;; then the pool, while pool construction locks the pool and then the MBean (its property-change listener), so a
+  ;; scrape that overlapped a pool build deadlocked: https://github.com/swaldman/c3p0/issues/95. Reading the pool
+  ;; directly takes the pool's own monitors in the same order construction does, so the cycle cannot form; a scrape
+  ;; only waits while that one pool is mid-construction. `getPooledDataSources` returns a copy made under the
+  ;; registry lock, which is released before any pool is touched.
+  (into {}
+        (keep (fn [pool]
+                (when (instance? PoolBackedDataSource pool)
+                  (let [^PoolBackedDataSource pool pool]
+                    (try
+                      [(.getDataSourceName pool) (pool-stats pool)]
+                      (catch Exception e
+                        (log/debugf e "Skipping c3p0 pool %s in this scrape" (.getDataSourceName pool))
+                        nil))))))
+        (C3P0Registry/getPooledDataSources)))
 
 (def ^:private c3p0-collector
   "c3p0 collector delay"
@@ -333,6 +346,21 @@
    (prometheus/counter :metabase-remote-sync/git-operations-failed
                        {:description "Number of failed git operations"
                         :labels [:operation :remote]})
+   ;; Shared: semantic search and entity retrieval each provision their own tables in it, as more may later.
+   ;; At most one is available at a time: a dedicated MB_PGVECTOR_DB_URL always wins over the app db.
+   (prometheus/gauge :metabase-pgvector/store-available
+                     {:description "Whether the given pgvector storage is available to this instance."
+                      :labels      [:storage]})
+   ;; Probed hourly, so an outage takes up to that long to show up. The dedicated probe opens its own
+   ;; connection, so a store that is up but whose pool is saturated still reads as connected --
+   ;; c3p0_* covers that. The app-db probe shares the application pool, and does not.
+   (prometheus/gauge :metabase-pgvector/store-connected
+                     {:description "Whether the last connection probe to the given pgvector storage succeeded."
+                      :labels      [:storage]})
+   ;; Absent until a probe succeeds, and reset when the instance changes which backing it uses.
+   (prometheus/gauge :metabase-pgvector/store-last-success-timestamp-seconds
+                     {:description "Unix timestamp of the last successful probe to the given pgvector storage."
+                      :labels      [:storage]})
    (prometheus/counter :metabase-search/index-reindexes
                        {:description "Number of reindexed search entries"
                         :labels      [:model]})
@@ -481,6 +509,20 @@
                      {:description "Number of documents in the library entity index, as of the last full reconcile."})
    (prometheus/gauge :metabase-entity-retrieval/index-entities
                      {:description "Number of distinct entities in the library entity index, as of the last full reconcile."})
+   ;; Search-index health, one series per logical index. Implementations publish these through
+   ;; metabase.search.index-health; labels identify stable logical indexes, never physical table names.
+   (prometheus/gauge :metabase-search/index-coverage-ratio
+                     {:description (str "Fraction (0-1) of the items that should be indexed that actually are, "
+                                        "per search index.")
+                      :labels      [:index]})
+   (prometheus/gauge :metabase-search/index-garbage-count
+                     {:description (str "Absolute number of indexed items that should not be indexed "
+                                        "(orphaned or no longer a candidate), per search index.")
+                      :labels      [:index]})
+   (prometheus/gauge :metabase-search/index-staleness-seconds
+                     {:description (str "Age in seconds of the oldest known-pending change not yet reflected "
+                                        "in the index (indexer/reconcile backlog), per search index.")
+                      :labels      [:index]})
    ;; data-complexity-score timing
    ;; 1ms → 1min buckets; widen later if real-world runs push past a minute.
    (prometheus/histogram :metabase-data-complexity/scoring-duration-ms
@@ -490,6 +532,14 @@
                          {:description "Duration (ms) of one stage (`enumerate` = DB fetch, `score` = in-memory scoring, `publish` = Snowplow emit) for one catalog within a Data Complexity Score run."
                           :labels      [:stage :catalog]
                           :buckets     [1 10 50 100 500 1000 5000 10000 30000 60000]})
+   ;; explorations
+   (prometheus/gauge :metabase-explorations/pending-queue-depth
+                     {:description "Number of exploration_query rows currently in 'pending' status (awaiting execution by the explorations background runner)."})
+   (prometheus/gauge :metabase-explorations/oldest-pending-age-seconds
+                     {:description "Age in seconds of the oldest still-pending exploration_query (0 when the queue is empty)."})
+   (prometheus/counter :metabase-explorations/queries-processed
+                       {:description "Exploration queries processed."
+                        :labels [:status]})
    ;; notification metrics
    (prometheus/counter :metabase-notification/send-ok
                        {:description "Number of successful notification sends."
@@ -533,6 +583,10 @@
    (prometheus/counter :metabase-notification/template-update
                        {:description "Number of notification templates updated."
                         :labels [:channel-type]})
+   (prometheus/counter :metabase-notification/image-buffer-pooled
+                       {:description "Number of chart rasterization images backed by a pooled buffer."})
+   (prometheus/counter :metabase-notification/image-buffer-unpooled
+                       {:description "Number of chart rasterization images too large for the pool, allocated fresh."})
    (prometheus/counter :metabase-gsheets/connection-creation-began
                        {:description "How many times the instance has initiated a Google Sheets connection creation."})
    (prometheus/counter :metabase-gsheets/connection-creation-error
@@ -654,7 +708,7 @@
                        {:description "JDBC connection pool acquisitions by connection type (default, write-data, or admin)."
                         :labels [:connection-type]})
    (prometheus/counter :metabase-db-connection/type-resolved
-                       {:description "Non-default connection details resolved by effective-details (driver-agnostic). Only incremented when an overlay (write-data or admin details) is genuinely used, not on fallback or workspace swap."
+                       {:description "Non-default connection details resolved by effective-details (driver-agnostic). Only incremented when an overlay (write-data or admin details) is genuinely used, not on fallback."
                         :labels [:connection-type]})
    ;; SQL parsing metrics
    (prometheus/counter :metabase-sql-parsing/context-timeouts
@@ -693,6 +747,15 @@
    (prometheus/counter :metabase-slackbot/file-uploads
                        {:description "Number of file uploads via the Slack bot."
                         :labels [:result]})
+   (prometheus/counter :metabase-slackbot/responses-truncated
+                       {:description (str "Number of Slack bot responses truncated because they exceeded "
+                                          "Slack's message limits.")})
+   (prometheus/counter :metabase-slackbot/viz-links-dropped
+                       {:description (str "Number of visualization query links dropped from Slack bot messages "
+                                          "because the linked title exceeded Slack's block limits.")})
+   (prometheus/counter :metabase-slackbot/responses-undeliverable
+                       {:description (str "Number of Slack bot responses that reached the user as nothing at all, "
+                                          "because the plain-text fallback failed too.")})
    ;; metabot / LLM agent metrics
    (prometheus/counter :metabase-metabot/llm-requests
                        {:description "LLM provider API requests"
@@ -762,6 +825,41 @@
                          {:description "Duration in milliseconds of used-tables extraction."
                           ;; 1ms -> 30s
                           :buckets [1 5 10 25 50 100 250 500 1000 2500 5000 10000 30000]})
+   ;; messaging metrics
+   (prometheus/gauge :metabase-mq/queue-depth
+                     {:description "Batch count per queue by status, across all queue backends."
+                      :labels [:backend :channel :status]})
+   (prometheus/counter :metabase-mq/queue-poll-results
+                       {:description "Queue poll results by outcome, across all queue backends."
+                        :labels [:backend :result]})
+   (prometheus/counter :metabase-mq/batch-stale-recoveries
+                       {:description "Batches recovered from stale processing state."
+                        :labels [:backend :transport :channel]})
+   (prometheus/counter :metabase-mq/batches-handled
+                       {:description "Batches handled by status."
+                        :labels [:transport :channel :status]})
+   (prometheus/counter :metabase-mq/dedup-messages-dropped
+                       {:description "Messages dropped by dedup before publishing."
+                        :labels [:channel]})
+   (prometheus/histogram :metabase-mq/handle-duration-ms
+                         {:description "Duration in milliseconds to process a batch."
+                          :labels [:transport :channel]
+                          :buckets [1 5 10 50 100 500 1000 5000 10000 30000]})
+   (prometheus/counter :metabase-mq/messages-published
+                       {:description "Total messages published."
+                        :labels [:transport :channel]})
+   (prometheus/gauge :metabase-mq/publish-buffer-depth
+                     {:description "Messages sitting in the publish buffer awaiting flush."
+                      :labels [:channel]})
+   (prometheus/counter :metabase-mq/messages-received
+                       {:description "Individual messages delivered to handlers."
+                        :labels [:transport :channel]})
+   (prometheus/counter :metabase-mq/batches-retried
+                       {:description "Queue batches that will be re-attempted, by `reason`"
+                        :labels [:channel :reason]})
+   (prometheus/counter :metabase-mq/batches-dropped
+                       {:description "Queue batches permanently dropped by `reason`"
+                        :labels [:channel :reason]})
    ;; release dashboard metrics
    (prometheus/counter :metabase-sync/failures
                        {:description "Number of sync operation failures."
@@ -808,6 +906,10 @@
    (prometheus/counter :metabase-metaplow/errors
                        {:description "Metaplow event pipeline errors by stage."
                         :labels [:stage]})
+   ;; Not labelled by source address: the relays are anonymous and public, so the caller would pick the label value.
+   (prometheus/counter :metabase-analytics-relay/rejected
+                       {:description "Public telemetry relay requests rejected without forwarding, by relay and reason."
+                        :labels [:relay :reason]})
    (prometheus/gauge :metabase-memoize/cache-size
                      {:description "Number of entries currently held in a monitored in-memory memoization cache."
                       :labels [:cache]})])

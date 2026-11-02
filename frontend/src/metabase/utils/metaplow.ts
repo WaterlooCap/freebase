@@ -17,21 +17,29 @@ const getSanitizedUrl = (url: string) => {
 };
 
 interface MetaplowConfig {
+  hostUrl: string | null;
   getUserId: () => number | undefined;
 }
 
-export function initMetaplow(config: MetaplowConfig): void {
+export function getCollectorHostUrl(): string | null {
+  if (!Settings.get("metaplow-tracking-enabled")) {
+    return null;
+  }
   const metaplowUrl = Settings.get("metaplow-url");
-  if (!metaplowUrl) {
+  return metaplowUrl ? metaplowUrl.replace(/\/send$/, "") : null;
+}
+
+export function initMetaplow({ hostUrl, getUserId }: MetaplowConfig): void {
+  if (!hostUrl) {
     return;
   }
-  const hostUrl = metaplowUrl.replace(/\/send$/, "");
 
   init({
     website: METAPLOW_WEBSITE_ID,
     hostUrl,
     tag: "metabase-instance",
     beforeSend: (type, originalPayload) => {
+      // Unjustified type cast. FIXME
       let payload = originalPayload as Record<string, unknown>;
 
       // Replace default pageview behavior with our own custom pageview tracking
@@ -41,6 +49,7 @@ export function initMetaplow(config: MetaplowConfig): void {
       }
       if (payload.name === "pageview" && isObject(payload.data)) {
         payload = { ...payload, url: payload.data.url };
+        // Unjustified type cast. FIXME
         delete (payload.data as Record<string, unknown>).url;
       }
 
@@ -55,8 +64,9 @@ export function initMetaplow(config: MetaplowConfig): void {
         title: "",
         hostname: anonymizedHostname,
         data: {
+          // Unjustified type cast. FIXME
           ...(payload.data as Record<string, unknown> | undefined),
-          user_id: config.getUserId(),
+          user_id: getUserId(),
         },
       };
     },

@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { t } from "ttag";
 
-import { useStorageSetup } from "metabase/common/components/upsells/StoragePurchaseModal";
-import { useSetting } from "metabase/common/hooks";
+import {
+  PLUGIN_STORAGE_SETUP,
+  useStorageSetup,
+} from "metabase/common/components/upsells/StoragePurchaseModal";
 import CS from "metabase/css/core/index.css";
 import { PLUGIN_UPLOAD_MANAGEMENT } from "metabase/plugins";
+import { useSetting } from "metabase/settings";
 import { Box, Icon, Modal, Tabs } from "metabase/ui";
 import type { IconName } from "metabase-types/api";
 
@@ -14,7 +17,7 @@ import { DatabasesPanel } from "./Panels/DatabasesPanel";
 import { PanelsHeader } from "./Panels/PanelsHeader";
 import { trackAddDataEvent } from "./analytics";
 import { useAddDataState } from "./use-add-data-state";
-import { type AddDataTab, isValidTab } from "./utils";
+import type { AddDataTab } from "./utils";
 
 interface AddDataModalProps {
   opened: boolean;
@@ -42,9 +45,9 @@ export const AddDataModal = (props: AddDataModalProps) => (
   // Outside `Modal.Root` so setup state and its polling survive the modal
   // closing, and so the purchase modal it hosts replaces this one rather than
   // stacking. `enabled` defers the add-ons fetch until the modal is shown.
-  <PLUGIN_UPLOAD_MANAGEMENT.StorageSetupProvider enabled={props.opened}>
+  <PLUGIN_STORAGE_SETUP.StorageSetupProvider enabled={props.opened}>
     <AddDataModalContent {...props} />
-  </PLUGIN_UPLOAD_MANAGEMENT.StorageSetupProvider>
+  </PLUGIN_STORAGE_SETUP.StorageSetupProvider>
 );
 
 const AddDataModalContent = ({
@@ -88,8 +91,8 @@ const AddDataModalContent = ({
     return result;
   }, [isHosted]);
 
-  const handleTabChange = (tabValue: string | null) => {
-    if (tabValue === activeTab || !isValidTab(tabValue)) {
+  const handleTabChange = (tabValue: AddDataTab | null) => {
+    if (tabValue === null || tabValue === activeTab) {
       return;
     }
 
@@ -128,7 +131,7 @@ const AddDataModalContent = ({
             <Box component="header" className={S.header}>
               <Modal.Title fz="lg">{t`Add data`}</Modal.Title>
             </Box>
-            <Tabs.List px="md" pb="lg">
+            <Tabs.List px="lg" pb="xl">
               {tabs.map((tab) => (
                 <Tabs.Tab
                   key={tab.value}

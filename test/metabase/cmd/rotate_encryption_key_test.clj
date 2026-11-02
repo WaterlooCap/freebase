@@ -47,8 +47,8 @@
                                 "select value from setting where setting.key=?;") keyy]))))
 
 (deftest cmd-rotate-encryption-key-errors-when-failed-test
-  (with-redefs [rotate-encryption-key! #(throw (Exception. "err"))
-                cmd/system-exit! identity]
+  (mt/with-dynamic-fn-redefs [rotate-encryption-key! #(throw (Exception. "err"))
+                              cmd/system-exit!       identity]
     (is (= 1 (cmd/rotate-encryption-key
               "89ulvIGoiYw6mNELuOoEZphQafnF/zYe+3vT+v70D1A=")))))
 
@@ -69,9 +69,9 @@
           ;; `database.details` use mi/transform-encrypted-json as transformation
           ;; the original definition of mi/transform-encrypted-json has a cached version of out transform
           ;; in this test we change they key multiple times and we don't want the value to be cached when key change
-          (with-redefs [mi/transform-encrypted-json (fn [source]
-                                                      {:in  mi/encrypted-json-in
-                                                       :out (mi/decrypt-error-context source mi/encrypted-json-out)})]
+          (mt/with-dynamic-fn-redefs [mi/transform-encrypted-json (fn [source]
+                                                                    {:in  mi/encrypted-json-in
+                                                                     :out (mi/decrypt-error-context source mi/encrypted-json-out)})]
             (binding [;; EXPLANATION FOR WHY THIS TEST WAS FLAKY
                       ;; at this point, all the state switching craziness that happens for
                       ;; `metabase.util.i18n.impl/site-locale-from-setting` has already taken place, so this function has
@@ -201,6 +201,8 @@
                                                :date_joined   :%now
                                                :is_superuser  false
                                                :is_active     true
+                                               ;; NOT NULL, and the model hook that fills it is bypassed
+                                               :entity_id     (u/generate-nano-id)
                                                :settings      raw-settings})))
 
 (defn- insert-channel-with-raw-details!

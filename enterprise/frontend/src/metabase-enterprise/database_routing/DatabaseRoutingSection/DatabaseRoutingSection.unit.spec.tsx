@@ -3,8 +3,8 @@ import {
   setupListTransformsEndpoint,
   setupUserAttributesEndpoint,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
-import { createMockSettingsState } from "metabase/redux/store/mocks";
 import type { Database } from "metabase-types/api";
 import {
   createMockDatabase,
@@ -129,7 +129,7 @@ describe("DatabaseRoutingSection", () => {
     expect(
       await screen.findByTestId("db-routing-user-attribute"),
     ).toBeDisabled();
-    expect(screen.queryByText("Add")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Add/ })).not.toBeInTheDocument();
   });
 
   it("should let an admin change routing settings", async () => {
@@ -145,7 +145,7 @@ describe("DatabaseRoutingSection", () => {
     expect(
       await screen.findByTestId("db-routing-user-attribute"),
     ).toBeEnabled();
-    expect(screen.getByText("Add")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Add/ })).toBeInTheDocument();
   });
 
   it("should show a warning when writable connection is enabled", () => {

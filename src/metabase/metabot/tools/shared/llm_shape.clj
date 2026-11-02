@@ -12,9 +12,13 @@
    Matches Python AI Service patterns exactly for consistency."
   (:require
    [clojure.string :as str]
+   [metabase.agent-lib.representations.resolve :as repr.resolve]
+   [metabase.lib-be.core :as lib-be]
    [metabase.lib.schema :as lib.schema]
    [metabase.metabot.agent.prompts :as prompts]
    [metabase.metabot.tmpl :as te]
+   [metabase.metabot.tools.shared.content-store :as shared.content-store]
+   [metabase.metabot.util :as metabot.u]
    [metabase.util :as u]
    [metabase.util.json :as json]
    [metabase.util.log :as log]
@@ -73,6 +77,65 @@
          (seq data))
     (str "```json\n" (json/encode data {:pretty true}) "\n```")))
 
+(defn- query-edn-fallback
+  "Pretty-printed EDN of `query`, minus the `:lib/metadata` provider `normalize-query` attaches."
+  [query]
+  (u/pprint-to-str (cond-> query (map? query) (dissoc :lib/metadata))))
+
+(defn export-query-for-llm
+  "Render a `query` (legacy or MBQL 5 map, or a pre-resolved string) for the LLM. A query
+  map with a `:database` is normalized and exported to the portable representations form
+  the `construct_notebook_query` tool consumes (a JSON code block); pre-resolved string
+  sources pass through; a `pprint`'d map is the last-resort fallback. A permission-refused
+  export renders nothing at all rather than the fallback.
+
+  `store` gates the Card / Measure / Segment lookups and every caller names one:
+  [[shared.content-store/default-store]] for queries loaded from the app DB,
+  [[shared.content-store/audited-store]] for client-supplied queries so a denied lookup
+  keeps its audit trail. No defaulting arity, so the choice stays visible at the call site.
+
+  Passing `mp` says `query` is already normalized and names the provider to export it through -
+  what [[shared.content-store/query-for-export]] hands back, so the export doesn't
+  repeat the normalization its permission check just did."
+  ([query store]
+   (export-query-for-llm query nil store))
+  ([query mp store]
+   (cond
+     (string? query) query
+     (string? (:query-content query)) (:query-content query)
+     (and (map? query) (:database query))
+     ;; The refusal marker, not the status code, is what distinguishes "you may not read this"
+     ;; from "the export failed". A by-id denial collapses into the same not-found a missing id
+     ;; produces — deliberately, so the agent cannot probe for hidden content — so the 403 this
+     ;; used to catch does not arrive on that path. Without the marker a refused card would fall
+     ;; through to the EDN fallback and print the raw query.
+     (binding [shared.content-store/*last-lookup-refused?* (atom false)]
+       (try
+         (let [normalized (if mp query (lib-be/normalize-query query))
+               mp         (or mp (lib-be/application-database-metadata-provider (:database normalized)))
+               exported   (repr.resolve/export-query mp normalized store)]
+           (or (repr-data->llm-block exported)
+               (query-edn-fallback normalized)))
+         (catch Exception e
+           (when-not (or (= 403 (:status-code (ex-data e)))
+                         @shared.content-store/*last-lookup-refused?*)
+             (log/debugf "Failed to export query for LLM, using EDN fallback: %s" (ex-message e))
+             (query-edn-fallback query)))))
+     (string? (get-in query [:native :query])) (get-in query [:native :query])
+     (map? query) (query-edn-fallback query)
+     :else (some-> query str))))
+
+(defn transform-query->text
+  "Render a transform source query for model context: native SQL verbatim, anything else
+  through [[export-query-for-llm]]. Portable JSON gets boundary newlines so its Markdown
+  fence remains valid when the result is interpolated inside an XML `<query>` element."
+  [query]
+  (or (when (map? query) (metabot.u/extract-sql-content query))
+      (when-let [text (export-query-for-llm query shared.content-store/default-store)]
+        (if (str/starts-with? text "```json\n")
+          (format "\n%s\n" text)
+          text))))
+
 (defn escape-xml
   "Escape XML special characters in a string.
    Only needed for content that bypasses Selmer's auto-escaping (marked with |safe) or is interpolated
@@ -85,8 +148,8 @@
         (str/replace ">" "&gt;")
         (str/replace "\"" "&quot;"))))
 
-(defn- escape-xml-content
-  "Like `escape-xml` but leaves double-quotes intact. Safe for element/table-cell *content*
+(defn escape-xml-content
+  "Like [[escape-xml]] but leaves double-quotes intact. Safe for element/table-cell *content*
   (only `& < >` are structural there), so a value such as a JSON portable-FK array renders
   readably instead of with `&quot;` noise."
   [s]
@@ -111,14 +174,16 @@
     (str/replace s "|" "\\u007c")))
 
 (defn- truncate
-  "Cap `s` at `max-len` characters, appending an ellipsis when truncated.
+  "Cap `s` at `max-len` characters without splitting a surrogate pair, appending an ellipsis when truncated.
   Useful to ensure long free text values (e.g. table descriptions) don't bloat the LLM context.
   Returns nil for nil input."
   [s max-len]
   (when s
     (let [s (str s)]
       (if (> (count s) max-len)
-        (str (subs s 0 max-len) "...")
+        (str (subs s 0 (cond-> max-len
+                         (Character/isHighSurrogate (.charAt s (int (dec max-len)))) dec))
+             "...")
         s))))
 
 (defn- database-type-or-unknown
@@ -369,6 +434,40 @@
                   (= k :reference) (json-cell-safe (escape-xml-content v))
                   :else            (escape-pipes (escape-xml (str v)))))}))
 
+(defn- format-join-required-dimensions-table
+  "Like [[format-metric-dimensions-table]] but the Reference is the FULL alias-qualified field clause
+  (`[\"field\" {\"join-alias\" …} [db schema table field]]`) carried on each dim's `:reference`. For
+  a join-required dim the bare portable FK does NOT resolve (no FK path); only the alias-qualified
+  clause does, so that is the form the LLM must paste."
+  [dims]
+  (te/markdown-table
+   (map (fn [d] (assoc d :reference (some-> (:reference d) json/encode))) dims)
+   {:name "Field Name" :field_id "Field ID" :type "Type"
+    :reference "Reference (copy verbatim into a field clause)"}
+   {:value-fn (fn [k v]
+                (cond
+                  (nil? v)         ""
+                  (keyword? v)     (escape-pipes (clojure.core/name v))
+                  (= k :reference) (json-cell-safe (escape-xml-content v))
+                  :else            (escape-pipes (escape-xml (str v)))))}))
+
+(defn- format-metric-join-required-dimensions
+  "Render the metric's FK-less join dimensions — the columns the metric reaches through an explicit
+  join that its `queryable-dimensions` cannot advertise (no foreign key). For each such join we tell
+  the LLM to paste the exact join clause into `joins:` and reference each field by its alias-qualified
+  Reference. Without this the LLM guesses at the column and dead-ends on a `no foreign key` error
+  (BOT-1612)."
+  [join-required-dimensions]
+  (str/join
+   "\n"
+   (for [{:keys [target_table join dimensions]} join-required-dimensions]
+     (str "To group or filter this metric by **" target_table
+          "** columns, add this join to your query's `joins:` (the metric reaches these columns "
+          "through a join with **no foreign key**, so the join must be present), then reference a "
+          "field using its alias-qualified Reference from the table below:\n\n"
+          "```json\n" (json/encode join {:pretty true}) "\n```\n\n"
+          (format-join-required-dimensions-table dimensions)))))
+
 (defn metric->xml
   "Format metric for LLM consumption.
    Matches Python Metric.get_llm_representation exactly, except we additionally surface
@@ -376,7 +475,7 @@
    attributes — the three pieces of information the LLM needs to correctly use the metric
    in `construct_notebook_query` (as `aggregation: [[metric, {}, <eid>]]` on top of the
    metric's base table)."
-  [{:keys [id name description verified queryable-dimensions collection
+  [{:keys [id name description verified queryable-dimensions join-required-dimensions collection
            default_time_dimension_field database_name base_table_portable_fk
            portable_entity_id]}]
   (render-llm-template
@@ -394,7 +493,9 @@
     :metric_collection_xml         (when collection (collection->xml collection))
     :metric_default_time_dimension (:name default_time_dimension_field)
     :metric_dimensions_table       (when (seq queryable-dimensions)
-                                     (format-metric-dimensions-table queryable-dimensions))}))
+                                     (format-metric-dimensions-table queryable-dimensions))
+    :metric_join_required_xml      (when (seq join-required-dimensions)
+                                     (format-metric-join-required-dimensions join-required-dimensions))}))
 
 (defn table->xml
   "Format table for LLM consumption.
@@ -605,11 +706,38 @@
     ;; Default to viz card
     (viz-card->xml card)))
 
+(def ^:private max-dashboard-filters
+  "Cap on the filters listed for a dashboard."
+  50)
+
+(def ^:private max-dashboard-filter-name-length
+  "Cap on a dashboard filter's name."
+  100)
+
+(defn- dashboard-filters->xml
+  "The `<filters>` block for a dashboard's `parameters`, or nil when it has none. Lists at most
+  [[max-dashboard-filters]] of them and says how many were left out."
+  [parameters]
+  (when (seq parameters)
+    (let [total (count parameters)]
+      (str "  <filters>\n"
+           (str/join (for [param (take max-dashboard-filters parameters)]
+                       (str "    <filter id=\"" (escape-xml (:id param))
+                            "\" name=\"" (escape-xml (truncate (:name param) max-dashboard-filter-name-length))
+                            "\" type=\"" (escape-xml (u/qualified-name (:type param))) "\"/>\n")))
+           (when (> total max-dashboard-filters)
+             (str "    <truncation-note>Showing " max-dashboard-filters " of " total " filters; the other "
+                  (- total max-dashboard-filters) " are not listed.</truncation-note>\n"))
+           "  </filters>\n"))))
+
 (defn dashboard->xml
   "Format dashboard for LLM consumption.
-   Matches Python Dashboard.llm_representation exactly."
-  [{:keys [id name description verified collection dashcards]}]
+   Matches Python Dashboard.llm_representation exactly, except we additionally surface the
+   dashboard's filters."
+  [{:keys [id name description verified collection parameters dashcards]}]
   ;; Group cards by tab and sort
+  ;; TODO (Chris 2026-07-09) -- tabs sort by raw id here but by position in
+  ;; resources/fetch-dashboard-items; align on position
   (let [tabs (group-by :dashboard_tab_id dashcards)
         sorted-tabs (sort-by first tabs)
         tabs-xml (when (seq dashcards)
@@ -633,6 +761,7 @@
       :dashboard_name name
       :dashboard_description description
       :dashboard_collection_xml (when collection (collection->xml collection))
+      :dashboard_filters_xml (dashboard-filters->xml parameters)
       :dashboard_tabs_xml tabs-xml})))
 
 (defn database-schema->xml
@@ -719,7 +848,7 @@
    gives the LLM the full portable FK `[database_name, schema, table]` it must put in
    `source-table:` when using `[metric, {}, <portable_entity_id>]` as an aggregation —
    without a separate `read_resource` round-trip."
-  [{:keys [id type name description verified official curated data_authority data_layer collection
+  [{:keys [id type name description verified official curated can_write data_authority data_layer collection
            database_id database_name database_engine database_schema portable_entity_id
            base_table_portable_fk]}]
   (let [fqn (cond
@@ -749,6 +878,8 @@
       :search_official official
       :search_has_curated (some? curated)
       :search_curated curated
+      :search_has_can_write (some? can_write)
+      :search_can_write can_write
       :search_data_layer (some-> data_layer clojure.core/name)
       :search_data_authority (when (and data_authority (not= "unconfigured" (clojure.core/name data_authority)))
                                (clojure.core/name data_authority))
@@ -773,15 +904,19 @@
 
 (defn field-values-metadata->xml
   "Format field values metadata for LLM consumption.
-   Matches Python FieldValuesMetadata.llm_representation exactly.
+   Matches Python FieldValuesMetadata.llm_representation exactly, plus a note on how many values the
+   field has when only some of them are listed.
    Note: Tables are used with |safe in the template, so values must be escaped."
-  [{:keys [field_values statistics]}]
+  [{:keys [field_values field_values_total has_more_values statistics]}]
   (let [escape-value        (fn [_k v] (escape-pipes (escape-xml (str v))))
         sample-values-table (when (seq field_values)
                               (te/markdown-table
                                (map vector field_values)
                                {:value "Value"}
                                {:value-fn escape-value}))
+        shown               (count field_values)
+        partial?            (and field_values_total
+                                 (or has_more_values (< shown field_values_total)))
 
         stats-map   (into {} (filter (fn [[_ v]] (some? v)) statistics))
         stats-table (when (seq stats-map)
@@ -792,6 +927,9 @@
     (render-llm-template
      :field_values_metadata
      {:sample_values_table sample-values-table
+      :sample_values_shown shown
+      :sample_values_total (when partial? field_values_total)
+      :sample_values_more  has_more_values
       :stats_table         stats-table})))
 
 (defn field-metadata->xml
@@ -845,8 +983,7 @@
     :transform_description     description
     :transform_source_type     (some-> (:type source) clojure.core/name)
     :transform_source_database (when-let [db (:source-database source)] (str db))
-    :transform_source_query    (let [q (:query source)]
-                                 (when (string? q) q))
+    :transform_source_query    (transform-query->text (:query source))
     :transform_target          (when target (pr-str target))}))
 
 (def formatters
@@ -877,7 +1014,7 @@
 
 (def ^:private item-attr-keys
   "Attributes rendered as XML attrs on each <item> element. Order matters for stable output."
-  [:type :id :name :uri :database_id :collection_id :table_id
+  [:type :id :dashcard_id :tab_id :name :uri :database_id :collection_id :table_id :can_write
    :schema :display_name :authority_level :is_personal :path :location
    :engine :timestamp])
 
@@ -885,8 +1022,9 @@
   [item]
   (->> item-attr-keys
        (keep (fn [k]
-               (when-let [v (get item k)]
-                 (str (clojure.core/name k) "=\"" (escape-xml v) "\""))))
+               (let [v (get item k)]
+                 (when (if (= k :can_write) (contains? item k) v)
+                   (str (clojure.core/name k) "=\"" (escape-xml (str v)) "\"")))))
        (str/join " ")))
 
 (defn- list-item->xml
@@ -901,30 +1039,42 @@
   "Render a list-shaped read-resource response.
 
    Input shape:
-     {:list-type :databases     ; keyword, becomes the type attribute
-      :items     [{:type \"database\" :id 1 :name \"Sample\" :uri \"...\" :description \"...\"} ...]
-      :total     5
-      :page      1
-      :pages     1}
+     {:list-type      :databases     ; keyword, becomes the type attribute
+      :items          [{:type \"database\" :id 1 :name \"Sample\" :uri \"...\" :description \"...\"} ...]
+      :total          5
+      :page           1
+      :pages          1
+      :next-page-uri  \"metabase://databases?page=2\"}   ; present when truncated
+
+   An optional `:tabs` vector of `{:id .. :name ..}` (dashboard items) renders as a `<tabs>`
+   block ahead of the items; items reference tabs via their `tab_id` attribute.
 
    Output shape:
      <list type=\"databases\" total=\"5\" page=\"1\" pages=\"1\" showing=\"5\" truncated=\"false\">
        <item type=\"database\" id=\"1\" name=\"Sample\" uri=\"metabase://database/1\">Description</item>
        ...
      </list>"
-  [{:keys [list-type items total page pages]}]
+  [{:keys [list-type items total page pages tabs next-page-uri]}]
   (let [type-attr (clojure.core/name (or list-type :items))
+        tabs-xml  (when (seq tabs)
+                    (str "<tabs>\n"
+                         (str/join "\n" (map (fn [{:keys [id name]}]
+                                               (str "  <tab tab_id=\"" id "\" name=\"" (escape-xml name) "\"/>"))
+                                             tabs))
+                         "\n</tabs>"))
         item-xml  (str/join "\n" (map list-item->xml items))
         showing   (count items)
         truncated (< page pages)
         note      (when truncated
                     (str "<truncation-note>Page " page " of " pages " (" showing " of " total " items). "
-                         "Append ?page=" (inc page) " to the URI to fetch the next page.</truncation-note>"))]
+                         "Fetch " next-page-uri " for the next page — copy it exactly, do not "
+                         "modify its query string.</truncation-note>"))]
     (str "<list type=\"" type-attr "\" total=\"" total
          "\" page=\"" (or page 1)
          "\" pages=\"" (or pages 1)
          "\" showing=\"" showing
          "\" truncated=\"" (boolean truncated) "\">\n"
+         (when tabs-xml (str tabs-xml "\n"))
          (when (seq items) (str item-xml "\n"))
          (when note (str note "\n"))
          "</list>")))

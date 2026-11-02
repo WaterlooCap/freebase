@@ -27,6 +27,8 @@
        ([flatland.ordered.map :as ordered-map]))
    [malli.core :as mc]
    [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
@@ -92,7 +94,7 @@
    ;; handles this in parse-param-value-for-type (mbql.clj).
    ;;
    ;; These remain valid for backward compatibility (dashboard/card parameters already in the app DB).
-   ;; See for history.
+   ;; See QUE2-326 for history.
    :id       {:allowed-for #{:id}}
    :category {:allowed-for #{:category :number :text :date :boolean}}
    ;; Like `:id` and `:category`, the `:location/*` types are primarily widget types. They don't really have a meaning
@@ -238,7 +240,7 @@
 (mr/def ::dimension.options
   [:map
    {:error/message    "dimension options"
-    :decode/normalize lib.schema.common/normalize-map}
+    :decode/normalize lib.schema.common/normalize-map :closed true}
    [:stage-number {:optional true} :int]])
 
 ;;; TODO (Cam 8/8/25) -- seems really WACK to have dimension use MBQL 4 clause order even in Lib... I guess it's not a
@@ -269,7 +271,7 @@
 
 (mr/def ::template-tag.tag-name
   [:multi {:dispatch map?}
-   [true  [:map
+   [true  [:map {:closed true}
            [:id ::lib.schema.common/non-blank-string]]]
    [false [:schema
            {:decode/normalize (fn [x]
@@ -354,16 +356,12 @@
     param-value))
 
 (mr/def ::parameter.value.scalar
-  "A single parameter value. Numbers arrive both as numbers and as strings (bigintegers are passed as strings to
-  avoid precision loss), dates/booleans arrive as strings, and `nil` clears a value. A value must NEVER be a map:
-  a map value is indistinguishable downstream from Metabase's internal HoneySQL DSL and is spliced into SQL as query
-  structure rather than a bound value."
+  "A single scalar parameter value."
   [:fn
    {:error/message "Valid parameter value (cannot be a collection)"}
    (complement coll?)])
 
 (defn- normalize-parameter-value
-  "Normalize invalid parameter values to `nil`."
   [x]
   (letfn [(normalize-scalar-parameter-value [x]
             (when-not (coll? x)
@@ -375,8 +373,6 @@
 (mr/def ::parameter.value
   [:schema
    {:encode/for-hashing #'sort-parameter-values}
-   ;; A parameter value is a scalar or a (possibly nested for one level of multi-select) sequence of scalars.
-   ;; Crucially it is never a map -- see `::parameter.value.scalar`.
    [:or
     {:decode/normalize normalize-parameter-value}
     [:ref ::parameter.value.scalar]
@@ -385,9 +381,32 @@
 (mr/def ::parameter.options
   "Options the frontend attaches to a parameter value."
   [:map
-   {:decode/normalize lib.schema.common/normalize-map}
+   {:closed true, :decode/normalize lib.schema.common/normalize-map}
    [:case-sensitive  {:optional true} :boolean]
    [:include-current {:optional true} :boolean]])
+
+(mr/def ::values-query-type
+  "How a filter widget asks for its values."
+  [:enum {:decode/normalize lib.schema.common/normalize-keyword} :none :list :search])
+
+(mr/def ::values-source-type
+  "Where a filter widget's values come from, when not from the field it is connected to."
+  [:enum {:decode/normalize lib.schema.common/normalize-keyword} :static-list :card])
+
+(mr/def ::values-source-config.value
+  "One value of a static-list source: a bare value, a one-tuple of it, or a `[value label]` pair."
+  [:or
+   [:ref ::parameter.value.scalar]
+   [:tuple [:ref ::parameter.value.scalar]]
+   [:tuple [:ref ::parameter.value.scalar] :string]])
+
+(mr/def ::values-source-config
+  "The configuration of a filter widget's value source. Its keys are the frontend's snake_case names."
+  [:map {:closed true}
+   [:values      {:optional true} [:maybe [:sequential [:ref ::values-source-config.value]]]]
+   [:card_id     {:optional true} [:maybe ::lib.schema.id/card]]
+   [:value_field {:optional true} [:maybe [:or [:ref ::target.legacy-field-ref] [:ref ::target.legacy-expression-ref]]]]
+   [:label_field {:optional true} [:maybe [:or [:ref ::target.legacy-field-ref] [:ref ::target.legacy-expression-ref]]]]])
 
 (mr/def ::parameter
   "Schema for the *value* of a parameter (e.g. a Dashboard parameter or a native query template tag) as passed in as
@@ -400,7 +419,8 @@
    [:map
     {:decode/normalize #'normalize-parameter
      :decode/api       #'lib.schema.common/remove-internal-keys
-     :encode/serialize #'lib.schema.common/remove-internal-keys}
+     :encode/serialize #'lib.schema.common/remove-internal-keys
+     :closed           true}
     [:type [:ref ::type]]
     ;; TODO -- these definitely SHOULD NOT be optional but a ton of tests aren't passing them in like they should be.
     ;; At some point we need to go fix those tests and then make these keys required
@@ -409,7 +429,6 @@
     ;; not specified if the param has no value. TODO - make this stricter; type of `:value` should be validated based
     ;; on the `::type`
     [:value    {:optional true} [:ref ::parameter.value]]
-    [:options  {:optional true} [:maybe [:ref ::parameter.options]]]
     ;; the name of the parameter we're trying to set -- this is actually required now I think, or at least needs to get
     ;; merged in appropriately
     [:name     {:optional true} ::lib.schema.common/non-blank-string]
@@ -417,7 +436,21 @@
     ;; code that constructs the query params is doing. We can go ahead and ignore these when present.
     [:slug     {:optional true} ::lib.schema.common/non-blank-string]
     [:default  {:optional true} [:ref ::parameter.value]]
-    [:required {:optional true} [:maybe :boolean]]]
+    [:required {:optional true} [:maybe :boolean]]
+    [:options  {:optional true} [:maybe [:ref ::parameter.options]]]
+    [:temporal-units {:optional true} [:maybe [:sequential [:ref ::lib.schema.temporal-bucketing/unit]]]]
+    ;; The rest of a stored filter declaration. Dashboards, subscriptions and actions hand whole declarations to the
+    ;; query processor as its `:parameters`; the keys are the frontend's camelCase and snake_case names as
+    ;; [[normalize-parameter]] leaves them.
+    [:display-name         {:optional true} [:maybe :string]]
+    [:sectionid            {:optional true} [:maybe :string]]
+    [:filteringparameters  {:optional true} [:maybe [:sequential [:ref ::id]]]]
+    [:ismultiselect        {:optional true} [:maybe :boolean]]
+    [:hasvariabletemplatetagtarget {:optional true} [:maybe :boolean]]
+    [:position             {:optional true} [:maybe :int]]
+    [:values-query-type    {:optional true} [:maybe [:ref ::values-query-type]]]
+    [:values-source-type   {:optional true} [:maybe [:ref ::values-source-type]]]
+    [:values-source-config {:optional true} [:maybe [:ref ::values-source-config]]]]
    ::lib.schema.common/kebab-cased-map
    (lib.schema.common/disallowed-keys
     {:dimension ":dimension is not allowed in a parameter, you probably meant to use :target [:dimension ...] instead."})])

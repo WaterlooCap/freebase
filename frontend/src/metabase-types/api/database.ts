@@ -10,7 +10,6 @@ export type InitialSyncStatus = LongTaskStatus;
 export type DatabaseSettings = {
   [key: string]: any;
   "database-enable-actions"?: boolean;
-  "database-enable-workspaces"?: boolean;
 };
 
 export type DatabaseFeature =
@@ -58,8 +57,7 @@ export type DatabaseFeature =
   | "split-part"
   | "collate"
   | "transforms/python"
-  | "transforms/table"
-  | "workspace";
+  | "transforms/table";
 
 export interface Database extends DatabaseData {
   id: DatabaseId;
@@ -96,6 +94,8 @@ export interface DatabaseData {
   id?: DatabaseId;
   name: string;
   engine: string | undefined;
+  /** Hosting provider detected from the connection details, e.g. "AWS RDS" */
+  provider_name?: string | null;
   // If current user lacks write permission to database, `details` will be
   // missing in responses from the backend, cf. implementation of
   // [[metabase.models.interface/to-json]] for `:model/Database`:
@@ -156,7 +156,7 @@ export type GetDatabaseHealthResponse =
   | { status: "ok" }
   | { status: "error"; message: string; errors: unknown };
 
-export interface ListDatabasesRequest {
+export type ListDatabasesRequest = {
   include?: "tables" | "schemas";
   saved?: boolean;
   include_editable_data_model?: boolean;
@@ -165,8 +165,7 @@ export interface ListDatabasesRequest {
   include_analytics?: boolean;
   router_database_id?: DatabaseId;
   "can-query"?: boolean;
-  "can-write-metadata"?: boolean;
-}
+};
 
 export interface ListDatabasesResponse {
   data: Database[];
@@ -183,7 +182,6 @@ export interface ListDatabaseSchemasRequest {
   include_hidden?: boolean;
   include_editable_data_model?: boolean;
   "can-query"?: boolean;
-  "can-write-metadata"?: boolean;
 }
 
 export interface ListDatabaseSchemaTablesRequest {
@@ -192,7 +190,6 @@ export interface ListDatabaseSchemaTablesRequest {
   include_hidden?: boolean;
   include_editable_data_model?: boolean;
   "can-query"?: boolean;
-  "can-write-metadata"?: boolean;
   include_measures?: boolean;
 }
 
@@ -204,6 +201,7 @@ export interface ListVirtualDatabaseTablesRequest {
 export interface GetDatabaseMetadataRequest {
   id: DatabaseId;
   include_hidden?: boolean;
+  include_sensitive_fields?: boolean;
   include_editable_data_model?: boolean;
   remove_inactive?: boolean;
   skip_fields: true; // make sure we don't get every field of every table

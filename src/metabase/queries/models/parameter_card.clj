@@ -1,9 +1,9 @@
 (ns metabase.queries.models.parameter-card
   (:require
-   [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.models.interface :as mi]
    [metabase.parameters.schema :as parameters.schema]
+   [metabase.queries.db :as queries.db]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]
@@ -26,7 +26,6 @@
   #{"dashboard" "card"})
 
 (mr/def ::parameterized-object-type
-  "The kind of object a ParameterCard's parameters belong to -- a ParameterCard's `parameterized_object_type` column."
   (into [:enum] (sort valid-parameterized-object-type)))
 
 (defn- validate-parameterized-object-type
@@ -53,11 +52,11 @@
    (delete-all-for-parameterized-object! parameterized-object-type parameterized-object-id []))
 
   ([parameterized-object-type parameterized-object-id parameter-ids-still-in-use]
-   (let [conditions (concat [:parameterized_object_type parameterized-object-type
-                             :parameterized_object_id parameterized-object-id]
-                            (when (seq parameter-ids-still-in-use)
-                              [:parameter_id [:not-in parameter-ids-still-in-use]]))]
-     (apply t2/delete! :model/ParameterCard conditions))))
+   (if (seq parameter-ids-still-in-use)
+     (queries.db/delete-parameter-cards-for-object-except! parameterized-object-type
+                                                           parameterized-object-id
+                                                           parameter-ids-still-in-use)
+     (queries.db/delete-parameter-cards-for-object! parameterized-object-type parameterized-object-id))))
 
 (defn- upsert-from-parameters!
   [parameterized-object-type parameterized-object-id parameters]
@@ -68,15 +67,12 @@
                       :parameter_id              id}]
       ;; TODO: Maybe update! should return different values for no rows to update vs
       ;; no changes to be made
-      (if (m/mapply t2/exists? :model/ParameterCard conditions)
-        (t2/update! :model/ParameterCard conditions {:card_id card-id})
-        (t2/insert! :model/ParameterCard (merge conditions {:card_id card-id}))))))
+      (if (queries.db/parameter-card-exists? parameterized-object-type parameterized-object-id id)
+        (queries.db/set-parameter-card-card-id! parameterized-object-type parameterized-object-id id card-id)
+        (queries.db/insert-parameter-card! (merge conditions {:card_id card-id}))))))
 
 (defn values-source-card-ids
-  "The ids of the Cards `parameters` draw their values from.
-
-  A parameter with a `:values_source_type` of `:card` serves values from a column of another Card, so saving one
-  creates a reference to that Card from whatever object the parameters belong to."
+  "Returns the ids of the Cards `parameters` draw their values from."
   [parameters]
   (into #{}
         (keep (fn [{:keys [values_source_type values_source_config]}]
@@ -85,30 +81,19 @@
         parameters))
 
 (mu/defn check-parameter-source-card-permissions
-  "Read-check the Cards `parameters` draw their values from.
-
-  The endpoints serving a parameter's values for a public or embedded object run as-if superuser, having checked only
-  that the parameter belongs to that object, so whether the values may be read is decided here, when the parameters
-  are saved.
-
-  Takes parameters as they arrive at save time -- the transient-save path has not normalized them yet -- so this holds
-  them only to `[:sequential :map]` rather than the stricter `::parameters.schema/parameter`."
-  [parameters :- [:maybe [:sequential :map]]]
+  "Read-check the Cards `parameters` draw their values from."
+  [parameters :- [:maybe [:sequential ::parameters.schema/parameter]]]
   (doseq [card-id (values-source-card-ids parameters)]
     (api/read-check :model/Card card-id)))
 
 (mu/defn check-new-parameter-source-card-permissions
-  "Read-check only the source Cards `parameters` reference that are not already stored for this object -- a reference
-  already in place is left alone, matching the API-layer `check-new-references`. Skipped while deserializing, when
-  there is no requesting user."
+  "Read-check the source Cards newly referenced by `parameters` that are not already stored for this object."
   [parameterized-object-type :- ::parameterized-object-type
    parameterized-object-id   :- pos-int?
    parameters                :- [:maybe [:sequential ::parameters.schema/parameter]]]
   (when-not mi/*deserializing?*
     (when-let [wanted (not-empty (values-source-card-ids parameters))]
-      (let [existing (t2/select-fn-set :card_id :model/ParameterCard
-                                       :parameterized_object_type parameterized-object-type
-                                       :parameterized_object_id   parameterized-object-id)]
+      (let [existing (queries.db/parameter-card-card-ids parameterized-object-type parameterized-object-id)]
         (doseq [card-id wanted
                 :when   (not (contains? existing card-id))]
           (api/read-check :model/Card card-id))))))
@@ -116,7 +101,7 @@
 (mu/defn upsert-or-delete-from-parameters!
   "From a parameters list on card or dashboard, create, update,
   or delete appropriate ParameterCards for each parameter in the dashboard"
-  [parameterized-object-type :- ::parameterized-object-type ; TODO (Cam 9/25/25) -- maybe take `:model/Dashboard` / `:model/Card` instead of a type string
+  [parameterized-object-type :- ::parameterized-object-type ; TODO (Cam 9/25/25) -- change this to take `:model/Dashboard` or `:model/Card` instead of ANY STRING
    parameterized-object-id   :- pos-int?
    parameters                :- [:maybe [:sequential ::parameters.schema/parameter]]]
   (let [upsertable?           (fn [{:keys [values_source_type values_source_config id]}]

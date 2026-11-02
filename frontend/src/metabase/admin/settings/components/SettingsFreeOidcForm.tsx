@@ -2,16 +2,8 @@ import { useCallback, useState } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
-import {
-  SettingsPageWrapper,
-  SettingsSection,
-} from "metabase/admin/components/SettingsSection";
 import { getExtraFormFieldProps } from "metabase/admin/settings/utils";
-import {
-  useGetAdminSettingsDetailsQuery,
-  useGetSettingsQuery,
-  useUpdateFreeOidcMutation,
-} from "metabase/api";
+import { useUpdateFreeOidcMutation } from "metabase/api";
 import { ConfirmModal } from "metabase/common/components/ConfirmModal";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
 import {
@@ -21,6 +13,14 @@ import {
   FormSubmitButton,
   FormTextInput,
 } from "metabase/forms";
+import {
+  useGetAdminSettingsDetailsQuery,
+  useGetSettingsQuery,
+} from "metabase/settings";
+import {
+  SettingsPageWrapper,
+  SettingsSection,
+} from "metabase/settings-components";
 import { Box, Button, Flex, Stack } from "metabase/ui";
 import type { Settings } from "metabase-types/api";
 
@@ -56,6 +56,7 @@ type OidcProbeError = {
 // the probe result into a single message ourselves and surface it via
 // `FormErrorMessage` (this is the UI's "test connection" behavior).
 const getSubmitErrorMessage = (error: unknown): string => {
+  // RTK Query types the rejected value as `unknown`; the shape is documented on OidcProbeError.
   const probeErrors = (error as OidcProbeError)?.data?.errors;
   const probeMessages = [
     probeErrors?.discovery?.error,
@@ -66,6 +67,7 @@ const getSubmitErrorMessage = (error: unknown): string => {
     return probeMessages.join(" ");
   }
 
+  // Same rejected value as above; `message` is the fallback when there is no probe detail.
   const genericMessage = (error as OidcProbeError)?.data?.message;
   if (typeof genericMessage === "string") {
     return genericMessage;

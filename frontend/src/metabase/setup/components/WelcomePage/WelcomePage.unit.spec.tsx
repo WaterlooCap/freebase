@@ -1,12 +1,9 @@
 // Register our wc-brand-name override for PLUGIN_SELECTORS.getApplicationName, as
-// metabase/plugins/builtin does in the real app.
+// metabase/app does in the real app.
 import "metabase/plugins/builtin/branding/application-name";
 
+import { createMockSettingsState, createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase/redux/store/mocks";
 
 import { WelcomePage } from "./WelcomePage";
 

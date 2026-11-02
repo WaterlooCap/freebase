@@ -24,6 +24,7 @@
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.tracing.core :as tracing]
    [metabase.util :as u]
+   [metabase.util.connection :as u.connection]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
@@ -46,7 +47,7 @@
 (def ConnectionOptions
   "Malli schema for the options passed to [[do-with-connection-with-options]]."
   [:maybe
-   [:map
+   [:map {:closed true}
     ;; a string like 'US/Pacific' or something like that.
     [:session-timezone {:optional true} [:maybe [:ref driver-api/schema.expression.temporal.timezone-id]]]
     ;; whether this Connection should NOT be read-only, e.g. for DDL stuff or inserting data or whatever.
@@ -259,7 +260,7 @@
 
 (def ^:private DbOrIdOrSpec
   [:and
-   [:or :int :map]
+   [:or :int driver-api/schema.metadata.database :metabase.lib.schema.common/database-details]
    [:fn
     ;; can't wrap a java.sql.Connection here because we're not
     ;; responsible for its lifecycle and that means you can't use
@@ -281,16 +282,17 @@
     ;; directly.
     (reify DataSource
       (getConnection [_this]
+        ;; inside do-with-connection-with-options' own default impl; a raw jdbc spec has no DataSource
         #_{:clj-kondo/ignore [:discouraged-var]}
         (jdbc/get-connection db-or-id-or-spec)))
     ;; otherwise this is either a Database or Database ID.
     (if-let [old-method-impl (get-method
+                              ;; honor drivers still implementing the old connection-with-timezone
                               #_{:clj-kondo/ignore [:deprecated-var]} sql-jdbc.execute.old/connection-with-timezone
                               driver)]
       ;; use the deprecated impl for `connection-with-timezone` if one exists.
       (do
         (log/warnf "%s is deprecated in Metabase 0.47.0. Implement %s instead."
-                   #_{:clj-kondo/ignore [:deprecated-var]}
                    'connection-with-timezone
                    'do-with-connection-with-options)
         ;; for compatibility, make sure we pass it an actual Database instance.
@@ -359,7 +361,7 @@
   deprecated [[sql-jdbc.execute.old/connection-with-timezone]] method."
   {:added "0.47.0"}
   [driver           :- :keyword
-   db-or-id-or-spec :- [:or ::lib.schema.id/database :map]
+   db-or-id-or-spec :- [:or ::lib.schema.id/database driver-api/schema.metadata.database :metabase.lib.schema.common/database-details]
    options          :- ConnectionOptions
    f                :- fn?]
   (binding [*connection-recursion-depth* (inc *connection-recursion-depth*)]
@@ -375,6 +377,11 @@
                            (.getConnection conn-data-source)
                            (catch Throwable e
                              (let [timed-out? (connection-checkout-timeout? e)]
+                               (when-not timed-out?
+                                 (try
+                                   (sql-jdbc.conn/invalidate-empty-pool! conn-data-source)
+                                   (catch Exception e2
+                                     (log/warnf e2 "Error closing the connection pool for database %s" (u/id db-or-id-or-spec)))))
                                (throw (ex-info (if timed-out?
                                                  (tru "Too many queries are running. Please try again in a moment.")
                                                  (tru "Unable to connect to the database: {0}" (ex-message e)))
@@ -396,8 +403,11 @@
   Connection."
   {:added "0.47.0"}
   [driver                                                 :- :keyword
-   db-or-id-or-spec
-   ^Connection conn                                       :- (driver-api/instance-of-class Connection)
+   db-or-id-or-spec                                       :- [:or
+                                                              ::lib.schema.id/database
+                                                              driver-api/schema.metadata.database
+                                                              :metabase.lib.schema.common/database-details]
+   ^Connection conn                                      :- (driver-api/instance-of-class Connection)
    {:keys [^String session-timezone write?], :as options} :- ConnectionOptions]
   (when-let [db (cond
                   ;; id?
@@ -605,11 +615,13 @@
   `unreturnedConnectionTimeout` to kill long queries. Transforms rebind `*query-timeout-ms*` so their statements get
   the transform timeout instead of the shorter default. Drivers that opt out via the `:jdbc/set-query-timeout`
   feature flag (e.g. SparkSQL — calling it closes the Hive Thrift transport) skip the call entirely; for the rest,
-  individual implementations that throw fall back to the c3p0 leak-detector via the `catch Throwable`."
+  individual implementations that throw fall back to the c3p0 leak-detector via the `catch Throwable`.
+  A MySQL 26 or newer warehouse also falls back, because there the driver would turn the timeout into MariaDB syntax
+  the server rejects, failing every query outright — the query is still bounded by the QP's own cancelation."
   [driver ^Statement stmt]
   (when (driver/database-supports? driver :jdbc/set-query-timeout nil)
     (try
-      (.setQueryTimeout stmt (long (/ driver.settings/*query-timeout-ms* 1000)))
+      (u.connection/set-query-timeout! stmt (long (/ driver.settings/*query-timeout-ms* 1000)))
       (catch Throwable e
         (log/debugf "Error setting statement query timeout: %s" (ex-message e))))))
 
@@ -838,7 +850,7 @@
   Canceling abandons a result set the server is still producing, and the pool cannot clear what that leaves behind:
   c3p0 resets `autoCommit`/`readOnly`/holdability on check-in, not driver-level wire state. A driver whose cancelation
   leaves nothing pending on the wire should keep the default of `false`."
-  {:added "0.63.0", :arglists '([driver])}
+  {:added "0.64.0", :arglists '([driver])}
   driver/dispatch-on-initialized-driver
   :hierarchy #'driver/hierarchy)
 
@@ -1019,6 +1031,7 @@
 ;;; |                                       Convenience Imports from Old Impl                                        |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
+;; re-exports the old-impl vars so drivers referencing them via this ns keep compiling
 #_{:clj-kondo/ignore [:deprecated-var]}
 (p/import-vars
  [sql-jdbc.execute.old

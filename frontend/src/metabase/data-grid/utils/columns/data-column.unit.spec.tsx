@@ -44,6 +44,7 @@ const setup = ({
     },
   };
 
+  // Unjustified type cast. FIXME
   const CellComponent = column.cell as React.ComponentType<{
     getValue: () => string;
     row: { index: number; original: { value: string } };

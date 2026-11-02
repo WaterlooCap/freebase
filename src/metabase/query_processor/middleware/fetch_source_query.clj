@@ -1,5 +1,5 @@
 (ns metabase.query-processor.middleware.fetch-source-query
-  (:refer-clojure :exclude [some get-in])
+  (:refer-clojure :exclude [some get-in empty?])
   (:require
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
@@ -20,31 +20,30 @@
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.performance :refer [some get-in]]
+   [metabase.util.performance :refer [some get-in empty?]]
    [weavejester.dependency :as dep]))
 
 ;;; TODO -- consider whether [[normalize-card-query]] should be moved into [[metabase.lib.card]], seems like it would
 ;;; make sense but it would involve teasing out some QP-specific stuff to make it work.
-(defn- fix-mongodb-first-stage
+(mu/defn- fix-mongodb-first-stage :- ::lib.schema/stages
   "MongoDB native queries consist of a collection and a pipelne (query).
 
   TODO -- it's not great that this code lives here. This should be part of the MongoDB driver. We should NOT be
   hardcoding driver-specific behavior in generic QP middleware."
-  [[first-stage & more]]
-  (let [first-stage (cond-> first-stage
-                      (and (= driver/*driver* :mongo)
-                           (= (:lib/type first-stage) :mbql.stage/native))
-                      (update :native (fn [x]
-                                        (if (map? x)
-                                          x
-                                          {:collection  (:collection first-stage)
-                                           :projections (:projections first-stage)
-                                           :query       x}))))]
-    (cons first-stage more)))
+  [stages :- ::lib.schema/stages]
+  (letfn [(update-first-stage [first-stage]
+            (cond-> first-stage
+              (and (= driver/*driver* :mongo)
+                   (= (:lib/type first-stage) :mbql.stage/native))
+              (update :native (fn [x]
+                                (if (map? x)
+                                  x
+                                  {:collection  (:collection first-stage)
+                                   :projections (:projections first-stage)
+                                   :query       x})))))]
+    (update (vec stages) 0 update-first-stage)))
 
 (def ^:private qp-owned-stage-keys
-  "The stage keys [[normalize-card-query]] sets on the stages it splices in, and so clears off a Card's stored query
-  first: after this middleware runs they say what the server decided, never what the Card was saved with."
   [:persisted-info/native
    :qp/stage-is-from-source-card
    :qp/stage-had-source-card
@@ -63,35 +62,32 @@
                  (ddl.i/schema-name {:id (:database-id card)} (system/site-uuid))
                  (:table-name persisted-info)))
     (letfn [(clear-qp-owned-keys [query]
-              ;; A Card's stored query is authored by whoever saved the Card, and these are the keys this middleware
-              ;; sets on the stages it splices in. Clear them off every stage and join first, so that what this
-              ;; middleware sets below is the only thing downstream reads: `:persisted-info/native` is raw SQL that
-              ;; `sql-source-query` emits as the stage body, and the source-card markers are what permissions checks
-              ;; key off to decide a stage is covered by a Card's collection perms rather than table perms.
               (lib.walk/walk query
                              (fn [_query _path-type _path stage-or-join]
                                (apply dissoc stage-or-join qp-owned-stage-keys))))
             (update-stages [stages]
-              (let [stages        (fix-mongodb-first-stage stages)
-                    stages        (for [stage stages]
-                                    ;; This is for detecting circular refs below, and is later used as part of
-                                    ;; permissions enforcement
-                                    (assoc stage :qp/stage-is-from-source-card card-id))
-                    ;; TODO (Cam 2026-02-25) Check if attaching the metadata is even necessary anymore
-                    card-metadata (into []
-                                        (remove :remapped-from)
-                                        (lib.card/card-returned-columns metadata-providerable card))
-                    last-stage    (cond-> (last stages)
-                                    (seq card-metadata) (assoc :lib/stage-metadata {:lib/type :metadata/results, :columns card-metadata})
-                                    ;; This will be applied, if still appropriate, by
-                                    ;; the [[metabase.query-processor.middleware.persistence]] middleware
-                                    ;;
-                                    ;; TODO -- not 100% sure I did this right, there are almost no tests for this
-                                    persisted? (assoc :persisted-info/native
-                                                      (qp.persisted/persisted-info-native-query
-                                                       (:database-id card)
-                                                       persisted-info)))]
-                (conj (vec (butlast stages)) last-stage)))
+              (if (empty? stages)
+                stages
+                (let [stages        (fix-mongodb-first-stage stages)
+                      stages        (for [stage stages]
+                                      ;; This is for detecting circular refs below, and is later used as part of
+                                      ;; permissions enforcement
+                                      (assoc stage :qp/stage-is-from-source-card card-id))
+                      ;; TODO (Cam 2026-02-25) Check if attaching the metadata is even necessary anymore
+                      card-metadata (into []
+                                          (remove :remapped-from)
+                                          (lib.card/card-returned-columns metadata-providerable card))
+                      last-stage    (cond-> (last stages)
+                                      (seq card-metadata) (assoc :lib/stage-metadata {:lib/type :metadata/results, :columns card-metadata})
+                                      ;; This will be applied, if still appropriate, by
+                                      ;; the [[metabase.query-processor.middleware.persistence]] middleware
+                                      ;;
+                                      ;; TODO -- not 100% sure I did this right, there are almost no tests for this
+                                      persisted? (assoc :persisted-info/native
+                                                        (qp.persisted/persisted-info-native-query
+                                                         (:database-id card)
+                                                         persisted-info)))]
+                  (conj (vec (butlast stages)) last-stage))))
             (update-query [query]
               (-> (lib/query metadata-providerable query)
                   ;; Now that cards' queries can come out of the AppDB already in MBQL 5, complete with `:lib/uuid`s,

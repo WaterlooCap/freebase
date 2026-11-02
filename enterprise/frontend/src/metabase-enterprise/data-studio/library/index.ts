@@ -1,7 +1,9 @@
 import { PLUGIN_LIBRARY } from "metabase/plugins";
+import { PLUGIN_DATA_REFERENCE } from "metabase/querying/components/DataReference/plugins";
 import { useGetLibraryCollectionQuery } from "metabase-enterprise/api";
 import { hasPremiumFeature } from "metabase-enterprise/settings";
 
+import { DataReferenceLibraryPane } from "./DataReferenceLibraryPane";
 import { CollectionPermissionsModal } from "./components/CollectionPermissionsModal";
 import { CreateLibraryModal } from "./components/CreateLibraryModal";
 import { PublishTablesModal } from "./components/PublishTablesModal";
@@ -31,6 +33,7 @@ export function initializePlugin() {
     PLUGIN_LIBRARY.getCollectionPickerItems = getCollectionPickerItems;
     PLUGIN_LIBRARY.getEntityPickerSyntheticLibraryItem =
       getEntityPickerSyntheticLibraryItem;
+    PLUGIN_DATA_REFERENCE.LibraryPane = DataReferenceLibraryPane;
     PLUGIN_LIBRARY.CreateLibraryModal = CreateLibraryModal;
     PLUGIN_LIBRARY.CollectionPermissionsModal = CollectionPermissionsModal;
     PLUGIN_LIBRARY.PublishTablesModal = PublishTablesModal;

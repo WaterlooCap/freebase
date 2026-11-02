@@ -120,8 +120,8 @@
 ;;; Mirrors the backfill job's wiring: enabling the feature has to restart the job, because
 ;;; [[reschedule-after-run!]] stops the periodic chain while it is disabled and the content-change handlers that
 ;;; would otherwise revive it are themselves gated on the feature.
-(derive ::entity-check :metabase/event)
-(derive :event/set-premium-embedding-token ::entity-check)
+(events/derive! ::entity-check :metabase/event)
+(events/derive! :event/set-premium-embedding-token ::entity-check)
 
 (methodical/defmethod events/publish-event! ::entity-check
   [_ _]

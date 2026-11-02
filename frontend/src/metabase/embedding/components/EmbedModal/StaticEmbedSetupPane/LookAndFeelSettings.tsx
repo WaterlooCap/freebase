@@ -10,8 +10,9 @@ import type {
   EmbeddingDisplayOptions,
 } from "metabase/embedding/types";
 import { useSelector } from "metabase/redux";
-import { getSetting, getUpgradeUrl } from "metabase/selectors/settings";
+import { getUpgradeUrl } from "metabase/selectors/settings";
 import { getCanWhitelabel } from "metabase/selectors/whitelabel";
+import { getSetting } from "metabase/settings";
 import {
   Divider,
   SegmentedControl,
@@ -33,12 +34,14 @@ const THEME_OPTIONS = [
     get label() {
       return t`Light`;
     },
+    // Unjustified type cast. FIXME
     value: "light" as DisplayTheme,
   },
   {
     get label() {
       return t`Dark`;
     },
+    // Unjustified type cast. FIXME
     value: "night" as DisplayTheme,
   },
 ] as const;
@@ -147,7 +150,6 @@ export const LookAndFeelSettings = ({
             <Switch
               label={t`Dashboard background`}
               labelPosition="left"
-              size="sm"
               variant="stretch"
               checked={displayOptions.background}
               onChange={(e) =>
@@ -162,7 +164,6 @@ export const LookAndFeelSettings = ({
           <Switch
             label={getBorderLabel(resourceType)}
             labelPosition="left"
-            size="sm"
             variant="stretch"
             checked={displayOptions.bordered}
             onChange={(e) =>
@@ -176,7 +177,6 @@ export const LookAndFeelSettings = ({
           <Switch
             label={getTitleLabel(resourceType)}
             labelPosition="left"
-            size="sm"
             variant="stretch"
             checked={displayOptions.titled}
             onChange={(e) =>

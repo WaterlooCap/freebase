@@ -85,7 +85,7 @@
 
 (mu/defn all-segment-ids :- [:maybe [:set {:min 1} ::lib.schema.id/segment]]
   "Return a set of all segment IDs anywhere in the query."
-  [query]
+  [query :- ::lib.schema/query]
   (let [segment-ids (volatile! (transient #{}))]
     (lib.walk/walk-clauses
      query
@@ -100,7 +100,7 @@
 
 (mu/defn all-measure-ids :- [:maybe [:set {:min 1} ::lib.schema.id/measure]]
   "Return a set of all measure IDs anywhere in the query."
-  [query]
+  [query :- ::lib.schema/query]
   (let [measure-ids (volatile! (transient #{}))]
     (lib.walk/walk-clauses
      query
@@ -130,11 +130,8 @@
     (all-template-tag-card-ids query))))
 
 (mu/defn all-source-card-ids-recursive :- [:maybe [:set {:min 1} ::lib.schema.id/card]]
-  "Like [[all-source-card-ids]], but follows each Card it finds into that Card's own query, and so on: every Card this
-  query reads at any depth, not just the ones it names itself.
-
-  Walks a layer at a time, warming each layer with one bulk metadata fetch rather than a fetch per Card. Cards that
-  cannot be resolved are skipped, and a cycle terminates rather than recurring forever."
+  "Like [[all-source-card-ids]], but follows each source Card into its own query, returning every Card the query reads
+  at any depth."
   [query :- ::lib.schema/query]
   (loop [seen #{}, layer (set (all-source-card-ids query))]
     (let [layer (set/difference layer seen)]
@@ -275,7 +272,7 @@
          (all-template-tags query))))
 
 (mr/def ::referenced-entity-ids
-  [:map
+  [:map {:closed true}
    [:table [:set ::lib.schema.id/table]]
    [:card [:set ::lib.schema.id/card]]
    [:metric [:set ::lib.schema.id/metric]]
@@ -284,7 +281,7 @@
    [:snippet [:set ::lib.schema.id/snippet]]])
 
 (mr/def ::referenced-entity-ids.options
-  [:map
+  [:map {:closed true}
    [:include-implicitly-joinable? {:optional true} :boolean]])
 
 (mu/defn- implicitly-joinable-table-ids :- [:set ::lib.schema.id/table]

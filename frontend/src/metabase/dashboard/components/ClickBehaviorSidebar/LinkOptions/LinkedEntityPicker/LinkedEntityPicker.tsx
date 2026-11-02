@@ -17,11 +17,11 @@ import {
   clickTargetObjectType,
 } from "metabase/dashboard/components/ClickMappings";
 import { getDashboard } from "metabase/dashboard/selectors";
+import { useQuestionFromCard } from "metabase/metadata-store";
 import { useSelector } from "metabase/redux";
-import { getMetadata } from "metabase/selectors/metadata";
 import { Button, Icon, Select } from "metabase/ui";
 import { checkNotNull } from "metabase/utils/types";
-import Question from "metabase-lib/v1/Question";
+import type Question from "metabase-lib/v1/Question";
 import type {
   CardId,
   ClickBehavior,
@@ -39,6 +39,7 @@ import S from "../LinkOptions.module.css";
 const LINK_TARGETS = {
   // TODO: we can probably just have one picker to pick either a question or a dashboard
   question: {
+    // Unjustified type cast. FIXME
     Name: ({ id }: { id: CardId | DashboardId | undefined }) => (
       <QuestionName id={id as CardId | undefined} />
     ),
@@ -144,10 +145,10 @@ function TargetClickMappings({
       ? { id: clickBehavior.targetId }
       : skipToken,
   );
-  const metadata = useSelector(getMetadata);
+  const buildQuestion = useQuestionFromCard();
   const question = useMemo(() => {
-    return card ? new Question(card, metadata) : undefined;
-  }, [card, metadata]);
+    return card ? buildQuestion(card) : undefined;
+  }, [card, buildQuestion]);
 
   const object = isDashboard ? dashboard : question;
   const isLoading = isDashboard ? dashboardIsLoading : cardIsLoading;
@@ -206,6 +207,7 @@ export function LinkedEntityPicker({
           tabId: undefined,
         });
       } else {
+        // Unjustified type cast. FIXME
         updateSettings({
           ...clickBehavior,
           targetId,
@@ -307,6 +309,7 @@ export function LinkedEntityPicker({
       {isPickerOpen && (
         <PickerComponent
           title={getModalTitle()}
+          // Unjustified type cast. FIXME
           value={initialPickerValue as any} // typescript isn't smart enough to know which picker we're using
           onChange={(newTarget) => {
             handleSelectLinkTargetEntityId(newTarget.id);
@@ -333,7 +336,7 @@ export function LinkedEntityPicker({
             value: String(tab.id),
           }))}
           label={t`Select a dashboard tab`}
-          mt="md"
+          mt="lg"
           value={dashboardTabIdValue}
           onChange={handleDashboardTabChange}
         />

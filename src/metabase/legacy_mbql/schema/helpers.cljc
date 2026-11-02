@@ -16,9 +16,7 @@
   (keyword "metabase.legacy-mbql.schema" (name clause-name)))
 
 (defn known-clause-tag?
-  "True if `k` names a registered legacy-MBQL clause (every clause is registered by [[defclause]] under
-  [[clause-registry-name]]). Used to decide whether a string/keyword head may be turned into a clause keyword: only a
-  real clause name is, so an arbitrary string is never keywordized into an operator position."
+  "Whether `k` names a registered legacy-MBQL clause."
   [k]
   (some? (mr/registered-schema (clause-registry-name k))))
 
@@ -88,13 +86,6 @@
    {:description (str "schema for a valid MBQL 4 " tag " clause")}
    [:fn
     {:error/message    (str "must be a `" tag "` clause")
-     ;; Keywordize the head ONLY when it names a known legacy-MBQL clause. The head sits in operator position -- once
-     ;; it is a keyword HoneySQL renders it as SQL, so an arbitrary string (e.g. from an attacker-controlled JSON array
-     ;; in a card's `visualization_settings`) must never be turned into a clause head. A head that is not a
-     ;; registered clause is left as-is: it stays inert data (a bound parameter) rather than becoming an operator.
-     ;; (We whitelist against *all* clauses, not just this schema's `tag`, because a legacy ref is decoded through the
-     ;; several clause alternatives of a ref schema -- e.g. `["expression" ...]` / `["aggregation" ...]` -- and each
-     ;; must still normalize.)
      :decode/normalize (fn [x]
                          (if (and (sequential? x)
                                   ((some-fn simple-keyword? string?) (first x))

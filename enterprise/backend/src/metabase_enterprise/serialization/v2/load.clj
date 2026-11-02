@@ -5,7 +5,6 @@
    [clojure.string :as str]
    [diehard.core :as dh]
    [metabase-enterprise.serialization.settings :as serialization.settings]
-   [metabase-enterprise.serialization.v2.backfill-ids :as serdes.backfill]
    [metabase-enterprise.serialization.v2.ingest :as serdes.ingest]
    [metabase-enterprise.serialization.v2.models :as serdes.models]
    [metabase.app-db.core :as mdb]
@@ -137,7 +136,7 @@
   [model-name]
   (when (valid-model-name-for-load? model-name)
     (let [model (t2.model/resolve-model (symbol model-name))]
-      (serdes.backfill/has-entity-id? model))))
+      (serdes/has-entity-id? model))))
 
 (defn- load-one!
   "Loads a single entity, specified by its `:serdes/meta` abstract path, into the appdb, doing some bookkeeping to
@@ -189,7 +188,7 @@
               ;; in the yaml file.
               ;; In all other cases we should expect an :entity_id:
               ;; - exported entities have a :entity_id for every model that can have one
-              ;; - backfill (pre import) guarantees all entities have ids in the appdb
+              ;; - a migration backfilled historical NULLs and the insert hook always generates one
               expect-entity-id   (some-> rebuilt-path peek :model exported-with-entity-id?)
               require-new-entity (and expect-entity-id (nil? (:entity_id ingested)))
               ingested           (cond-> ingested
@@ -197,7 +196,7 @@
                                    ;; `::strip` is handled in `metabase.serialization`
                                    (circular path)    (assoc ::serdes/strip (keys-to-strip ingested)))
               ;; we need less deps when trying to load "stripped" data
-              deps               (->> (serdes/dependencies (apply dissoc ingested (::serdes/strip ingested)))
+              deps               (->> (serdes/deserialization-dependencies (apply dissoc ingested (::serdes/strip ingested)))
                                       (remove seen))
               _                  (when (seq deps)
                                    (log/debug "Loading dependencies"
@@ -256,44 +255,39 @@
 
 (defn load-metabase!
   "Loads in a database export from an ingestion source, which is any Ingestable instance."
-  [ingestion & {:keys [backfill? continue-on-error reindex?]
-                :or   {backfill?         true
-                       continue-on-error false
+  [ingestion & {:keys [continue-on-error reindex?]
+                :or   {continue-on-error false
                        reindex?          true}}]
   (binding [serdes/*skip-schema-validation?* (serialization.settings/serialization-skip-schema-validation)]
     (u/prog1
       ;; Each entity is loaded in its own transaction (inside load-one!), so a deadlock or transient
       ;; failure on one entity doesn't abort the entire import. See #74412.
-      (do
-        (when backfill?
-          (t2/with-transaction [_tx]
-            (serdes.backfill/backfill-ids!)))
-        ;; We proceed in the arbitrary order of ingest-list, deserializing all the files. Their declared
-        ;; dependencies guide the import, and make sure all containers are imported before contents, etc.
-        (let [contents      (serdes.ingest/ingest-list ingestion)
-              ingest-errors (serdes.ingest/ingest-errors ingestion)
-              ctx           (cond-> (new-context ingestion)
-                              (seq ingest-errors) (update :errors into ingest-errors))]
-          (when (and (seq ingest-errors) (not continue-on-error))
-            (let [file-names (mapv #(or (:file (ex-data %)) (ex-message %)) ingest-errors)]
-              (throw (ex-info (format "Failed to read %d file(s) during ingestion: %s"
-                                      (count ingest-errors)
-                                      (str/join ", " file-names))
-                              {:ingest-errors ingest-errors
-                               :files         file-names}
-                              (first ingest-errors)))))
-          (log/infof "Starting deserialization, total %s documents" (count contents))
-          (reduce (fn [ctx item]
-                    (try
-                      (load-one! ctx item)
-                      (catch Exception e
-                        (when-not continue-on-error
-                          (throw e))
-                        ;; eschew big and scary stacktrace
-                        (log/warnf (u/strip-error e "Skipping deserialization error"))
-                        (update ctx :errors conj e))))
-                  ctx
-                  contents)))
+      ;; We proceed in the arbitrary order of ingest-list, deserializing all the files. Their declared
+      ;; dependencies guide the import, and make sure all containers are imported before contents, etc.
+      (let [contents      (serdes.ingest/ingest-list ingestion)
+            ingest-errors (serdes.ingest/ingest-errors ingestion)
+            ctx           (cond-> (new-context ingestion)
+                            (seq ingest-errors) (update :errors into ingest-errors))]
+        (when (and (seq ingest-errors) (not continue-on-error))
+          (let [file-names (mapv #(or (:file (ex-data %)) (ex-message %)) ingest-errors)]
+            (throw (ex-info (format "Failed to read %d file(s) during ingestion: %s"
+                                    (count ingest-errors)
+                                    (str/join ", " file-names))
+                            {:ingest-errors ingest-errors
+                             :files         file-names}
+                            (first ingest-errors)))))
+        (log/infof "Starting deserialization, total %s documents" (count contents))
+        (reduce (fn [ctx item]
+                  (try
+                    (load-one! ctx item)
+                    (catch Exception e
+                      (when-not continue-on-error
+                        (throw e))
+                      ;; eschew big and scary stacktrace
+                      (log/warnf (u/strip-error e "Skipping deserialization error"))
+                      (update ctx :errors conj e))))
+                ctx
+                contents))
       (when reindex?
         ;; Reindex after all entities are loaded. Individual entity commits may have produced stale
         ;; search index entries; this ensures the index reflects the final state.

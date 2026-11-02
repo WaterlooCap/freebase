@@ -8,6 +8,8 @@
    [honey.sql :as sql]
    [honey.sql.helpers :as sql.helpers]
    [java-time.api :as t]
+   [metabase-enterprise.semantic-search.appdb-scoring :as appdb-scoring]
+   [metabase-enterprise.semantic-search.db :as semantic-search.db]
    ;; TODO: extract schema code to go under db.migration
    [metabase-enterprise.semantic-search.embedding :as embedding]
    [metabase-enterprise.semantic-search.scoring :as scoring]
@@ -27,6 +29,7 @@
    [toucan2.core :as t2])
   (:import
    [com.mchange.v2.c3p0 PooledDataSource]
+   [java.nio.charset StandardCharsets]
    [java.time Instant LocalDate OffsetDateTime ZonedDateTime]
    [java.util.concurrent ArrayBlockingQueue RejectedExecutionHandler RejectedExecutionException TimeUnit ThreadPoolExecutor]
    [org.postgresql.util PGobject]))
@@ -133,8 +136,7 @@
    Uses at most 2 queries regardless of the number of collection-ids."
   [collection-ids]
   (when-let [collection-ids (not-empty (set (remove nil? collection-ids)))]
-    (let [colls                (t2/select [:model/Collection :id :personal_owner_id :location]
-                                          :id [:in collection-ids])
+    (let [colls                (semantic-search.db/collection-owners-and-locations collection-ids)
           {personal     true
            non-personal false} (group-by (comp some? :personal_owner_id) colls)
           direct               (into {} (map (juxt :id :personal_owner_id)) personal)
@@ -146,9 +148,7 @@
           root-id->owner       (into direct
                                      (map (juxt :id :personal_owner_id))
                                      (when (seq unknown-roots)
-                                       (t2/select [:model/Collection :id :personal_owner_id]
-                                                  :id [:in unknown-roots]
-                                                  :personal_owner_id [:not= nil])))]
+                                       (semantic-search.db/personal-collection-owners unknown-roots)))]
       (into direct
             (keep (fn [[coll-id root-id]]
                     (when-let [owner (get root-id->owner root-id)]
@@ -267,13 +267,13 @@
   When we do so we need to be sure any index names do not exceed the postgres limit for names. This function will hash the identifier
   if it exceeds the length, and will get a name like index_${sha1} instead.
 
+  Table names produced here must stay recognizable by [[index-table-name?]].
+
   Note: The index parameters will still be available in index_metadata"
   [identifier]
-  (if (<= (count identifier) 63)
+  (if (<= (alength (.getBytes ^String identifier StandardCharsets/UTF_8)) 63)
     identifier
-    (let [hashed-name (str "index_" (buddy-codecs/bytes->hex (buddy-hash/sha1 identifier)))]
-      (log/warnf "Using hashed name for index table %s as original table name %s exceeded the maximum table name length" hashed-name identifier)
-      hashed-name)))
+    (str "index_" (buddy-codecs/bytes->hex (buddy-hash/sha1 identifier)))))
 
 (defn model-table-suffix
   "Returns a new suffix for a table name, based on current timestamp"
@@ -281,13 +281,43 @@
   (mod (.toEpochSecond (t/offset-date-time)) 10000000))
 
 (defn model-table-name
-  "Returns a default table name for a model. If the table name would exceed the 63 byte postgres limit, a hashed name is preferred."
+  "Returns a default table name for a model. If the table name would exceed the 63 byte postgres limit, a hashed name is preferred.
+
+  Table names produced here must stay recognizable by [[index-table-name?]]."
   [embedding-model]
-  (let [{:keys [model-name provider vector-dimensions]} embedding-model
+  (let [{:keys [model-name provider vector-dimensions embedding-space-id]} embedding-model
         provider-name (embedding/abbrev-provider-name provider)
         abbrev-model-name (embedding/abbrev-model-name model-name)
-        ideal-table-name (str "index_" provider-name "_" abbrev-model-name "_" vector-dimensions)]
+        space-suffix (when embedding-space-id
+                       (subs (buddy-codecs/bytes->hex (buddy-hash/sha1 embedding-space-id)) 0 12))
+        ideal-table-name (str "index_" provider-name "_" abbrev-model-name "_" vector-dimensions
+                              (when space-suffix (str "_e" space-suffix)))]
     (hash-identifier-if-exceeds-pg-limit ideal-table-name)))
+
+(def ^:private index-table-name-pattern
+  "Recognizes every table-name shape produced by [[model-table-name]] (optionally with the force-reset
+  suffix appended by [[metabase-enterprise.semantic-search.pgvector-api/fresh-index]]),
+  [[hash-identifier-if-exceeds-pg-limit]], and the legacy pre-BOT-337 naming era:
+
+    index_<provider>_<model>_<dims>                  legacy name
+    index_<provider>_<model>_<dims>_e<12-hex>        immutable-space name
+    either modern name followed by _<digits>         force-reset suffix ([[model-table-suffix]])
+    index_<40-hex-sha1>                        names exceeding the 63-byte pg identifier limit
+    index_table_<anything>                     legacy pre-BOT-337 naming (index_table_<provider>_<model>_<dims>)
+
+  The provider/model segments are only lightly sanitized (see [[embedding/abbrev-model-name]]), so no
+  character class is assumed for them; the trailing _<digits> (vector dimensions or force-reset suffix)
+  gives the modern shapes their structure, while the index_table_ prefix — used exclusively by the
+  legacy era — claims anything under it. Deliberately does NOT match the control-plane tables
+  (index_metadata, index_control, index_gate): no trailing _<digits>, not 40-hex, not index_table_."
+  #"\Aindex_(?:.+_\d+(?:_e[0-9a-f]{12})?(?:_\d+)?|[0-9a-f]{40}|table_.+)\z")
+
+(defn index-table-name?
+  "Does the bare (schema- and qualifier-stripped) table name look like a semantic-search index table?
+  Matching names are orphan-cleanup candidates, i.e. may be dropped if not registered in the metadata
+  table; see [[index-table-name-pattern]] for the shapes."
+  [bare-table-name]
+  (boolean (re-matches index-table-name-pattern bare-table-name)))
 
 (defn default-index
   "Returns the default index spec for a model."
@@ -438,8 +468,16 @@
 (defn- index-name
   "Returns the name for an index for the given index configuration, column, and index type."
   [index suffix]
-  (let [index-name (str (:table-name index) suffix)]
+  ;; index names are bare: an index lands in its table's schema and cannot be schema-qualified
+  (let [index-name (str (semantic.util/table-name-part (:table-name index)) suffix)]
     (hash-identifier-if-exceeds-pg-limit index-name)))
+
+(defn schema-qualified-index-name
+  "The index name qualified with its table's schema (when the table has one), for catalog lookups —
+  an index lives in the same schema as its table."
+  [index index-name]
+  (let [[schema _] (semantic.util/qualified-table-parts (:table-name index))]
+    (cond->> index-name schema (str schema "."))))
 
 (defn hnsw-index-name
   "Returns the name for a HNSW database index for the given semantic search index configuration."
@@ -487,6 +525,12 @@
                          concurrently? (str/replace-first "CREATE INDEX " "CREATE INDEX CONCURRENTLY "))]
     (jdbc/execute! connectable (into [sql] params))))
 
+(defn drop-index-concurrently-if-exists!
+  "Drop `index-name` without blocking writes. Must run outside a transaction."
+  [connectable index-name]
+  (jdbc/execute! connectable
+                 [(str "DROP INDEX CONCURRENTLY IF EXISTS " (semantic.util/quote-table index-name))]))
+
 (defn create-index-table-if-not-exists!
   "Ensure that the index table exists and is ready to be populated. If
   force-reset? is true, drops and recreates the table if it exists.
@@ -501,7 +545,15 @@
                     (format "whitespace in the table name (%s) is not currently supported" table-name))
           {:keys [vector-dimensions]}          embedding-model]
       (log/info "Creating index table" table-name)
-      (jdbc/execute! connectable (sql/format (sql.helpers/create-extension :vector :if-not-exists)))
+      (try
+        (jdbc/execute! connectable (sql/format (sql.helpers/create-extension :vector :if-not-exists)))
+        (catch Exception e
+          ;; Extension install commonly fails on privileges (may need superuser); give the operator the way out.
+          (throw (ex-info (str "Failed to install the pgvector extension. Have a privileged user run"
+                               " CREATE EXTENSION vector; on this database, or set MB_PGVECTOR_DB_URL to a"
+                               " database where it is installed.")
+                          {:type ::extension-install-failed}
+                          e))))
       (when force-reset? (drop-index-table! connectable index))
       (jdbc/execute!
        connectable
@@ -530,7 +582,10 @@
             [(keyword table-name) :content])
            sql-format-quoted)))
     (catch Exception e
-      (throw (ex-info "Failed to create index table" {} e)))))
+      ;; let an already-actionable error (e.g. the pgvector-extension guidance) surface unwrapped
+      (if (= ::extension-install-failed (:type (ex-data e)))
+        (throw e)
+        (throw (ex-info "Failed to create index table" {} e))))))
 
 (comment
   (def embedding-model {:provider "ollama"
@@ -539,7 +594,7 @@
   (def index (default-index embedding-model))
   (drop-index-table! db index)
   (create-index-table-if-not-exists! db index)
-  (jdbc/execute! db ["select table_name from INFORMATION_SCHEMA.tables where table_name like 'index_table_%'"]))
+  (jdbc/execute! db ["select table_name from INFORMATION_SCHEMA.tables where table_name like 'index\\_%'"]))
 
 (defn- personal-collection-filter
   "Generate a WHERE condition for personal collection filtering based on the filter type.
@@ -891,7 +946,7 @@
 (defn- decode-legacy-input
   "Decode `row`s `:legacy_input` JSONB PGobject into a Clojure map."
   [row]
-  ;; some existing rows have legacy_input stored as a JSON string rather than a JSON
+  ;; BOT-1543: some existing rows have legacy_input stored as a JSON string rather than a JSON
   ;; object, so one decode yields a string; decode once more in that case.
   (update row :legacy_input
           (fn [pgo]
@@ -941,7 +996,7 @@
         fast-filtered (filterv #(coll-readable? (:collection_id %)) fast-docs)
         slow-t2-instances (vec
                            (for [[t2-model docs] (group-by doc->t2-model slow-docs)
-                                 t2-instance (t2/select t2-model :id [:in (map :id docs)])]
+                                 t2-instance (semantic-search.db/instances t2-model (map :id docs))]
                              t2-instance))
         doc->t2 (comp (u/index-by (juxt :id t2/model) slow-t2-instances)
                       (juxt :id doc->t2-model))
@@ -962,8 +1017,7 @@
   [docs collection-id]
   (let [collection-ids (keep :collection_id docs)
         collections-map (when (seq collection-ids)
-                          (->> (t2/select [:collection :id :location]
-                                          :id [:in collection-ids])
+                          (->> (semantic-search.db/collection-locations collection-ids)
                                (into {} (map (juxt :id identity)))))]
     (filterv (fn [doc]
                (let [doc-collection-id (:collection_id doc)]
@@ -1028,13 +1082,17 @@
     (first decoded)))
 
 (defn- find-scan-node
-  "Depth-first search of an EXPLAIN plan tree for the scan node over `table-name`."
+  "Depth-first search of an EXPLAIN plan tree for the scan node over `table-name`.
+  EXPLAIN reports \"Relation Name\" unqualified, so compare on the bare name part."
   [plan table-name]
-  (when (map? plan)
-    (if (and (#{"Seq Scan" "Index Scan" "Index Only Scan" "Bitmap Heap Scan"} (get plan "Node Type"))
-             (= table-name (get plan "Relation Name")))
-      plan
-      (some #(find-scan-node % table-name) (get plan "Plans")))))
+  (let [bare-name (semantic.util/table-name-part table-name)
+        search    (fn search [node]
+                    (when (map? node)
+                      (if (and (#{"Seq Scan" "Index Scan" "Index Only Scan" "Bitmap Heap Scan"} (get node "Node Type"))
+                               (= bare-name (get node "Relation Name")))
+                        node
+                        (some search (get node "Plans")))))]
+    (search plan)))
 
 (defn- scan-node-metrics
   "Pull the index-table scan node out of an EXPLAIN plan tree and summarise it: the plan node chosen, the
@@ -1125,16 +1183,23 @@
         search-string (:search-string search-context)]
     (if (str/blank? search-string)
       {:results [] :raw-count 0}
-      (do
+      (let [index-name  (schema-qualified-index-name index (hnsw-index-name index))
+            index-state (when (contains? search.config/hnsw-index-backed-strategies
+                                         (vector-search-strategy search-context))
+                          (semantic.util/index-state db index-name))
+            search-context (cond-> search-context
+                             (= :building index-state) (assoc :vector-search-strategy :brute-force))]
         ;; `:vector-search-allow-missing-index?` is a deliberate opt-out for callers that want the inner
         ;; query to run without the HNSW index (e.g. the strategy matrix test probing the exact seq-scan
-        ;; path); production traffic leaves it unset and gets the fail-fast.
+        ;; path). A concurrent build also uses that exact path until PostgreSQL marks the index ready; an
+        ;; absent or abandoned invalid index fails fast.
         (when (and (contains? search.config/hnsw-index-backed-strategies (vector-search-strategy search-context))
                    (not (:vector-search-allow-missing-index? search-context))
-                   (not (semantic.util/index-exists? db (hnsw-index-name index))))
-          (throw (ex-info (str "HNSW-index-backed vector-search strategy requested but no HNSW index exists. "
-                               "Set the semantic-search-vector-strategy setting to an index-backed strategy "
-                               "(:hnsw or :hnsw-iterative-*) to build it.")
+                   (contains? #{nil :invalid} index-state))
+          (throw (ex-info (str "HNSW-index-backed vector-search strategy requested but no usable HNSW index exists. "
+                               "The index is absent or was abandoned invalid. It will be rebuilt by the next "
+                               "maintenance pass; retry shortly, or pass :vector-search-allow-missing-index? true "
+                               "to bypass this check.")
                           {:table-name (:table-name index)
                            :strategy   (vector-search-strategy search-context)})))
         (let [timer (u/start-timer)
@@ -1197,7 +1262,7 @@
                                       (mapv search/collapse-id)))
               filter-time-ms (u/since-ms filter-timer)
 
-              appdb-scorers (scoring/appdb-scorers search-context)
+              appdb-scorers (appdb-scoring/appdb-scorers search-context)
               appdb-scores-timer (u/start-timer)
               final-results (->> filtered-results
                                  (scoring/with-appdb-scores search-context appdb-scorers weights))
@@ -1348,7 +1413,8 @@
   ;; no user
   (query-index db index {:search-string "Copper knife"})
 
-  #_:clj-kondo/ignore
+  ;; REPL scratch; metabase.test is off-limits to this module's real code
+  #_{:clj-kondo/ignore [:metabase/modules]}
   (require '[metabase.test :as mt])
   (mt/with-test-user :crowberto
     (doall (query-index db index {:search-string "Copper knife"}))))
@@ -1400,13 +1466,15 @@
   ;; Code to test the custom thread pool. The transduction should process batches in parallel and new batches should
   ;; only be realized in memory once a thread is available.
   (defn process-batch [batch]
-    #_:clj-kondo/ignore
+    ;; REPL scratch; println shows batch progress on stdout
+    #_{:clj-kondo/ignore [:discouraged-var]}
     (println "Processing batch starting with " (first batch))
     (Thread/sleep 2000)
     {:count (count batch)})
 
   (defn logging-range [n]
-    #_:clj-kondo/ignore
+    ;; REPL scratch; println shows lazy realization on stdout
+    #_{:clj-kondo/ignore [:discouraged-var]}
     (map #(do (println "Realizing item" %) %)
          (range n)))
 

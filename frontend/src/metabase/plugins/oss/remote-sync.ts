@@ -20,6 +20,8 @@ import type {
   RemoteSyncEntity,
 } from "metabase-types/api";
 
+import { definePluginSlot } from "../slot";
+
 export type CollectionsNavTreeProps = {
   collections: CollectionTreeItem[];
   selectedId?: number | string;
@@ -61,10 +63,14 @@ const getDefaultPluginRemoteSync = () => ({
   LibraryNav: PluginPlaceholder,
   RemoteSyncSettings: PluginPlaceholder,
   SyncedCollectionsSidebarSection: PluginPlaceholder,
+  // Unjustified type cast. FIXME
   GitSyncAppBarControls: PluginPlaceholder as ComponentType,
+  // Unjustified type cast. FIXME
   GitSettingsModal: PluginPlaceholder as ComponentType<GitSettingsModalProps>,
   GitSyncSetupMenuItem: PluginPlaceholder,
+  // Unjustified type cast. FIXME
   CollectionsNavTree: null as ComponentType<CollectionsNavTreeProps> | null,
+  // Unjustified type cast. FIXME
   CollectionSyncStatusBadge: null as ComponentType | null,
   REMOTE_SYNC_INVALIDATION_TAGS: null,
   useSyncStatus: () => ({
@@ -77,8 +83,10 @@ const getDefaultPluginRemoteSync = () => ({
   useGitSyncVisible: () => ({ isVisible: false, currentBranch: null }),
   useHasLibraryDirtyChanges: () => false,
   useHasTransformDirtyChanges: () => false,
+  useHasGlossaryDirtyChanges: () => false,
   getIsRemoteSyncReadOnly: () => false,
   useRemoteSyncDirtyState: () =>
+    // Unjustified type cast. FIXME
     ({
       isCollectionDirty: false,
     }) as unknown as RemoteSyncDirtyState,
@@ -108,13 +116,7 @@ export const PLUGIN_REMOTE_SYNC: {
   };
   useHasLibraryDirtyChanges: () => boolean;
   useHasTransformDirtyChanges: () => boolean;
+  useHasGlossaryDirtyChanges: () => boolean;
   getIsRemoteSyncReadOnly: (state: State) => boolean;
   useRemoteSyncDirtyState: () => RemoteSyncDirtyState;
-} = getDefaultPluginRemoteSync();
-
-/**
- * @internal Do not call directly. Use the main reinitialize function from metabase/plugins instead.
- */
-export function reinitialize() {
-  Object.assign(PLUGIN_REMOTE_SYNC, getDefaultPluginRemoteSync());
-}
+} = definePluginSlot(getDefaultPluginRemoteSync);

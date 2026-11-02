@@ -7,9 +7,9 @@
    [clojure.string :as str]
    [clojure.test :refer :all]
    [dk.ative.docjure.spreadsheet :as spreadsheet]
-   [metabase.actions.http-action :as http-action]
    [metabase.analytics.snowplow-test :as snowplow-test]
    [metabase.analytics.stats :as stats]
+   [metabase.api.common :as api]
    [metabase.app-db.encryption-test-util :as encryption-tu]
    [metabase.dashboards-rest.api-test :as api.dashboard-test]
    [metabase.lib.core :as lib]
@@ -21,6 +21,7 @@
    [metabase.public-sharing-rest.api :as api.public]
    [metabase.public-sharing.core :as public-sharing]
    [metabase.queries-rest.api.card-test :as api.card-test]
+   [metabase.query-processor.card :as qp.card]
    [metabase.query-processor.card-test :as qp.card-test]
    [metabase.query-processor.middleware.process-userland-query-test :as process-userland-query-test]
    [metabase.query-processor.pivot.test-util :as api.pivots]
@@ -41,6 +42,38 @@
 (set! *warn-on-reflection* true)
 
 ;;; --------------------------------------------------- Helper Fns ---------------------------------------------------
+
+(defn- field-effective-type
+  "A Field's `:effective_type` as the API returns it. It varies with the driver,
+  so a `:param_fields` expectation reads it rather than naming a value."
+  [field-id]
+  (u/qualified-name (t2/select-one-fn :effective_type :model/Field :id field-id)))
+
+(defn- categories-id-target
+  "The `:target` a `:param_fields` entry for `venues.category_id` carries: the
+  Categories primary key in public columns, with the `:name_field` that labels its
+  values. A public parameter widget cannot remap an FK's values without it."
+  []
+  {:id                 (mt/id :categories :id)
+   :table_id           (mt/id :categories)
+   :display_name       "ID"
+   :base_type          "type/BigInteger"
+   :effective_type     (field-effective-type (mt/id :categories :id))
+   :settings           nil
+   :name               "ID"
+   :semantic_type      "type/PK"
+   :has_field_values   "none"
+   :fk_target_field_id nil
+   :name_field         {:id                 (mt/id :categories :name)
+                        :table_id           (mt/id :categories)
+                        :display_name       "Name"
+                        :base_type          "type/Text"
+                        :effective_type     (field-effective-type (mt/id :categories :name))
+                        :settings           nil
+                        :name               "NAME"
+                        :semantic_type      "type/Name"
+                        :has_field_values   "list"
+                        :fk_target_field_id nil}})
 
 (defn- shared-obj []
   {:public_uuid       (str (random-uuid))
@@ -361,9 +394,9 @@
                                                  :b {:type "date", :name "b", :display_name "b" :id "b" :default "B TAG"}
                                                  :c {:type "date", :name "c", :display_name "c" :id "c" :default "C TAG"}
                                                  :d {:type "date", :name "d", :display_name "d" :id "d" :default "D TAG"}}}}
-   :parameters       [{:type "date", :name "a", :display_name "a" :id "a" :default "A param"}
-                      {:type "date", :name "b", :display_name "b" :id "b" :default "B param"}
-                      {:type "date", :name "c", :display_name "c" :id "c" :default "C param"
+   :parameters       [{:type "date", :name "a", :id "a" :default "A param"}
+                      {:type "date", :name "b", :id "b" :default "B param"}
+                      {:type "date", :name "c", :id "c" :default "C param"
                        :values_source_type "static-list" :values_source_config {:values ["BBQ" "Bakery" "Bar"]}}]
    :embedding_params {:a "locked", :b "disabled", :c "enabled", :d "enabled"}})
 
@@ -377,7 +410,6 @@
       (mt/with-temp [:model/Card card (assoc (card-with-embedded-params) :public_uuid (str (random-uuid)))]
         (is (= [{:type         "date/single",
                  :name         "a",
-                 :display_name "a",
                  :id           "a",
                  :default      "A TAG",
                  :target       ["variable" ["template-tag" "a"]],
@@ -385,7 +417,6 @@
                  :required     false}
                 {:type         "date/single",
                  :name         "b",
-                 :display_name "b",
                  :id           "b",
                  :default      "B TAG",
                  :target       ["variable" ["template-tag" "b"]],
@@ -395,7 +426,6 @@
                 ;; merge of both places
                 {:type                 "date/single",
                  :name                 "c",
-                 :display_name         "c",
                  :slug                 "c",
                  ;; order importance: the default from template-tag is in the final result
                  :default              "C TAG",
@@ -539,43 +569,6 @@
                                                           :type   "category"
                                                           :target ["dimension" ["template-tag" "price"]]
                                                           :value  [1 2]}]))))))))
-
-(deftest execute-public-card-rejects-object-valued-parameter-sql-injection-test
-  (testing "GET /api/public/card/:uuid/query"
-    (testing "Invalid values for parameters should get normalized to `nil`"
-      (mt/with-temporary-setting-values [enable-public-sharing true]
-        (with-temp-public-card [{uuid :public_uuid}
-                                {:dataset_query (let [mp (mt/metadata-provider)]
-                                                  (-> (lib/native-query mp "SELECT count(*) FROM venues WHERE {{price}}")
-                                                      (lib/with-template-tags {"price" {:id           "_PRICE_"
-                                                                                        :name         "price"
-                                                                                        :display-name "Price"
-                                                                                        :type         :dimension
-                                                                                        :dimension    (lib/ref (lib.metadata/field mp (mt/id :venues :price)))
-                                                                                        :widget-type  :category
-                                                                                        :required     true}})))
-
-                                 :parameters [{:id     "_PRICE_"
-                                               :type   :category
-                                               :target [:dimension [:template-tag "price"]]}]}]
-          (letfn [(query [expected-status-code param-value]
-                    (client/client :get expected-status-code (str "public/card/" uuid "/query")
-                                   :parameters (json/encode [{:id     "_PRICE_"
-                                                              :name   "price"
-                                                              :type   "category"
-                                                              :target ["dimension" ["template-tag" "price"]]
-                                                              :value  param-value}])))]
-            (testing "Sanity check: should work with valid value"
-              (is (=? {:data {:rows [[22]]}}
-                      (query 202 1))))
-            (doseq [[label evil-value] [["raw map"        {:raw "1) UNION SELECT 1 -- "}]
-                                        ["map inside vec" [{:raw "1) UNION SELECT 1 -- "}]]
-                                        ["honeysql vec"   [["raw" "1) UNION SELECT 1 -- "]]]]]
-              (testing label
-                (is (= {:status     "failed"
-                        :error      "You'll need to pick a value for 'Price' before this query can run."
-                        :error_type "missing-required-parameter"}
-                       (query 400 evil-value)))))))))))
 
 (deftest download-public-card-filename-test
   (testing "GET /api/public/card/:uuid/query - filename generation"
@@ -731,6 +724,21 @@
                                                                     :target ["dimension" ["template-tag" "venue_id"]],
                                                                     :type "id",
                                                                     :value nil}]))))))))))
+
+(deftest execute-public-card-with-invalid-parameters-test
+  (testing "GET /api/public/card/:uuid/query -- malformed `parameters` is rejected with a 400"
+    (mt/with-temporary-setting-values [enable-public-sharing true]
+      (with-temp-public-card [{uuid :public_uuid} {}]
+        (let [url (str "public/card/" uuid "/query")]
+          (testing "valid JSON that is not a sequence of parameter maps"
+            (client/client :get 400 url
+                           :parameters (json/encode {:_PRICE_ 3})))
+          (testing "a sequence of maps missing the required :id"
+            (client/client :get 400 url
+                           :parameters (json/encode [{:value 3}])))
+          (testing "a parameter with a non-scalar garbage :id"
+            (client/client :get 400 url
+                           :parameters (json/encode [{:id {:not "a string"} :value 3}]))))))))
 
 ;; Cards with required params
 (defn- do-with-required-param-card! [f]
@@ -974,10 +982,11 @@
                 (testing "Dashcard should only have id and name params"
                   (is (partial= {:dashcards [{:action {:parameters [{:id "id"} {:id "name"}]}}]}
                                 (mt/user-http-request :crowberto :get 200 (format "public/dashboard/%s" dashboard-uuid)))))
-                (let [execute-path (format "public/dashboard/%s/dashcard/%s/execute" dashboard-uuid (:id dashcard))]
+                (let [execute-path (format "public/dashboard/%s/dashcard/%s/execute" dashboard-uuid (:id dashcard))
+                      values-path  (format "public/dashboard/%s/dashcard/%s/execute/values" dashboard-uuid (:id dashcard))]
                   (testing "Prefetch should only return non-hidden fields"
                     (is (= {:id 1 :name "Red Medicine"} ; price is hidden
-                           (mt/user-http-request :crowberto :get 200 execute-path :parameters (json/encode {:id 1})))))
+                           (mt/user-http-request :crowberto :post 200 values-path {:parameters {"id" 1}}))))
                   (testing "Update should not allow hidden fields to be updated"
                     (is (= {:rows-updated 1}
                            (mt/user-http-request :crowberto :post 200 execute-path {:parameters {"id" 1 "name" "Blueberries"}})))
@@ -985,7 +994,7 @@
                            (mt/user-http-request :crowberto :post 400 execute-path {:parameters {"id" 1 "name" "Blueberries" "price" 1234}})))))))))))))
 
 (deftest public-dashboard-action-prefill-validates-dashcard-belongs-to-dashboard-test
-  (testing "GET prefill should validate that the dashcard belongs to the dashboard"
+  (testing "prefill should validate that the dashcard belongs to the dashboard"
     (mt/with-temporary-setting-values [enable-public-sharing true]
       (mt/test-drivers (mt/normal-drivers-with-feature :actions)
         (mt/with-actions-test-data-tables #{"venues" "categories"}
@@ -1002,10 +1011,10 @@
                                                                     :card_id      card-id}]
                   (testing "dashcard from a different dashboard should 404"
                     (is (= "Not found."
-                           (client/client :get 404
-                                          (format "public/dashboard/%s/dashcard/%s/execute"
+                           (client/client :post 404
+                                          (format "public/dashboard/%s/dashcard/%s/execute/values"
                                                   public-uuid (:id other-dashcard))
-                                          :parameters (json/encode {:id 1}))))))))))))))
+                                          {:parameters {"id" 1}})))))))))))))
 
 (deftest get-public-dashboard-actions-test
   (testing "GET /api/public/dashboard/:uuid"
@@ -1532,12 +1541,28 @@
                                 :table_id           (mt/id :venues)
                                 :display_name       "Category ID"
                                 :base_type          "type/Integer"
+                                :effective_type     (field-effective-type (mt/id :venues :category_id))
+                                :settings           nil
                                 :name               "CATEGORY_ID"
                                 :semantic_type      "type/FK"
                                 :has_field_values   "none"
                                 :fk_target_field_id (mt/id :categories :id)
+                                :target             (categories-id-target)
                                 :dimensions         []}]}
                  (:param_fields (client/client :get 200 (str "public/card/" (:public_uuid card)))))))))))
+
+(deftest dashboard-param-fields-anonymous-fk-target-test
+  (testing "GET /api/public/dashboard/:uuid :param_fields carry an FK's target without a session"
+    (mt/with-temporary-setting-values [enable-public-sharing true]
+      (with-sharing-enabled-and-temp-dashcard-referencing! :orders :user_id [dashboard]
+        (testing "the target labels the FK's values, so a public widget cannot remap them without it"
+          (is (=? {:id       (mt/id :people :id)
+                   :name_field {:id (mt/id :people :name)}}
+                  (-> (client/client :get 200 (str "public/dashboard/" (:public_uuid dashboard)))
+                      :param_fields
+                      vals
+                      ffirst
+                      :target))))))))
 
 (deftest dashboard-param-fields-public-columns-test
   (testing "GET /api/public/dashboard/:uuid :param_fields only carry the public Field columns"
@@ -1558,10 +1583,13 @@
                                    :table_id           (mt/id :venues)
                                    :display_name       "Category ID"
                                    :base_type          "type/Integer"
+                                   :effective_type     (field-effective-type (mt/id :venues :category_id))
+                                   :settings           nil
                                    :name               "CATEGORY_ID"
                                    :semantic_type      "type/FK"
                                    :has_field_values   "none"
                                    :fk_target_field_id (mt/id :categories :id)
+                                   :target             (categories-id-target)
                                    :dimensions         []}]}
                  (:param_fields (client/client :get 200 (str "public/dashboard/" (:public_uuid dashboard)))))))))))
 
@@ -1573,6 +1601,8 @@
                              :table_id           (mt/id :venues)
                              :display_name       "ID"
                              :base_type          "type/BigInteger"
+                             :effective_type     (field-effective-type (mt/id :venues :id))
+                             :settings           nil
                              :name               "ID"
                              :semantic_type      "type/PK"
                              :has_field_values   "none"
@@ -1581,6 +1611,8 @@
                              :table_id           (mt/id :venues)
                              :display_name       "Name"
                              :base_type          "type/Text"
+                             :effective_type     (field-effective-type (mt/id :venues :name))
+                             :settings           nil
                              :name               "NAME"
                              :semantic_type      "type/Name"
                              :has_field_values   "list"
@@ -1589,14 +1621,19 @@
                              :table_id           (mt/id :venues)
                              :display_name       "Category ID"
                              :base_type          "type/Integer"
+                             :effective_type     (field-effective-type (mt/id :venues :category_id))
+                             :settings           nil
                              :name               "CATEGORY_ID"
                              :semantic_type      "type/FK"
                              :has_field_values   "none"
-                             :fk_target_field_id (mt/id :categories :id)}
+                             :fk_target_field_id (mt/id :categories :id)
+                             :target             (categories-id-target)}
             categories-name {:id                 (mt/id :categories :name)
                              :table_id           (mt/id :categories)
                              :display_name       "Name"
                              :base_type          "type/Text"
+                             :effective_type     (field-effective-type (mt/id :categories :name))
+                             :settings           nil
                              :name               "NAME"
                              :semantic_type      "type/Name"
                              :has_field_values   "list"
@@ -1955,26 +1992,103 @@
                  (is (= "Not found."
                         (client/client :get 404 (dashcard-url dash card dashcard)))))))))))))
 
-(deftest public-execute-parameter-validation-test
-  (testing "the public action endpoints reject a non-scalar parameter value rather than dropping it"
-    ;; these need no auth, so the schema is the only thing standing between a request and the action
-    ;; the values reach. Decoding rejects before the handler runs, so no Action or Dashboard is needed.
-    (mt/with-temporary-setting-values [enable-public-sharing true]
-      (let [uuid (str (random-uuid))]
-        ;; public routes mask the body, so the 400 asserted by `mt/client` is the whole assertion:
-        ;; without the schema these requests reached the handler and the value was accepted
-        (testing "POST /api/public/action/:uuid/execute"
-          (is (= "An error occurred."
-                 (mt/client :post 400 (format "public/action/%s/execute" uuid)
-                            {:parameters {:id {:data "string"}}}))))
-        (testing "POST /api/public/dashboard/:uuid/dashcard/:dashcard-id/execute"
-          (is (= "An error occurred."
-                 (mt/client :post 400 (format "public/dashboard/%s/dashcard/%d/execute" uuid Integer/MAX_VALUE)
-                            {:parameters {:id {:data "string"}}}))))
-        (testing "GET /api/public/dashboard/:uuid/dashcard/:dashcard-id/execute"
-          (is (= "An error occurred."
-                 (mt/client :get 400 (format "public/dashboard/%s/dashcard/%d/execute" uuid Integer/MAX_VALUE)
-                            :parameters (json/encode {:id {:data "string"}})))))))))
+(def ^:private error-leak-sql-canary "ERROR_LEAK_SQL_CANARY")
+(def ^:private error-leak-card-name-canary "ERROR LEAK CARD NAME CANARY")
+
+(defn- date-param-native-card
+  "A healthy native Card with a date field filter, so a caller-supplied parameter value can drive it to an error without
+  the Card itself being broken."
+  [display]
+  {:name          error-leak-card-name-canary
+   :display       display
+   :dataset_query {:database (mt/id)
+                   :type     :native
+                   :native   {:query         (str "SELECT COUNT(*) AS N FROM ORDERS WHERE {{d}} -- " error-leak-sql-canary)
+                              :template-tags {"d" {:id           "d"
+                                                   :name         "d"
+                                                   :display-name "D"
+                                                   :type         :dimension
+                                                   :widget-type  :date/all-options
+                                                   :dimension    [:field (mt/id :orders :created_at) nil]}}}}
+   :parameters    [{:id     "d"
+                    :type   :date/all-options
+                    :name   "D"
+                    :slug   "d"
+                    :target [:dimension [:template-tag "d"]]}]})
+
+(def ^:private unparseable-date-param
+  "A parameter value that passes endpoint validation but blows up while the query is being built."
+  (json/encode [{:id     "d"
+                 :type   "date/all-options"
+                 :target ["dimension" ["template-tag" "d"]]
+                 :value  "NOT-A-DATE"}]))
+
+(defn- assert-generic-query-error
+  "Assert that `response` (from [[client/client-full-response]]) is the generic public-endpoint failure body and that
+  nothing about the Card leaked into it."
+  [{:keys [status body]}]
+  (let [body-str (pr-str body)]
+    (testing "the query genuinely failed"
+      (is (contains? #{400 500} status)))
+    (testing "the body is the generic failed-query shape"
+      (is (=? {:status "failed"
+               :error  string?}
+              body))
+      (is (set/subset? (set (keys body)) #{:status :error :error_type})))
+    (testing "the Card's SQL, name, and a stacktrace must not reach an unauthenticated caller"
+      (is (not (str/includes? body-str error-leak-sql-canary)))
+      (is (not (str/includes? body-str error-leak-card-name-canary)))
+      (is (not (str/includes? body-str ":trace")))
+      (is (not (str/includes? body-str ":via"))))))
+
+(deftest public-pivot-card-error-does-not-leak-query-test
+  (testing "GET /api/public/pivot/card/:uuid/query"
+    (testing "an error raised while building the pivot sub-queries must not leak the Card's query or a stacktrace"
+      (mt/dataset test-data
+        (mt/with-temporary-setting-values [enable-public-sharing true]
+          (with-temp-public-card [{uuid :public_uuid} (date-param-native-card :pivot)]
+            (let [url (format "public/pivot/card/%s/query" uuid)]
+              (testing "sanity check: the Card is healthy without the bad parameter"
+                (is (= 202 (:status (client/client-full-response :get url)))))
+              (assert-generic-query-error
+               (client/client-full-response :get url :parameters unparseable-date-param)))))))))
+
+(deftest public-card-with-pivot-display-error-does-not-leak-query-test
+  (testing "GET /api/public/card/:uuid/query"
+    (testing "a Card with :display :pivot takes the pivot path on its ordinary public link too"
+      (mt/dataset test-data
+        (mt/with-temporary-setting-values [enable-public-sharing true]
+          (with-temp-public-card [{uuid :public_uuid} (date-param-native-card :pivot)]
+            (assert-generic-query-error
+             (client/client-full-response :get (format "public/card/%s/query" uuid)
+                                          :parameters unparseable-date-param))))))))
+
+(deftest public-pivot-dashcard-error-does-not-leak-query-test
+  (testing "GET /api/public/pivot/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id"
+    (testing "an error raised before the QP runs must not leak the query of a Card that is not itself public"
+      (mt/with-temporary-setting-values [enable-public-sharing true]
+        (with-temp-public-dashboard [dash]
+          (mt/with-temp [:model/Card card {:name          error-leak-card-name-canary
+                                           :display       :pivot
+                                           :dataset_query {:database (mt/id)
+                                                           :type     :native
+                                                           :native   {:query (str "SELECT * FROM no_such_table -- "
+                                                                                  error-leak-sql-canary)}}}]
+            (let [dashcard (add-card-to-dashboard! card dash)]
+              (is (nil? (:public_uuid card)))
+              (assert-generic-query-error
+               (client/client-full-response :get (pivot-dashcard-url dash card dashcard))))))))))
+
+(deftest public-card-query-exception-outside-qp-does-not-leak-test
+  (testing "GET /api/public/card/:uuid/query"
+    (testing "an exception that escapes the QP entirely (thrown outside its error-handling middleware) is still sanitized"
+      (mt/with-temporary-setting-values [enable-public-sharing true]
+        (with-temp-public-card [{uuid :public_uuid} {:name error-leak-card-name-canary}]
+          (mt/with-dynamic-fn-redefs [qp.card/process-query-for-card-default-qp
+                                      (fn [query _rff]
+                                        (throw (ex-info (str "Boom " error-leak-sql-canary) {:query query})))]
+            (assert-generic-query-error
+             (client/client-full-response :get (format "public/card/%s/query" uuid)))))))))
 
 ;;; ------------------------- POST /api/public/dashboard/:dashboard-uuid/dashcard/:uuid/execute ------------------------------
 
@@ -2021,29 +2135,6 @@
                                        dashcard-id)
                                {:parameters {:id 1 :name "European"}})))))))))))
 
-(deftest execute-public-dashcard-refuses-http-action-test
-  (testing "POST /api/public/dashboard/:uuid/dashcard/:id/execute refuses :http actions without issuing the outbound request"
-    ;; The refusal 403 is masked to a generic 400 by `public-exceptions`, and a *thrown* tripwire would ALSO mask to
-    ;; the same 400 -- so asserting the status can't tell "refused" from "ran and blew up". Count outbound calls
-    ;; instead: the fix keeps this at zero; without it the count is 1 (the SSRF fired).
-    (mt/with-actions-test-data-and-actions-enabled
-      (mt/with-temporary-setting-values [enable-public-sharing true]
-        (with-temp-public-dashboard [dash {:parameters []}]
-          (mt/with-actions [{:keys [action-id model-id]} {:type :http}]
-            (mt/with-temp [:model/DashboardCard {dashcard-id :id} {:dashboard_id (:id dash)
-                                                                   :action_id action-id
-                                                                   :card_id model-id}]
-              (let [outbound-calls (atom 0)]
-                (with-redefs [http-action/execute-http-action! (fn [& _] (swap! outbound-calls inc) {:status 200 :body nil})]
-                  (client/client
-                   :post 400
-                   (format "public/dashboard/%s/dashcard/%s/execute"
-                           (:public_uuid dash)
-                           dashcard-id)
-                   {:parameters {:id 1}}))
-                (is (zero? @outbound-calls)
-                    "the outbound HTTP request must never be issued for a refused :http action")))))))))
-
 (deftest fetch-public-dashcard-action-test
   (mt/with-actions-test-data-and-actions-enabled
     (mt/with-temporary-setting-values [enable-public-sharing true]
@@ -2054,9 +2145,9 @@
                                                                  :card_id model-id}]
             (is (partial= {:id 1 :name "African"}
                           (client/client
-                           :get 200
-                           (format "public/dashboard/%s/dashcard/%s/execute" (:public_uuid dash) dashcard-id)
-                           :parameters (json/encode {:id 1}))))))))))
+                           :post 200
+                           (format "public/dashboard/%s/dashcard/%s/execute/values" (:public_uuid dash) dashcard-id)
+                           {:parameters {"id" 1}})))))))))
 
 ;;; --------------------------------- POST /api/public/action/:uuid/execute ----------------------------------
 
@@ -2125,24 +2216,6 @@
                                      "type"      "query"}
                             :user-id nil}
                            (last (snowplow-test/pop-event-data-and-user-id!))))))))))))))
-
-(deftest execute-public-action-refuses-http-action-test
-  (testing "POST /api/public/action/:uuid/execute refuses :http actions without issuing the outbound request"
-    ;; The refusal 403 is masked to a generic 400 by `public-exceptions`, and a *thrown* tripwire would ALSO mask to
-    ;; the same 400 -- so asserting the status can't tell "refused" from "ran and blew up". Count outbound calls
-    ;; instead: the fix keeps this at zero; without it the count is 1 (the SSRF fired).
-    (mt/with-actions-test-data-and-actions-enabled
-      (mt/with-temporary-setting-values [enable-public-sharing true]
-        (mt/with-actions [{:keys [action-id]} (merge (shared-obj) {:type :http})]
-          (let [public-uuid   (t2/select-one-fn :public_uuid :model/Action :id action-id)
-                outbound-calls (atom 0)]
-            (with-redefs [http-action/execute-http-action! (fn [& _] (swap! outbound-calls inc) {:status 200 :body nil})]
-              (client/client
-               :post 400
-               (format "public/action/%s/execute" public-uuid)
-               {:parameters {:id 1}}))
-            (is (zero? @outbound-calls)
-                "the outbound HTTP request must never be issued for a refused :http action")))))))
 
 (deftest execute-public-action-implicit-row-update-test
   (testing "POST /api/public/action/:uuid/execute works for an implicit row/update action"
@@ -2278,6 +2351,61 @@
             (is (png? (client/client :get 200 url
                                      :latField lat-field
                                      :lonField lon-field)))))))))
+
+(defn last-used-param-values
+  "The `{parameter-id value}` map that `user-kw` would see as `dashboard-id`'s last used parameter values.
+
+  `:last_used_param_values` hydrates off `api/*current-user-id*` rather than off an argument, so reading another
+  user's values means binding it. Also used by [[metabase.embedding-rest.api.embed-test]]."
+  [user-kw dashboard-id]
+  (binding [api/*current-user-id* (mt/user->id user-kw)]
+    (:last_used_param_values
+     (t2/hydrate (t2/select-one :model/Dashboard dashboard-id) :last_used_param_values))))
+
+(deftest dashcard-tile-query-does-not-save-last-used-parameters-test
+  (testing "GET api/public/tiles/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id/:zoom/:x/:y"
+    (testing "must not persist the URL's parameters as a signed-in visitor's last used parameter values"
+      (let [uuid (str (random-uuid))]
+        (mt/with-temporary-setting-values [enable-public-sharing                true
+                                           dashboards-save-last-used-parameters true]
+          (mt/with-temp [:model/Dashboard     {dashboard-id :id} {:public_uuid uuid
+                                                                  :parameters  [{:id   "_STATE_", :name "State"
+                                                                                 :slug "state",   :type "string/="}]}
+                         :model/Card          {card-id :id}      {:dataset_query (venues-query)}
+                         :model/DashboardCard {dashcard-id :id}  {:card_id            card-id
+                                                                  :dashboard_id       dashboard-id
+                                                                  :parameter_mappings [{:parameter_id "_STATE_"
+                                                                                        :card_id      card-id
+                                                                                        :target       [:dimension [:field (mt/id :people :state) nil]]}]}]
+            (let [url (str "public/tiles/dashboard/" uuid "/dashcard/" dashcard-id "/card/" card-id "/1/1/1")]
+              (is (png? (mt/user-http-request :rasta :get 200 url
+                                              :latField   (tiles.api-test/encoded-lat-field-ref)
+                                              :lonField   (tiles.api-test/encoded-lon-field-ref)
+                                              :parameters (json/encode [{:id "_STATE_", :value ["CA"]}]))))
+              (is (= {}
+                     (last-used-param-values :rasta dashboard-id))))))))))
+
+(deftest dashcard-tile-query-archived-card-test
+  (testing "GET api/public/tiles/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id/:zoom/:x/:y"
+    (testing "must not render an archived Card, matching its non-tiles siblings (SEC-1143)"
+      (let [uuid (str (random-uuid))]
+        (mt/with-temporary-setting-values [enable-public-sharing true]
+          (mt/with-temp [:model/Dashboard     {dashboard-id :id} {:public_uuid uuid}
+                         :model/Card          {card-id :id}      {:dataset_query (venues-query)}
+                         :model/DashboardCard {dashcard-id :id}  {:card_id      card-id
+                                                                  :dashboard_id dashboard-id}]
+            ;; assert on the status alone: the success body is a PNG, and letting it reach the test report
+            ;; renders the whole run's output binary.
+            (let [url         (str "public/tiles/dashboard/" uuid "/dashcard/" dashcard-id "/card/" card-id "/1/1/1")
+                  tile-status #(:status (client/client-full-response
+                                         :get url
+                                         :latField (tiles.api-test/encoded-lat-field-ref)
+                                         :lonField (tiles.api-test/encoded-lon-field-ref)))]
+              (testing "sanity: the tile renders while the Card is live"
+                (is (= 200 (tile-status))))
+              (t2/update! :model/Card card-id {:archived true})
+              (testing "and 404s once it is archived"
+                (is (= 404 (tile-status)))))))))))
 
 (deftest card-tile-query-implicit-join-ref-test
   (testing "GET api/public/tiles/card/:uuid/:zoom/:x/:y returns a 400 when the lat/lon refs use an implicit join"

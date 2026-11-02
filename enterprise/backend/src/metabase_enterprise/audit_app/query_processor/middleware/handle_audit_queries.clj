@@ -57,7 +57,7 @@
   "Primarily for dev and debugging purposes. We can probably take this out when shipping the finished product."
   [results metadata]
   (let [results-keys  (set (keys (first results)))
-        metadata-keys (set (map (comp keyword first) metadata))]
+        metadata-keys (set (map (comp name first) metadata))]
     (when (and (seq results-keys)
                (not= results-keys metadata-keys))
       (let [[only-in-results only-in-metadata] (data/diff results-keys metadata-keys)]
@@ -71,54 +71,54 @@
 
 (defn- metadata->cols [metadata]
   (for [[k v] metadata]
-    (assoc v :name (name k))))
+    (cond-> (assoc v :name (name k))
+      (:remapped_to v)   (update :remapped_to name)
+      (:remapped_from v) (update :remapped_from name))))
 
-(mu/defn- format-results [{:keys [results metadata]} :- [:map
-                                                         [:results  [:sequential :map]]
+(mu/defn- format-results [{:keys [results metadata]} :- [:map {:closed true}
+                                                         [:results  [:sequential [:map-of :string ms/FieldValue]]]
                                                          [:metadata audit.i/ResultsMetadata]]]
   (check-results-and-metadata-keys-match results metadata)
   {:cols (metadata->cols metadata)
    :rows (for [row results]
            (for [[k] metadata]
-             (get row (keyword k))))})
+             (get row (name k))))})
 
 (def InternalQuery
-  "Schema for a valid `internal` type query, dispatched on `:fn`: one branch per internal query there is, each
-  declaring the shape of its own `:args`. A `:fn` with no branch fails the dispatch and is rejected.
-
-  Declaring the surface this way is what keeps an arbitrary namespace-qualified string from reaching
-  `classloader/require`, and types the `:args` that used to arrive as `:any`s on their way to the implementation."
+  "Schema for a valid `internal` type query."
   (into [:multi {:dispatch :fn}]
         (cond-> [["metabase-enterprise.audit-app.pages.queries/bad-table"
-                  [:map
+                  [:map {:closed true}
+                   [:fn     [:= "metabase-enterprise.audit-app.pages.queries/bad-table"]]
                    [:type   [:enum :internal "internal"]]
-                   ;; the page has a no-arg arity as well as the five-arg one, and a caller sends a JSON array
-                   ;; either way
                    [:args   {:optional true}
                     [:maybe [:or
                              [:= []]
                              [:tuple
-                              [:maybe :string]   ; error-filter
-                              [:maybe :string]   ; db-filter
-                              [:maybe :string]   ; collection-filter
-                              ;; sort-column: the page's own result-metadata names, which is what the FE sorts by
+                              [:maybe :string]
                               [:maybe [:enum "card_id" "card_name" "error_substr" "collection_id" "collection_name"
                                        "database_id" "database_name" "schema_name" "table_id" "table_name"
                                        "last_run_at" "total_runs" "num_dashboards" "user_id" "user_name"
                                        "updated_at"]]
                               [:maybe [:enum "asc" "desc"]]]]]]
-                   [:limit  {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
-                   [:offset {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]]]]
+                   [:limit      {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
+                   [:offset     {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
+                   [:info       {:optional true} [:maybe :metabase.lib.schema.info/info]]
+                   [:middleware {:optional true} [:maybe :metabase.lib.schema.middleware-options/middleware-options]]
+                   [:viz-settings {:optional true} [:maybe ms/VisualizationSettings]]]]]
           config/is-test?
           (conj [::mc/default
-                 [:map
-                  [:type   [:enum :internal "internal"]]
-                  [:args   {:optional true} [:maybe [:sequential :any]]]
-                  [:limit  {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
-                  [:offset {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]]]))))
+                 [:map {:closed true}
+                  [:fn         :string]
+                  [:type       [:enum :internal "internal"]]
+                  [:args       {:optional true} [:maybe [:sequential [:maybe [:or :string number? :boolean]]]]]
+                  [:limit      {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
+                  [:offset     {:optional true} [:maybe ms/IntGreaterThanOrEqualToZero]]
+                  [:info       {:optional true} [:maybe :metabase.lib.schema.info/info]]
+                  [:middleware {:optional true} [:maybe :metabase.lib.schema.middleware-options/middleware-options]]
+                  [:viz-settings {:optional true} [:maybe ms/VisualizationSettings]]]]))))
 
 (defn- validate-internal-query
-  "Throw unless `query` is one of the `internal` queries [[InternalQuery]] declares."
   [query]
   (when-not (mr/validate InternalQuery query)
     (throw (ex-info (tru "Invalid internal query.")
@@ -141,7 +141,8 @@
     (qp.pipeline/*reduce* rff* {:cols cols} reducible-rows)))
 
 (defn- reduce-legacy-results [rff results]
-  (let [{:keys [cols rows]} (format-results results)]
+  (let [results (update results :results (partial map #(update-keys % name)))
+        {:keys [cols rows]} (format-results results)]
     (assert (some? cols))
     (assert (some? rows))
     (qp.pipeline/*reduce* rff {:cols cols} rows)))
@@ -152,9 +153,8 @@
      reduce-legacy-results) rff results))
 
 (mu/defn- process-internal-query
-  [{qualified-fn-str :fn, args :args, :as query}
+  [{qualified-fn-str :fn, args :args, :as query} :- InternalQuery
    rff :- ::qp.schema/rff]
-  ;; Make sure the query is one we declare before any part of it is used
   (validate-internal-query query)
   ;; Make sure current user is a superuser or has monitoring permissions
   (perms/check-has-application-permission :monitoring)

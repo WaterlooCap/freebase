@@ -1,14 +1,15 @@
 import { useEffect, useMemo } from "react";
-import { Link } from "react-router";
 import { t } from "ttag";
 
-import { SettingsSection } from "metabase/admin/components/SettingsSection";
 import { useListPermissionsGroupsQuery, useListUsersQuery } from "metabase/api";
+import { Link } from "metabase/common/components/Link";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
-import { useSetting } from "metabase/common/hooks";
+import { getUser, getUserIsAdmin } from "metabase/current-user";
 import { PLUGIN_TENANTS } from "metabase/plugins";
 import { useSelector } from "metabase/redux";
-import { getUser, getUserIsAdmin } from "metabase/selectors/user";
+import { Outlet } from "metabase/router";
+import { useSetting } from "metabase/settings";
+import { SettingsSection } from "metabase/settings-components";
 import { Box, Button, Flex, Group, Tabs, Title } from "metabase/ui";
 import * as Urls from "metabase/urls";
 
@@ -22,7 +23,7 @@ const PAGE_SIZE = 25;
 const DEFAULT_NO_RESULTS_MESSAGE = () => t`No results found`;
 
 export function PeopleListingApp({
-  children,
+  children = <Outlet />,
   external = false,
   showInviteButton = true,
   noResultsMessage = DEFAULT_NO_RESULTS_MESSAGE(),
@@ -74,9 +75,9 @@ export function PeopleListingApp({
         : t`Invite someone`
       : undefined;
 
-  const handleTabChange = (tab: string | null) => {
+  const handleTabChange = (tab: ActiveStatus | null) => {
     if (tab) {
-      updateStatus(tab as ActiveStatus);
+      updateStatus(tab);
     }
   };
 
@@ -99,7 +100,7 @@ export function PeopleListingApp({
 
   return (
     <div>
-      <Group justify="space-between" w="100%" mb="lg">
+      <Group justify="space-between" w="100%" mb="xl">
         <Title order={1}>{pageTitle}</Title>
 
         {!external && (
@@ -111,7 +112,7 @@ export function PeopleListingApp({
         <Tabs
           value={status}
           onChange={handleTabChange}
-          pl="md"
+          pl="lg"
           listBorder={false}
         >
           <Tabs.List>
@@ -129,7 +130,7 @@ export function PeopleListingApp({
           loading={isLoading || !currentUser}
         >
           <div data-testid="admin-panel">
-            <Group w="100%" justify="space-between" mb="lg" gap="md">
+            <Group w="100%" justify="space-between" mb="xl" gap="lg">
               <Flex flex="1">
                 <SearchFilter
                   value={searchInputValue}

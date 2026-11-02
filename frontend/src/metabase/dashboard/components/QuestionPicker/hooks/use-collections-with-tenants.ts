@@ -3,19 +3,17 @@ import { t } from "ttag";
 
 import { skipToken, useListCollectionsTreeQuery } from "metabase/api";
 import getExpandedCollectionsById from "metabase/common/collections/getExpandedCollectionsById";
-import { useSetting } from "metabase/common/hooks/use-setting";
-import { PLUGIN_TENANTS } from "metabase/plugins";
-import { useSelector } from "metabase/redux";
 import {
   getIsTenantUser,
   getUserPersonalCollectionId,
-} from "metabase/selectors/user";
-import type { Collection, CollectionId } from "metabase-types/api";
+} from "metabase/current-user";
+import { PLUGIN_TENANTS } from "metabase/plugins";
+import { useSelector } from "metabase/redux";
+import type { ExpandedCollection } from "metabase/redux/store";
+import { useSetting } from "metabase/settings";
+import type { CollectionId } from "metabase-types/api";
 
-import {
-  type ExpandedCollection,
-  flattenCollectionTree,
-} from "../utils/tenant-collection-tree";
+import { flattenCollectionTree } from "../utils/tenant-collection-tree";
 import {
   mergeTenantCollections,
   mergeTenantUserCollections,
@@ -36,9 +34,9 @@ import {
  *       └── Tenant collection B
  */
 export function useCollectionsWithTenants(
-  collectionsById: Record<CollectionId, Collection>,
+  collectionsById: Record<CollectionId, ExpandedCollection>,
   canReadRootCollection: boolean,
-): Record<CollectionId, Collection> {
+): Record<CollectionId, ExpandedCollection> {
   const useTenants = useSetting("use-tenants");
   const userPersonalCollectionId = useSelector(getUserPersonalCollectionId);
   const isTenantUser = useSelector(getIsTenantUser);
@@ -81,23 +79,18 @@ export function useCollectionsWithTenants(
       return collectionsById;
     }
 
-    const baseCollectionsById = collectionsById as Record<
-      CollectionId,
-      ExpandedCollection
-    >;
-
     const sharedCollectionsById = sharedTenantCollections?.length
-      ? (getExpandedCollectionsById(
+      ? getExpandedCollectionsById(
           flattenCollectionTree(sharedTenantCollections),
           userPersonalCollectionId,
-        ) as Record<CollectionId, ExpandedCollection>)
+        )
       : {};
 
     const tenantSpecificCollectionsById = tenantSpecificCollections?.length
-      ? (getExpandedCollectionsById(
+      ? getExpandedCollectionsById(
           flattenCollectionTree(tenantSpecificCollections),
           userPersonalCollectionId,
-        ) as Record<CollectionId, ExpandedCollection>)
+        )
       : {};
 
     if (
@@ -112,22 +105,20 @@ export function useCollectionsWithTenants(
         PLUGIN_TENANTS.SHARED_TENANT_NAMESPACE,
       ) ?? t`Shared collections`;
 
-    const tenantCollections = isTenantUser
+    return isTenantUser
       ? mergeTenantUserCollections({
-          baseCollectionsById,
+          baseCollectionsById: collectionsById,
           sharedCollectionsById,
           tenantSpecificCollectionsById,
           canReadRootCollection,
         })
       : mergeTenantCollections({
-          baseCollectionsById,
+          baseCollectionsById: collectionsById,
           sharedCollectionsById,
           tenantSpecificCollectionsById,
           sharedCollectionsName: displayName,
           tenantCollectionNamesById,
         });
-
-    return tenantCollections as unknown as Record<CollectionId, Collection>;
   }, [
     isTenantsActive,
     sharedTenantCollections,

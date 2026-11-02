@@ -72,7 +72,7 @@ function ErrorList({ title, items, "aria-label": ariaLabel }: ErrorListProps) {
   return (
     <Stack role="region" aria-label={ariaLabel}>
       <Group gap="sm" wrap="nowrap">
-        <Badge variant="filled" bg="feedback-negative">
+        <Badge color="negative" size="sm">
           {items.length}
         </Badge>
         <Title order={5}>{title}</Title>
@@ -103,7 +103,7 @@ function ErrorListItem({ item }: ErrorListItemProps) {
     <Tooltip opened={clipboard.copied} label={t`Copied!`}>
       <Group
         className={cx(S.item, CS.hoverParent, CS.hoverVisibility)}
-        p="md"
+        p="lg"
         justify="space-between"
         wrap="nowrap"
         onClick={handleClick}

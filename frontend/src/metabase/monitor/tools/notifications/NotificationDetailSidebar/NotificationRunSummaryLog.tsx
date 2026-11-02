@@ -1,7 +1,7 @@
-import dayjs from "dayjs";
-import { Link } from "react-router";
 import { t } from "ttag";
 
+import { Link } from "metabase/common/components/Link";
+import { dayjs } from "metabase/dayjs";
 import { Anchor, Badge, Flex, Loader, Text, Tooltip } from "metabase/ui";
 import * as Urls from "metabase/urls";
 
@@ -19,7 +19,7 @@ export const NotificationRunSummaryLog = ({
   cardId,
   onViewAllClick,
 }: NotificationRunSummaryLogProps) => {
-  const viewAllUrl = Urls.adminToolsTasksRunsFor({
+  const viewAllUrl = Urls.monitorTasksRunsFor({
     runType: "alert",
     entityType: "card",
     entityId: cardId,
@@ -30,7 +30,7 @@ export const NotificationRunSummaryLog = ({
   const renderRuns = () => {
     if (isLoading) {
       return (
-        <Flex align="center" justify="center" py="lg">
+        <Flex align="center" justify="center" py="xl">
           <Loader size="sm" data-testid="run-summary-loader" />
         </Flex>
       );
@@ -53,7 +53,7 @@ export const NotificationRunSummaryLog = ({
           key={index}
           align="center"
           justify="space-between"
-          px="md"
+          px="lg"
           py="sm"
           gap="sm"
         >
@@ -63,20 +63,7 @@ export const NotificationRunSummaryLog = ({
             </Text>
           </Tooltip>
           <Tooltip label={run.error} disabled={!hasError}>
-            <Badge
-              color={isFailing ? "feedback-negative" : undefined}
-              variant={isFailing ? "light" : "outline"}
-              radius="lg"
-              tt="none"
-              fw="normal"
-              c={isFailing ? undefined : "text-secondary"}
-              bd={
-                isFailing
-                  ? undefined
-                  : "1px solid var(--mb-color-border-neutral)"
-              }
-              style={hasError ? { cursor: "pointer" } : undefined}
-            >
+            <Badge color={isFailing ? "negative" : "positive"} variant="light">
               {isFailing ? t`Failed` : t`Successful`}
             </Badge>
           </Tooltip>

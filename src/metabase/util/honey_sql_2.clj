@@ -9,6 +9,7 @@
    [honey.sql.protocols :as sql.protocols]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [potemkin.types :as p.types])
   (:import
@@ -126,13 +127,6 @@
 (sql/register-fn! ::percentile-cont #'format-percentile-cont)
 
 (defn- format-collate
-  "Force a specific collation on `expr` -- e.g. a case-insensitive `COLLATE` for a `LIKE` against a case-sensitive
-  MySQL/MariaDB column.
-
-    (sql/format-expr [::collate [:like :name \"x%\"] \"utf8mb4_unicode_ci\"])
-    => [\"name LIKE ? COLLATE utf8mb4_unicode_ci\" \"x%\"]
-
-  `collation` must be a bare collation identifier; it is interpolated into the SQL, so it is held to word characters."
   [_fn [expr collation]]
   (when-not (re-matches #"\w+" (name collation))
     (throw (ex-info (str "Invalid collation: " (pr-str collation)) {:collation collation})))
@@ -156,8 +150,21 @@
    :table-alias ; is `t`
    :field       ; is `my_field`
    :field-alias ; is `f`
-   ;; for [[cast]]
+   ;; for [[quoted-cast]]
    :type-name])
+
+(mr/def ::expr
+  "A Honey SQL 2 expression: a literal value, a column/table identifier keyword, or a vector-form SQL clause
+  (recursively, e.g. a function call, cast, or tagged form like [[identifier]] or a `TypedHoneySQLForm`)."
+  [:or
+   :keyword
+   :string
+   number?
+   :boolean
+   nil?
+   ms/TemporalInstant
+   [:fn {:error/message "::h2x/typed Honey SQL form"} (fn [x] (and (vector? x) (= (first x) ::typed)))]
+   [:sequential [:ref ::expr]]])
 
 (defn identifier?
   "Whether `x` is a valid `::identifier`."
@@ -171,8 +178,6 @@
    [:= ::identifier]
    IdentifierType
    [:sequential {:min 1} :string]])
-
-; dirt
 
 (defn- format-identifier [_tag [_identifier-type components :as _args]]
   ;; don't error if the identifier has something 'suspicious' like a semicolon in it -- it's ok because we're quoting
@@ -215,12 +220,6 @@
 ;;; Single-quoted string literal
 
 (defn- escape-and-quote-literal [s]
-  ;; double EVERY single quote, unconditionally -- SQL string-literal escaping is not
-  ;; context-sensitive on neighboring characters. An earlier version of this only doubled a `'` that
-  ;; wasn't already preceded/followed by `\` or `'`, on the theory that those were "already escaped"
-  ;; -- but a `\` before a quote is a plain backslash CHARACTER on any standard-conforming-strings
-  ;; database (Oracle, Vertica, Postgres, Trino), not an escape sequence, so `\'` in the input is a
-  ;; genuine, unescaped string terminator, not something to skip over.
   (as-> s s
     (str/replace s "'" "''")
     (str \' s \')))
@@ -239,7 +238,7 @@
   this won't handle wacky cases like three single quotes in a row.
 
   DON'T USE `LITERAL` FOR THINGS THAT MIGHT BE WACKY (USER INPUT). Only use it for things that are hardcoded."
-  [s]
+  [s :- [:or :string :keyword]]
   [::literal (u/qualified-name s)])
 
 (defn- format-at-time-zone [_tag [expr zone]]
@@ -287,16 +286,23 @@
       (fn [s]
         (= s (u/lower-case-en s)))]]]])
 
+(def ^:private TypeInfo
+  "Type info for a `TypedHoneySQLForm` before [[normalize-type-info]], open to the namespaced keys drivers own (e.g. `:metabase.driver.postgres/target-timezone`)."
+  [:map {:closed false, ::mr/deliberately-open true}
+   [:database-type  {:optional true} [:maybe ms/KeywordOrString]]
+   [:base-type      {:optional true} [:maybe :keyword]]
+   [:effective-type {:optional true} [:maybe :keyword]]])
+
 (mu/defn- normalize-type-info :- NormalizedTypeInfo
   "Normalize the values in the `type-info` for a `TypedHoneySQLForm` for easy comparisons (e.g., normalize
   `:database-type` to a lower-case string)."
-  [type-info]
+  [type-info :- [:maybe TypeInfo]]
   (cond-> type-info
     (:database-type type-info)
     (update :database-type (comp u/lower-case-en name))))
 
 (defn typed?
-  "True if `x` is a `TypedHoneySQL` form, i.e. `[::typed <expr> <type-info>]`."
+  "Whether `x` is a typed Honey SQL form, i.e. a `[::typed <expr> <type-info>]` vector."
   [x]
   (and (vector? x)
        (= (first x) ::typed)))
@@ -386,7 +392,8 @@
     (with-database-type-info :field \"text\")
     ;; -> [::typed :field \"text\"]"
   {:style/indent [:form]}
-  [honeysql-form db-type :- [:maybe ms/KeywordOrString]]
+  [honeysql-form :- ::honeysql-expr
+   db-type       :- [:maybe ms/KeywordOrString]]
   (if (some? db-type)
     (with-type-info honeysql-form {:database-type db-type})
     (unwrap-typed-honeysql-form honeysql-form)))
@@ -394,15 +401,25 @@
 (def ^:private TypedExpression
   [:fn {:error/message "::h2x/typed Honey SQL form"} typed?])
 
-(def ^:private raw-cast-type-name-re
-  "Shape of an SQL type name that [[cast]] emits as a raw, unquoted CAST target: word characters and
-  spaces (`timestamp with time zone`, `TIMESTAMP_NTZ`), optionally a trailing precision like `(2)` or `(10, 2)`
-  (`datetime(2)`).
+(mr/def ::honeysql-clause-opts
+  "A map inside a Honey SQL 2 clause (a window spec, a subquery, ...), whose keys the Honey SQL library and the clauses drivers register own."
+  [:map {:closed false, ::mr/deliberately-open true}])
 
-  The shape is what makes raw emission safe: the alphabet contains no quote, semicolon, dash, or slash, so a matching
-  name cannot open a string, start a comment, or terminate the `CAST(` and continue with attacker SQL -- the only `)`
-  allowed is the one closing its own `(`. A hostile name matching this shape yields at worst invalid SQL
-  (`Unsupported data type`), never injection."
+(mr/def ::honeysql-expr
+  "A Honey SQL 2 expression: a literal value, a column/identifier keyword, a `TypedHoneySQLForm` wrapping another
+  expression, or a clause vector whose args are themselves Honey SQL expressions (or a clause options map, e.g.
+  `:over`'s window spec)."
+  [:or
+   :string
+   :keyword
+   number?
+   :boolean
+   nil?
+   ms/TemporalInstant
+   [:fn {:error/message "::h2x/typed Honey SQL form"} typed?]
+   [:sequential [:or [:ref ::honeysql-expr] ::honeysql-clause-opts]]])
+
+(def ^:private raw-cast-type-name-re
   #"(?i)[a-z][a-z0-9_ ]*(?:\(\d+(?:, ?\d+)?\))?")
 
 (defn raw-type-name?
@@ -414,25 +431,18 @@
   (boolean (re-matches raw-cast-type-name-re (name sql-type))))
 
 (mu/defn cast :- TypedExpression
-  "Generate a statement like `cast(expr AS sql-type)`. Returns a typed HoneySQL form.
-
-  A `sql-type` matching [[raw-cast-type-name-re]] -- a sane bare type-name token -- is emitted raw, because most
-  dialects only accept a bare type-name there and reject a quoted one (Snowflake fails `CAST(x AS \"date\")` with
-  `Unsupported data type 'date'`). Anything else -- e.g. a `database_type` copied verbatim from an untrusted warehouse
-  schema, which can name arbitrary user-defined types -- is quoted as an identifier, so it cannot be spliced into the
-  query as SQL."
-  [sql-type expr]
+  "Generate a statement like `cast(expr AS sql-type)`. Returns a typed HoneySQL form."
+  [sql-type :- ms/KeywordOrString
+   expr     :- ::honeysql-expr]
   (-> (if (raw-type-name? sql-type)
         [:cast expr ^:allow-raw-sql [:raw (name sql-type)]]
         [:cast expr (identifier :type-name (name sql-type))])
       (with-database-type-info sql-type)))
 
 (mu/defn maybe-cast :- TypedExpression
-  "Cast `expr` to `sql-type`, unless `expr` is typed and already of that type. Returns a typed HoneySQL form.
-
-  `sql-type` need not be a sane type name -- [[cast]] quotes anything that isn't a bare type-name token -- so this is
-  also safe for an `sql-type` copied verbatim from a warehouse `database_type`."
-  [sql-type expr]
+  "Cast `expr` to `sql-type`, unless `expr` is typed and already of that type. Returns a typed HoneySQL form."
+  [sql-type :- [:maybe ms/KeywordOrString]
+   expr     :- ::honeysql-expr]
   (if (or (nil? sql-type)
           (is-of-type? expr sql-type))
     expr
@@ -577,15 +587,9 @@
           (with-type-info (type-info hsql-form))))))
 
 (def ^:private mysql-interval-units
-  "Allow-list of the temporal-interval units MySQL's `INTERVAL` accepts."
   #{:second :minute :hour :day :week :month :quarter :year})
 
 (defn- format-mysql-interval
-  "Generate a MySQL `INTERVAL` literal.
-
-    (sql/format-expr [::mysql-interval 2 :day])
-    =>
-    [\"INTERVAL 2 day\"]"
   [_fn [amount unit]]
   (when-not (number? amount)
     (throw (ex-info "Invalid interval amount" {:amount amount})))
@@ -664,10 +668,6 @@
   ;; Postgres timestamp subtraction returns an interval that orders correctly.
   [:- end-form start-form])
 
-(defmethod calculate-interval-honeysql-form :postgres-mbql5
-  [db-type end-form start-form]
-  ((get-method calculate-interval-honeysql-form :postgres) db-type end-form start-form))
-
 (defmethod calculate-interval-honeysql-form :mysql
   [_db-type end-form start-form]
   [:timestampdiff ^:allow-raw-sql [:raw "MICROSECOND"] start-form end-form])
@@ -675,10 +675,6 @@
 (defmethod calculate-interval-honeysql-form :h2
   [_db-type end-form start-form]
   [:datediff (literal "MILLISECOND") start-form end-form])
-
-(defmethod calculate-interval-honeysql-form :h2-mbql5
-  [db-type end-form start-form]
-  ((get-method calculate-interval-honeysql-form :h2) db-type end-form start-form))
 
 (defmethod calculate-interval-honeysql-form :default
   [db-type end-form start-form]

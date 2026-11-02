@@ -12,13 +12,15 @@
    [metabase.driver.util :as driver.u]
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.settings.core :as setting]
+   [metabase.startup.core :as startup]
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
    [metabase.util :as u]
    [metabase.util.snake-hating-map :as snake-hating-map])
   (:import
-   (java.sql SQLException)
    (javax.net.ssl SSLSocketFactory)))
 
 (comment h2/keep-me)
@@ -100,14 +102,14 @@
                                       :required    false}
                                      {:name "ssl"}
                                      {:name "use-keystore"
-                                      :visible-if  {:ssl true}}
+                                      :visible-if  {"ssl" true}}
                                      {:name         "keystore-password-value"
                                       :display-name "Keystore Password",
                                       :type         "password",
                                       :required     false,
-                                      :visible-if   {:use-keystore true
+                                      :visible-if   {"use-keystore" true
                                                      ;; this should have been filled in as a transitive dependency
-                                                     :ssl          true}}
+                                                     "ssl"          true}}
                                      {:name         "keystore-options"
                                       :display-name "Keystore"
                                       :options      [{:name  "Local file path"
@@ -116,17 +118,17 @@
                                                       :value "uploaded"}]
                                       :type         "select"
                                       :default      "local"
-                                      :visible-if   {:use-keystore true
-                                                     :ssl          true}}
+                                      :visible-if   {"use-keystore" true
+                                                     "ssl"          true}}
                                      {:name                 "keystore-value"
                                       :type                 "textFile"
                                       :treat-before-posting "base64"
-                                      :visible-if           {:keystore-options "uploaded"}}
+                                      :visible-if           {"keystore-options" "uploaded"}}
                                      {:name        "keystore-path"
                                       :type        "string"
-                                      :visible-if  {:keystore-options "local"
-                                                    :use-keystore true
-                                                    :ssl          true}}]
+                                      :visible-if  {"keystore-options" "local"
+                                                    "use-keystore" true
+                                                    "ssl"          true}}]
                                     false]
                                    [[{:name "host"}
                                      {:name        "password-value"
@@ -135,16 +137,16 @@
                                       :required    false}
                                      {:name "ssl"}
                                      {:name "use-keystore"
-                                      :visible-if  {:ssl true}}
+                                      :visible-if  {"ssl" true}}
                                      {:name         "keystore-password-value"
                                       :display-name "Keystore Password"
                                       :type         "password"
                                       :required     false
-                                      :visible-if   {:use-keystore true}}
+                                      :visible-if   {"use-keystore" true}}
                                      {:name                 "keystore-value"
                                       :type                 "textFile"
                                       :treat-before-posting "base64"
-                                      :visible-if           {:use-keystore true}}]
+                                      :visible-if           {"use-keystore" true}}]
                                     true]]]
       (testing (str " with is-hosted? " is-hosted?)
         (mt/with-premium-features (if is-hosted? #{:hosting} #{})
@@ -181,6 +183,29 @@
                 nil
                 [{:name "test", :type :info}])))))))
 
+(deftest connection-props-server->client-hidden-when-hosted-test
+  (let [prop   {:name    "auth-mode"
+                :type    "select"
+                :options [{:name "Local"   :value "local"}
+                          {:name "Ambient" :value "ambient" :hidden-when-hosted true}]}
+        strip  #(-> (driver.u/connection-props-server->client nil [prop]) first :options (->> (mapv :value)))]
+    (testing "On Metabase Cloud, options tagged :hidden-when-hosted are stripped from the client payload."
+      (mt/with-premium-features #{:hosting}
+        (is (= ["local"] (strip)))))
+    (testing "Off Metabase Cloud, every option passes through unchanged."
+      (mt/with-premium-features #{}
+        (is (= ["local" "ambient"] (strip))))))
+  (testing "Group fields recurse: a tagged option inside a nested :group field is stripped on hosted."
+    (let [prop  {:type   :group
+                 :fields [{:name    "nested"
+                           :type    "select"
+                           :options [{:name "ok"    :value "ok"}
+                                     {:name "nope"  :value "nope" :hidden-when-hosted true}]}]}]
+      (mt/with-premium-features #{:hosting}
+        (is (= ["ok"]
+               (-> (driver.u/connection-props-server->client nil [prop])
+                   first :fields first :options (->> (mapv :value)))))))))
+
 (deftest ^:parallel connection-props-server->client-schema-filters-test
   (testing "connection-props-server->client works as expected for the schema-filters type"
     (is (= [{:name "first-prop"}
@@ -196,14 +221,14 @@
              :description "Comma separated names of schemas that should appear in Metabase"
              :helper-text "You can use patterns like \"auth*\" to match multiple schemas"
              :type        "text"
-             :visible-if  {:my-schema-filters-type "inclusion"}
+             :visible-if  {"my-schema-filters-type" "inclusion"}
              :required    true}
             {:name        "my-schema-filters-patterns"
              :placeholder "E.x. public,auth*"
              :description "Comma separated names of schemas that should NOT appear in Metabase"
              :helper-text "You can use patterns like \"auth*\" to match multiple schemas"
              :type        "text"
-             :visible-if  {:my-schema-filters-type "exclusion"}
+             :visible-if  {"my-schema-filters-type" "exclusion"}
              :required    true}
             {:name "last-prop"}]
            (driver.u/connection-props-server->client
@@ -630,53 +655,6 @@
           (is (= "Group info message" (:placeholder group-info)))
           (is (nil? (:getter group-info)) "Getter should be removed"))))))
 
-;;; ---------------------------------------- scrub-exceptions -------------------------------------------------
-
-(deftest ^:parallel scrub-exceptions-test
-  (testing "plain Exception: secret is redacted from message"
-    (let [e (driver.u/scrub-exceptions (Exception. "PASSWORD='s3cret'") ["s3cret"])]
-      (is (= "PASSWORD='****'" (ex-message e)))))
-  (testing "secret not present: message unchanged"
-    (let [e (driver.u/scrub-exceptions (Exception. "no secret here") ["s3cret"])]
-      (is (= "no secret here" (ex-message e)))))
-  (testing "cause chain is scrubbed"
-    (let [e (driver.u/scrub-exceptions
-             (Exception. "outer pw=s3cret" (Exception. "inner pw=s3cret"))
-             ["s3cret"])]
-      (is (= "outer pw=****" (ex-message e)))
-      (is (= "inner pw=****" (ex-message (.getCause ^Exception e))))))
-  (testing "ExceptionInfo: ex-data is preserved, message is scrubbed"
-    (let [e (driver.u/scrub-exceptions (ex-info "pw=s3cret" {:code 42}) ["s3cret"])]
-      (is (= "pw=****" (ex-message e)))
-      (is (= {:code 42} (ex-data e)))))
-  (testing "SQLException: SQLState and errorCode are preserved"
-    (let [e (driver.u/scrub-exceptions (SQLException. "pw=s3cret" "42501" 7) ["s3cret"])]
-      (is (= "pw=****" (ex-message e)))
-      (is (= "42501" (.getSQLState ^SQLException e)))
-      (is (= 7 (.getErrorCode ^SQLException e)))))
-  (testing "SQLException next-exception chain is scrubbed"
-    (let [next-ex (SQLException. "next pw=s3cret" "42501" 7)
-          main    (doto (SQLException. "main pw=s3cret" "42000" 1)
-                    (.setNextException next-ex))
-          e       (driver.u/scrub-exceptions main ["s3cret"])]
-      (is (= "main pw=****" (ex-message e)))
-      (is (= "next pw=****" (ex-message (.getNextException ^SQLException e))))
-      (is (= "42501" (.getSQLState (.getNextException ^SQLException e))))))
-  (testing "multiple secrets are all redacted"
-    (let [e (driver.u/scrub-exceptions
-             (Exception. "user=admin password=s3cret escaped=s3cr\\et")
-             ["s3cret" "s3cr\\et"])]
-      (is (= "user=admin password=**** escaped=****" (ex-message e)))))
-  (testing "password with backslash sequences is treated literally, not as regex"
-    (let [pw "p\\nass\\r\\twor$d"
-          e  (driver.u/scrub-exceptions (Exception. (str "CREATE USER x PASSWORD='" pw "'")) [pw])]
-      (is (= "CREATE USER x PASSWORD='****'" (ex-message e)))))
-  (testing "stack trace is preserved"
-    (let [original (Exception. "pw=s3cret")
-          trace    (.getStackTrace original)
-          e        (driver.u/scrub-exceptions original ["s3cret"])]
-      (is (= (seq trace) (seq (.getStackTrace ^Exception e)))))))
-
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                            SSRF: blocking connections to private network addresses                             |
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -972,8 +950,111 @@
       (is (= :external-only (driver.settings/warehouse-allowed-networks)))
       (is (=? {:status-code 400}
               (ssrf-error #(driver.u/validate-connection-hosts! :postgres {:host "127.0.0.1"}))))))
-  (testing "an unrecognized policy fails closed at the point of use rather than quietly allowing everything"
+  (testing "an unrecognized policy is refused outright rather than silently leaving the instance on some other
+           policy -- startup reads this Setting, so the instance does not come up at all"
     (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "unknown-policy"]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Unknown network policy"
-                            (driver.u/validate-connection-hosts! :postgres {:host "127.0.0.1"}))))))
+                            #"Invalid MB_WAREHOUSE_ALLOWED_NETWORKS"
+                            (driver.settings/warehouse-allowed-networks))))))
+
+(deftest warehouse-allowed-networks-is-environment-only-test
+  (testing "the policy is read from the environment only: a value that reached the setting table -- an older
+           version's admin API, a serialization import, a direct write -- is ignored, not trusted"
+    (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks nil]
+      (mt/with-premium-features #{:hosting}
+        (mt/with-temporary-raw-setting-values [warehouse-allowed-networks "allow-all"]
+          (is (= :external-only (driver.settings/warehouse-allowed-networks)))
+          (is (=? {:status-code 400}
+                  (ssrf-error #(driver.u/validate-connection-hosts! :postgres {:host "127.0.0.1"}))))))))
+  (testing "and the environment still wins over a stored value"
+    (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "allow-private"]
+      (mt/with-temporary-raw-setting-values [warehouse-allowed-networks "external-only"]
+        (is (= :allow-private (driver.settings/warehouse-allowed-networks))))))
+  (testing "nothing can write it: it is a read-only Setting"
+    (is (thrown-with-msg? UnsupportedOperationException
+                          #"read-only setting"
+                          (setting/set! :warehouse-allowed-networks :allow-all)))))
+
+(deftest warehouse-allowed-networks-startup-validation-test
+  (testing "a policy the environment names but Metabase does not recognize stops the boot, rather than waiting
+           for the first query to discover it"
+    (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "allow-everything"]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Invalid MB_WAREHOUSE_ALLOWED_NETWORKS"
+                            (startup/def-startup-validation! ::driver.settings/warehouse-allowed-networks)))))
+  (testing "a policy it does recognize lets the boot continue"
+    (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "allow-private"]
+      (is (= :allow-private
+             (startup/def-startup-validation! ::driver.settings/warehouse-allowed-networks))))))
+
+(deftest ^:parallel normalize-connection-parameter-test
+  (are [s expected] (= expected (#'driver.u/normalize-connection-parameter s))
+    "testSetting"               "testsetting"
+    "TEST_SETTING"              "testsetting"
+    "test.setting-name+x y\tz"  "testsettingnamexyz"
+    "%74est%53etting"           "testsetting"
+    "%2574estSetting"           "%74estsetting"
+    "te%C5%BFtSetting"          "testsetting"
+    "teſtSetting"               "testsetting"
+    "testSettİng"               "testsetting"
+    "%"                         "%"
+    "%zz%4"                     "%zz%4"
+    "%C5"                       "�"
+    nil                         ""))
+
+(driver/register! ::denylist-driver, :abstract? true)
+
+(defmethod driver/disallowed-connection-parameters ::denylist-driver
+  [_driver]
+  ["testSetting" "otherSetting"])
+
+(deftest ^:parallel disallowed-connection-parameter-normalizes-both-sides-test
+  (is (= "testSetting" (driver.u/disallowed-connection-parameter ::denylist-driver "x=te%C5%BFT_setting")))
+  (is (= "otherSetting" (driver.u/disallowed-connection-parameter ::denylist-driver "OTHER-setting.x")))
+  (is (= "testSetting" (driver.u/disallowed-connection-parameter ::denylist-driver "testSettİng=1")))
+  (is (nil? (driver.u/disallowed-connection-parameter ::denylist-driver "harmless=1"))))
+
+(defn- validation-error [driver details]
+  (try
+    (driver.u/validate-connection-parameters! driver details)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (assoc (ex-data e) :message (ex-message e)))))
+
+(deftest ^:parallel validate-connection-parameters!-normalizes-names-test
+  (doseq [opts ["testSetting=x" "TEST_SETTING=x" "test.setting=x" "%74est%53etting=x" "teſtSetting=x"]]
+    (testing (pr-str opts)
+      (is (= {:status-code 400 :disallowed-key "testSetting" :message "Potentially dangerous keys in additional options"}
+             (validation-error ::denylist-driver {:additional-options opts})))))
+  (doseq [k [:TEST_SETTING :test-setting "test%53etting" :teſtSetting]]
+    (testing (pr-str k)
+      (is (=? {:status-code 400 :message "Potentially dangerous keys in connection details"}
+              (validation-error ::denylist-driver {k "x"})))))
+  (testing "a disallowed name in a URL-building value is refused by the separator check"
+    (is (=? {:status-code 400 :detail :db}
+            (validation-error ::denylist-driver {:db "a?testSetting=x"}))))
+  (is (nil? (validation-error ::denylist-driver {:host "db.example.com" :port 5432 :db "d" :user "u" :password "p&q;r"
+                                                 :additional-options "harmless=1&other=2"}))))
+
+(deftest ^:parallel validate-connection-parameters!-url-building-details-test
+  (doseq [k   [:host :port :db :dbname :catalog :account]
+          sep ["?" "&" ";" "#"]]
+    (testing (pr-str k sep)
+      (is (= {:status-code 400
+              :detail      k
+              :message     (str "Connection detail " (name k) " may not contain ? & ; #")}
+             (validation-error :postgres {k (str "a" sep "b")})))))
+  (doseq [k       [:host :db]
+          encoded ["%3B" "%3b" "%3F" "%26" "%23"]]
+    (testing (pr-str k encoded)
+      (is (= 400 (:status-code (validation-error :postgres {k (str "a" encoded "b")}))))))
+  (doseq [k [:host :db]]
+    (testing (pr-str k "%253B")
+      ;; clients decode once, so a double-encoded separator reaches them as the literal text %3B
+      (is (nil? (validation-error :postgres {k "a%253Bb"})))))
+  (is (nil? (validation-error :postgres {:host "https://db.example.com:5432/x" :port 5432 :db "my db%2Fb%41%20"
+                                         :password "a?b&c;d#e f"})))
+  (is (= [] (driver/url-building-detail-keys :h2)))
+  (is (nil? (validation-error :h2 {:db "file:/tmp/x;USER=GUEST;PASSWORD=guest"})))
+  (is (not-any? #{:db} (driver/url-building-detail-keys :sqlite)))
+  (is (nil? (validation-error :sqlite {:db "/tmp/my data#1.db"}))))

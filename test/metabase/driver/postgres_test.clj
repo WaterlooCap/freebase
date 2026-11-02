@@ -31,11 +31,13 @@
    [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sql.query-processor-test-util :as sql.qp-test-util]
-   [metabase.driver.sql.util :as sql.u]
+   [metabase.driver.util :as driver.u]
    [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.options :as lib.options]
+   [metabase.lib.pivot :as lib.pivot]
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.metadata-providers.mock :as providers.mock]
@@ -44,8 +46,11 @@
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.catch-exceptions :as catch-exceptions]
+   [metabase.query-processor.middleware.nest-for-pivot :as nest-for-pivot]
    [metabase.query-processor.pipeline :as qp.pipeline]
+   [metabase.query-processor.pivot :as qp.pivot]
    [metabase.query-processor.reducible :as qp.reducible]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
    ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.test :as qp]
    [metabase.secrets.models.secret :as secret]
@@ -195,7 +200,7 @@
 
 ;;; ------------------------------------------- Tests for sync edge cases --------------------------------------------
 
-(deftest ^:sequential edge-case-identifiers-test
+(deftest ^:synchronized edge-case-identifiers-test
   (mt/test-driver :postgres
     (testing "Make sure that Tables / Fields with dots in their names get escaped properly"
       (mt/dataset dots-in-names
@@ -443,9 +448,8 @@
     (let [parent     (h2x/identifier :field "public" "test_table" "data")
           nfc-field  {:nfc-path ["data" "key"] :database-type "text"}
           [json-sql] (sql/format-expr (#'sql.qp/json-query :postgres parent nfc-field))
-          stage      {:lib/type :mbql.stage/native :native (str "SELECT " json-sql " AS k FROM t")}
-          out-sql    (-> (driver.sql/validate-impersonated-query* :postgres {:stages [stage]})
-                         :stages first :native)]
+          query      (lib/native-query meta/metadata-provider (str "SELECT " json-sql " AS k FROM t"))
+          out-sql    (lib/raw-native-query (driver.sql/validate-impersonated-query* :postgres query))]
       ;; The broken reconstruction looks like `CAST(parent #>> array[?] AS TEXT[])` — i.e.
       ;; the cast wraps the entire `#>>` expression instead of just the path argument.
       (is (not (re-find #"(?i)#>>\s+array\s*\[\?\]\s+AS\s+TEXT\s*\[\s*\]" out-sql))
@@ -467,15 +471,15 @@
                                                             :table-id      1
                                                             :nfc-path      ["jsons" "values" "qty"]
                                                             :database-type "integer"})]})
-        (let [field-clause (sql.qp/mbql-clause-with-opts driver/*driver*
-                                                         :field
-                                                         {:binning
-                                                          {:strategy  :num-bins
-                                                           :num-bins  100
-                                                           :min-value 0.75
-                                                           :max-value 54.0
-                                                           :bin-width 0.75}}
-                                                         1)]
+        (let [field-clause [:field
+                            {:lib/uuid (str (random-uuid))
+                             :binning
+                             {:strategy  :num-bins
+                              :num-bins  100
+                              :min-value 0.75
+                              :max-value 54.0
+                              :bin-width 0.75}}
+                            1]]
           (is (= ["((FLOOR((((complicated_identifiers.jsons#>> (array[?, ?]::text[]))::integer - 0.75) / 0.75)) * 0.75) + 0.75)"
                   "values" "qty"]
                  (sql/format-expr (sql.qp/->honeysql driver/*driver* field-clause) {:nested true}))))))))
@@ -508,13 +512,13 @@
       (qp.store/with-metadata-provider (json-alias-mock-metadata-provider driver/*driver*)
         ;; need to make this a function to avoid a duplicate `:lib/uuid` error when we use it in `compile-res`
         (let [field-bucketed-fn (fn []
-                                  (sql.qp/mbql-clause-with-opts
-                                   driver/*driver* :field
+                                  [:field
                                    {:temporal-unit                                              :month
                                     :metabase.query-processor.util.add-alias-info/source-table  1
                                     :metabase.query-processor.util.add-alias-info/source-alias  "dontwannaseethis"
                                     :metabase.query-processor.util.add-alias-info/desired-alias "dontwannaseethis"
-                                    :metabase.query-processor.util.add-alias-info/position      1} 1))
+                                    :metabase.query-processor.util.add-alias-info/position      1}
+                                   1])
               compile-res (maybe-convert-and-compile
                            driver/*driver*
                            (mt/query nil
@@ -547,7 +551,7 @@
   (mt/test-driver :postgres
     (testing "json breakouts and order bys have alias coercion"
       (qp.store/with-metadata-provider (json-alias-mock-metadata-provider driver/*driver*)
-        (let [field-ordinary (sql.qp/mbql-clause-with-opts driver/*driver* :field nil 1)
+        (let [field-ordinary [:field {} 1]
               only-order (maybe-convert-and-compile
                           driver/*driver*
                           {:database 1
@@ -602,6 +606,117 @@
                   "      \"json_alias_test\" ASC"
                   "  ) AS \"__mb_source\""]
                  (str/split-lines (driver/prettify-native-form :postgres (:query nested))))))))))
+
+(deftest ^:parallel nested-field-pivot-compile-test
+  (mt/test-driver :postgres
+    (testing "Pivot with a nested-field (JSON-unfolded) breakout compiles to a derived table that pre-computes the JSON path expression and references plain identifiers in GROUPING SETS / GROUPING"
+      (let [mp       (lib.tu/mock-metadata-provider
+                      {:database (assoc meta/database :engine :postgres :id 1)
+                       :tables   [(merge (meta/table-metadata :venues)
+                                         {:id 1 :db-id 1 :name "json_table" :schema nil})]
+                       :fields   [(merge (meta/field-metadata :venues :id)
+                                         {:id            1
+                                          :table-id      1
+                                          :name          "category"
+                                          :nfc-path      ["payload" "category"]
+                                          :base-type     :type/Text
+                                          :effective-type :type/Text
+                                          :database-type "text"})
+                                  (merge (meta/field-metadata :venues :name)
+                                         {:id 2 :table-id 1 :name "region"})]})
+            json-col (lib.metadata/field mp 1)
+            reg-col  (lib.metadata/field mp 2)
+            base     (-> (lib/query mp (lib.metadata/table mp 1))
+                         (lib/breakout json-col)
+                         (lib/breakout reg-col)
+                         (lib/aggregate (lib/count)))
+            bks      (lib/breakouts base)
+            pivot-q  (lib.pivot/with-pivot base
+                       {:rows               [(lib.options/uuid (first bks))]
+                        :columns            [(lib.options/uuid (second bks))]
+                        :show-row-totals    true
+                        :show-column-totals true})]
+        (qp.store/with-metadata-provider mp
+          (let [sql (:query (qp.compile/compile (nest-for-pivot/wrap-nested-field-breakouts pivot-q)))]
+            (is (= ["SELECT"
+                    "  \"__mb_source\".\"__mb_pivot_nfc\" AS \"__mb_pivot_nfc\","
+                    "  \"__mb_source\".\"region\" AS \"region\","
+                    "  GROUPING("
+                    "    \"__mb_source\".\"region\","
+                    "    \"__mb_source\".\"__mb_pivot_nfc\""
+                    "  ) AS \"pivot-grouping\","
+                    "  COUNT(*) AS \"count\""
+                    "FROM"
+                    "  ("
+                    "    SELECT"
+                    "      (\"json_table\".\"payload\" #>> (array [ ? ] :: text [ ])) :: text AS \"category\","
+                    "      \"json_table\".\"region\" AS \"region\","
+                    "      (\"json_table\".\"payload\" #>> (array [ ? ] :: text [ ])) :: text AS \"__mb_pivot_nfc\""
+                    "    FROM"
+                    "      \"json_table\""
+                    "  ) AS \"__mb_source\""
+                    "GROUP BY"
+                    "  GROUPING SETS ("
+                    "    ("
+                    "      \"__mb_source\".\"__mb_pivot_nfc\","
+                    "      \"__mb_source\".\"region\""
+                    "    ),"
+                    "    (\"__mb_source\".\"region\"),"
+                    "    (\"__mb_source\".\"__mb_pivot_nfc\"),"
+                    "    ()"
+                    "  )"
+                    "ORDER BY"
+                    "  GROUPING("
+                    "    \"__mb_source\".\"region\","
+                    "    \"__mb_source\".\"__mb_pivot_nfc\""
+                    "  ) DESC,"
+                    "  \"__mb_source\".\"__mb_pivot_nfc\" ASC,"
+                    "  \"__mb_source\".\"region\" ASC"]
+                   (str/split-lines (driver/prettify-native-form :postgres sql))))))))))
+
+(deftest nested-field-pivot-e2e-test
+  (mt/test-driver :postgres
+    (mt/dataset json
+      (testing "pivot with a nested-field (JSON-unfolded) breakout executes end-to-end and the native path agrees with the multi-query path"
+        (let [mp        (mt/metadata-provider)
+              json-tbl  (lib.metadata/table mp (mt/id :json))
+              q-base    (lib/query mp json-tbl)
+              cols      (lib/breakoutable-columns q-base)
+              doop-col  (m/find-first #(= (:name %) "json_bit → doop") cols)
+              bloop-col (m/find-first #(= (:name %) "bloop") cols)]
+          (assert (and doop-col bloop-col)
+                  "expected json_bit → doop and bloop columns from json dataset")
+          (let [pivot-q (-> q-base
+                            (lib/breakout doop-col)
+                            (lib/breakout bloop-col)
+                            (lib/aggregate (lib/count))
+                            ;; Use the legacy positional pivot keys — same shape as what dashboards and the
+                            ;; REST API send. `apply-legacy-pivot-keys` in the native path will convert these
+                            ;; to a `:pivot` clause; the multi-query path reads them directly.
+                            (assoc :pivot-rows [0] :pivot-cols [1]))
+                results (qp.pivot/run-pivot-query pivot-q)
+                rows    (mt/rows results)
+                pgs     (mapv #(nth % 2) rows)]
+            (is (= #{;; pivot-grouping = 0  base detail rows
+                     ["boop" "doopdoopy" 0 1]
+                     ["boop" "moopywoop" 0 1]
+                     ["boop" "woopywoop" 0 1]
+                     ["boop" "zoopyzoop" 0 1]
+                     [nil    "doopyboop" 0 1]
+                     ;; pivot-grouping = 1  per-bloop subtotals (doop dropped)
+                     [nil    "doopdoopy" 1 1]
+                     [nil    "doopyboop" 1 1]
+                     [nil    "moopywoop" 1 1]
+                     [nil    "woopywoop" 1 1]
+                     [nil    "zoopyzoop" 1 1]
+                     ;; pivot-grouping = 2  per-doop subtotals (bloop dropped)
+                     ["boop" nil 2 4]
+                     [nil    nil 2 1]
+                     ;; pivot-grouping = 3  grand total
+                     [nil    nil 3 5]}
+                   (set rows)))
+            (is (= (sort pgs) pgs)
+                "rows should appear in non-decreasing pivot-grouping order")))))))
 
 ;;; Postgres `:contains`/`:starts-with`/`:ends-with` must produce SQL that the PostgreSQL JDBC
 ;;; driver can prepare regardless of the server's `standard_conforming_strings` setting. With
@@ -933,78 +1048,7 @@
     (testing "check that values for enum types get wrapped in appropriate CAST() fn calls in `->honeysql`"
       (is (= (h2x/with-database-type-info [:cast "toucan" (h2x/identifier :type-name "bird type")]
                                           "bird type")
-             (sql.qp/->honeysql driver/*driver* (sql.qp/mbql-clause-with-opts driver/*driver* :value {:database_type "bird type", :base_type :type/PostgresEnum} "toucan")))))))
-
-(defn- enum-value-honeysql [database-type]
-  (sql.qp/->honeysql
-   driver/*driver*
-   (sql.qp/mbql-clause-with-opts
-    driver/*driver* :value
-    {:database_type database-type, :base_type :type/PostgresEnum}
-    "toucan")))
-
-(deftest ^:parallel enum-type-name-is-never-raw-sql-test
-  (mt/test-driver :postgres
-    (testing "a caller-supplied :database-type never reaches the SQL type-name position as raw SQL"
-      (doseq [database-type ["\"int\") UNION SELECT 1 --\""
-                             "int) UNION SELECT 1 --"]]
-        (testing (pr-str database-type)
-          (let [form (h2x/unwrap-typed-honeysql-form (enum-value-honeysql database-type))]
-            (testing "the type name is an identifier, which the dialect quotes, not a raw fragment"
-              (is (h2x/identifier? (last form))))
-            (is (not (some #(and (vector? %) (= :raw (first %)))
-                           (tree-seq coll? seq form))))))))))
-
-(deftest ^:parallel enum-type-name-compiles-as-an-identifier-test
-  (mt/test-driver :postgres
-    (testing "the enum type names sync records keep working"
-      (testing "a bare type name, spaces and all"
-        (is (= (h2x/with-database-type-info [:cast "toucan" (h2x/identifier :type-name "bird type")] "bird type")
-               (enum-value-honeysql "bird type"))))
-      (testing "a schema-qualified type name stays qualified, as two identifier components"
-        (is (= (h2x/with-database-type-info
-                [:cast "toucan" (h2x/identifier :type-name "bird_schema" "bird_status")]
-                "\"bird_schema\".\"bird_status\"")
-               (enum-value-honeysql "\"bird_schema\".\"bird_status\"")))))))
-
-(deftest ^:parallel enum-type-name-malformed-test
-  (mt/test-driver :postgres
-    (testing "a malformed :database-type compiles to an inert identifier rather than raw SQL or an exception"
-      (doseq [database-type ["\""                                  ; a lone quote: starts and ends with the same char
-                             "\"\""                                ; nothing between the quotes
-                             "\"unterminated"                      ; opening quote only
-                             "unopened\""                          ; closing quote only
-                             "no_dots_at_all"
-                             "public.bird_status"                 ; dot, but unquoted
-                             "\"a\".\"b\".\"c\""                     ; more parts than Postgres accepts
-                             "\"a\"\".\"b\""                          ; an embedded doubled quote
-                             "\"\".\"\""                              ; empty components
-                             "\"a\" . \"b\""                          ; spaces around the separator
-                             ".."
-                             "\"..\""]]
-        (testing (pr-str database-type)
-          (let [form (h2x/unwrap-typed-honeysql-form (enum-value-honeysql database-type))]
-            (testing "the type name is an identifier"
-              (is (h2x/identifier? (last form))))
-            (testing "every component is a string, so the dialect can quote it"
-              (is (every? string? (last (last form)))))
-            (testing "nothing is emitted raw"
-              (is (not (some #(and (vector? %) (= :raw (first %)))
-                             (tree-seq coll? seq form)))))))))))
-
-(deftest ^:parallel day-bucketing-type-name-is-never-raw-sql-test
-  (testing "a :database-type on :day bucketing is emitted as a quoted identifier"
-    (doseq [database-type ["timestamptz) UNION SELECT 1 --"
-                           "\"int\") UNION SELECT 1 --"]]
-      (testing (pr-str database-type)
-        (let [form (h2x/unwrap-typed-honeysql-form
-                    (sql.qp/date :postgres :day (h2x/with-database-type-info :some_col database-type)))]
-          (testing "the outer cast's type name is an identifier, which the dialect quotes"
-            (is (h2x/identifier? (last form))))))))
-  (testing "a known temporal type is emitted raw, since dialects that inherit this impl reject a quoted type name"
-    (is (= ["SELECT CAST(CAST(\"some_col\" AS date) AS timestamptz)"]
-           (sql/format {:select [[(sql.qp/date :postgres :day (h2x/with-database-type-info :some_col "timestamptz"))]]}
-                       {:dialect :ansi :quoted true})))))
+             (sql.qp/->honeysql driver/*driver* [:value {:database-type "bird type", :base-type :type/PostgresEnum} "toucan"]))))))
 
 (deftest enums-test-2
   (mt/test-driver :postgres
@@ -1605,6 +1649,43 @@
           (is (= #{"table_with_perms"}
                  (t2/select-fn-set :name :model/Table :db_id (:id database)))))))))
 
+(deftest json-unfolding-skips-columns-without-select-privilege-test
+  (testing "JSON unfolding only samples JSON columns the connection user can read, so column-level grants don't break field sync (#83790)"
+    (mt/test-driver :postgres
+      (tx/drop-if-exists-and-create-db! driver/*driver* "json-column-grants-test")
+      (let [role          (str "mb_restricted_" (u/lower-case-en (mt/random-name)))
+            details       (mt/dbdef->connection-details :postgres :db {:database-name  "json-column-grants-test"
+                                                                       :json-unfolding true})
+            spec          (sql-jdbc.conn/connection-details->spec :postgres details)
+            active-fields (fn [database]
+                            (t2/select-fn-set :name :model/Field
+                                              :table_id (t2/select-one-pk :model/Table :db_id (:id database) :name "table_a")
+                                              :active true))]
+        (doseq [statement ["CREATE TABLE public.table_a (id INTEGER PRIMARY KEY, col_visible TEXT, col_json JSONB, col_json_hidden JSONB, col_hidden TEXT);"
+                           "INSERT INTO public.table_a VALUES (1, 'a', '{\"key_a\": 1}', '{\"key_b\": 2}', 'b');"
+                           (format "CREATE ROLE %s LOGIN PASSWORD 'password';" role)
+                           (format "GRANT SELECT (id, col_visible, col_json) ON public.table_a TO %s;" role)]]
+          (jdbc/execute! spec [statement]))
+        (try
+          (mt/with-temp [:model/Database database {:engine :postgres, :details details}]
+            (testing "sanity check: a user that can read every column syncs all of them"
+              (sync/sync-database! database {:scan :schema})
+              (is (= #{"id" "col_visible" "col_json" "col_json → key_a" "col_json_hidden" "col_json_hidden → key_b" "col_hidden"}
+                     (active-fields database))))
+            (t2/update! :model/Database (:id database) {:details (assoc details :user role :password "password")})
+            (let [database (t2/select-one :model/Database (:id database))]
+              (binding [sync-util/*log-exceptions-and-continue?* false]
+                (sync/sync-database! database {:scan :schema}))
+              (testing "after switching to a user with column-level grants, unreadable columns are retired and readable JSON is still unfolded"
+                (is (= #{"id" "col_visible" "col_json" "col_json → key_a"}
+                       (active-fields database))))
+              (testing "a raw query on the table runs"
+                (mt/with-db database
+                  (is (= 1 (count (mt/rows (mt/run-mbql-query table_a)))))))))
+          (finally
+            (jdbc/execute! spec [(format "DROP OWNED BY %s;" role)])
+            (jdbc/execute! spec [(format "DROP ROLE %s;" role)])))))))
+
 (deftest json-operator-?-works
   (testing "Make sure the Postgres ? operators (for JSON types) work in native queries"
     (mt/test-driver :postgres
@@ -2131,6 +2212,7 @@
       (let [db-name "sync_writable_test"
             details (tx/dbdef->connection-details :postgres :db {:database-name db-name})]
         (tx/drop-if-exists-and-create-db! driver/*driver* db-name)
+        ;; fixture DDL on a scratch pg database with no :model/Database row, so raw jdbc on the spec
         #_{:clj-kondo/ignore [:discouraged-var]}
         (jdbc/with-db-connection [conn (sql-jdbc.conn/connection-details->spec :postgres details)]
           (try
@@ -2526,193 +2608,6 @@
                      :name "xix"}
                     (first (driver/validate-native-query-fields :postgres broken-query))))))))))
 
-;;; ---------------------------------------- Workspace provisioning ----------------------------------------------
-
-(defmacro ^:private with-drop-schema!
-  "Run `body`, ensuring `schema` is dropped (CASCADE) on `admin-spec` afterward."
-  [admin-spec schema & body]
-  `(try
-     ~@body
-     (finally
-       (jdbc/execute! ~admin-spec
-                      [(format "DROP SCHEMA IF EXISTS %s CASCADE"
-                               (sql.u/quote-name :postgres :schema ~schema))]))))
-
-(defmacro ^:private with-drop-role!
-  "Run `body`, ensuring `role` is dropped on `admin-spec` afterward."
-  [admin-spec role & body]
-  `(try
-     ~@body
-     (finally
-       (jdbc/execute! ~admin-spec
-                      [(format "DROP ROLE IF EXISTS %s"
-                               (sql.u/quote-name :postgres :field ~role))]))))
-
-(deftest workspace-precondition-usage-grant-option-test
-  (mt/test-driver :postgres
-    (testing "assert-has-usage-grant-option! throws when current_user lacks USAGE WITH GRANT OPTION on the schema"
-      (mt/with-empty-db
-        (let [admin-spec (sql-jdbc.conn/db->pooled-connection-spec (mt/db))
-              role       "ws_pre_usage_role"
-              schema     "ws_pre_usage_schema"
-              password   (str (random-uuid))]
-          (with-drop-role! admin-spec role
-            (with-drop-schema! admin-spec schema
-              (let [qrole   (sql.u/quote-name :postgres :field role)
-                    qschema (sql.u/quote-name :postgres :schema schema)]
-                (jdbc/execute! admin-spec
-                               [(format (str "CREATE ROLE %s WITH LOGIN PASSWORD '%s'; "
-                                             "CREATE SCHEMA %s; "
-                                             ;; USAGE without WITH GRANT OPTION
-                                             "GRANT USAGE ON SCHEMA %s TO %s;")
-                                        qrole password qschema qschema qrole)])
-                (sql-jdbc.conn/with-connection-spec-for-testing-connection
-                 [user-spec [:postgres (assoc (:details (mt/db)) :user role :password password)]]
-                  (testing "fails when grant option is missing"
-                    (is (thrown-with-msg?
-                         clojure.lang.ExceptionInfo
-                         #"USAGE WITH GRANT OPTION"
-                         (postgres/assert-has-usage-grant-option! user-spec schema))))
-                  (testing "passes once WITH GRANT OPTION is granted"
-                    (jdbc/execute! admin-spec
-                                   [(format "GRANT USAGE ON SCHEMA %s TO %s WITH GRANT OPTION"
-                                            qschema qrole)])
-                    (is (nil? (postgres/assert-has-usage-grant-option! user-spec schema)))))))))))))
-
-(deftest workspace-precondition-table-grant-option-test
-  (mt/test-driver :postgres
-    (testing "assert-has-grant-option! throws when current_user lacks SELECT WITH GRANT OPTION on a schema table"
-      (mt/with-empty-db
-        (let [admin-spec (sql-jdbc.conn/db->pooled-connection-spec (mt/db))
-              role       "ws_pre_table_role"
-              schema     "ws_pre_table_schema"
-              table      "ws_pre_table_t"
-              password   (str (random-uuid))]
-          (with-drop-role! admin-spec role
-            (with-drop-schema! admin-spec schema
-              (let [qrole   (sql.u/quote-name :postgres :field role)
-                    qschema (sql.u/quote-name :postgres :schema schema)
-                    qtable  (sql.u/quote-name :postgres :table table)
-                    qobject (str qschema "." qtable)]
-                (jdbc/execute! admin-spec
-                               [(format (str "CREATE ROLE %s WITH LOGIN PASSWORD '%s'; "
-                                             "CREATE SCHEMA %s; "
-                                             "CREATE TABLE %s (id INT); "
-                                             ;; Pass the schema-USAGE precondition so we test the table check in isolation.
-                                             "GRANT USAGE ON SCHEMA %s TO %s WITH GRANT OPTION; "
-                                             ;; SELECT *without* WITH GRANT OPTION
-                                             "GRANT SELECT ON %s TO %s;")
-                                        qrole password qschema qobject qschema qrole qobject qrole)])
-                (sql-jdbc.conn/with-connection-spec-for-testing-connection
-                 [user-spec [:postgres (assoc (:details (mt/db)) :user role :password password)]]
-                  (testing "fails and names the offending table"
-                    (is (thrown-with-msg?
-                         clojure.lang.ExceptionInfo
-                         #"SELECT WITH GRANT OPTION"
-                         (postgres/assert-has-grant-option! user-spec schema))))
-                  (testing "passes once SELECT WITH GRANT OPTION is granted"
-                    (jdbc/execute! admin-spec
-                                   [(format "GRANT SELECT ON %s TO %s WITH GRANT OPTION"
-                                            qobject qrole)])
-                    (is (nil? (postgres/assert-has-grant-option! user-spec schema)))))))))))))
-
-(deftest workspace-precondition-alter-default-privileges-test
-  (mt/test-driver :postgres
-    (testing "assert-can-alter-default-privileges! throws when an object owner is not a role the current_user belongs to"
-      (mt/with-empty-db
-        (let [admin-spec (sql-jdbc.conn/db->pooled-connection-spec (mt/db))
-              role       "ws_pre_adp_role"
-              owner      "ws_pre_adp_other_owner"
-              schema     "ws_pre_adp_schema"
-              table      "ws_pre_adp_t"
-              password   (str (random-uuid))]
-          (with-drop-role! admin-spec role
-            (with-drop-role! admin-spec owner
-              (with-drop-schema! admin-spec schema
-                (let [qrole   (sql.u/quote-name :postgres :field role)
-                      qowner  (sql.u/quote-name :postgres :field owner)
-                      qschema (sql.u/quote-name :postgres :schema schema)
-                      qobject (str qschema "." (sql.u/quote-name :postgres :table table))]
-                  (jdbc/execute! admin-spec
-                                 [(format (str "CREATE ROLE %s WITH LOGIN PASSWORD '%s'; "
-                                               "CREATE ROLE %s; "
-                                               "CREATE SCHEMA %s; "
-                                               "GRANT USAGE ON SCHEMA %s TO %s WITH GRANT OPTION; "
-                                               "CREATE TABLE %s (id INT); "
-                                               "ALTER TABLE %s OWNER TO %s;")
-                                          qrole password qowner qschema qschema qrole qobject qobject qowner)])
-                  (sql-jdbc.conn/with-connection-spec-for-testing-connection
-                   [user-spec [:postgres (assoc (:details (mt/db)) :user role :password password)]]
-                    (testing "fails and names the unmemberable owner"
-                      (is (thrown-with-msg?
-                           clojure.lang.ExceptionInfo
-                           #"not a member of \d+ role"
-                           (postgres/assert-can-alter-default-privileges! user-spec schema))))
-                    (testing "passes once the current_user becomes a member of the owner role"
-                      (jdbc/execute! admin-spec
-                                     [(format "GRANT %s TO %s" qowner qrole)])
-                      (is (nil? (postgres/assert-can-alter-default-privileges! user-spec schema))))))))))))))
-
-(deftest ^:synchronized workspace-destroy-survives-foreign-grantor-default-priv-test
-  ;; PostgreSQL counterpart to Redshift's GHY-3709 destroy fix. The Redshift
-  ;; driver had to grow explicit `pg_default_acl` discovery + per-grantor
-  ;; REVOKEs because Redshift's `DROP OWNED BY` semantics differ from PG. PG's
-  ;; destroy issues `DROP OWNED BY <iso-user>` which removes default-priv ACL
-  ;; entries where the iso-user appears as a grantee, regardless of who granted
-  ;; them. This test pins that contract: seed a foreign-grantor default-priv
-  ;; row targeting the iso-user and confirm `destroy-workspace-isolation!`
-  ;; still cleans up without raising "user cannot be dropped because some
-  ;; objects depend on it".
-  (mt/test-driver :postgres
-    (testing "destroy succeeds when a non-current_user grantor seeded a default-priv targeting the iso-user"
-      (mt/with-empty-db
-        (let [admin-spec (sql-jdbc.conn/db->pooled-connection-spec (mt/db))
-              grantor    "ws_destroy_foreign_grantor"
-              schema     "ws_destroy_foreign_schema"
-              qgrantor   (sql.u/quote-name :postgres :field grantor)
-              qschema    (sql.u/quote-name :postgres :schema schema)
-              workspace  {:id   (rand-int Integer/MAX_VALUE)
-                          :name "wsd-foreign-destroy"}]
-          (with-drop-role! admin-spec grantor
-            (with-drop-schema! admin-spec schema
-              (jdbc/execute! admin-spec
-                             [(format (str "CREATE ROLE %s WITH LOGIN PASSWORD 'pwd'; "
-                                           "GRANT %s TO CURRENT_USER; "
-                                           "CREATE SCHEMA %s AUTHORIZATION %s;")
-                                      qgrantor qgrantor qschema qgrantor)])
-              (let [init-result   (driver/init-workspace-isolation! :postgres (mt/db) workspace)
-                    iso-user      (-> init-result :database_details :user)
-                    qiso          (sql.u/quote-name :postgres :field iso-user)
-                    workspace+det (merge workspace init-result)]
-                (try
-                  ;; Seed the foreign-grantor default-priv: set the grantor role and
-                  ;; issue ALTER DEFAULT PRIVILEGES so the resulting pg_default_acl
-                  ;; row is owned by the grantor, not by current_user.
-                  (jdbc/execute! admin-spec
-                                 [(format (str "SET ROLE %s; "
-                                               "ALTER DEFAULT PRIVILEGES IN SCHEMA %s "
-                                               "GRANT SELECT ON TABLES TO %s; "
-                                               "RESET ROLE;")
-                                          qgrantor qschema qiso)])
-                  (testing "destroy completes without error"
-                    (is (some? (driver/destroy-workspace-isolation! :postgres (mt/db) workspace+det))))
-                  (testing "the iso-user has been dropped"
-                    (is (empty? (jdbc/query admin-spec
-                                            ["SELECT 1 FROM pg_roles WHERE rolname = ?" iso-user]))))
-                  (finally
-                    ;; If destroy raised, the iso-user may still exist -- clean up so the
-                    ;; with-drop-role!/with-drop-schema! frames don't fail on the schema.
-                    ;; Log instead of swallowing so CI surfaces orphan-role accumulation
-                    ;; rather than masking it behind a failed schema drop downstream.
-                    (try (jdbc/execute! admin-spec
-                                        [(format "DROP OWNED BY %s CASCADE" qiso)])
-                         (catch Throwable t
-                           (log/warnf t "Test cleanup: DROP OWNED BY %s failed" qiso)))
-                    (try (jdbc/execute! admin-spec
-                                        [(format "DROP USER IF EXISTS %s" qiso)])
-                         (catch Throwable t
-                           (log/warnf t "Test cleanup: DROP USER %s failed" qiso)))))))))))))
-
 (deftest ^:synchronized reducible-query-streams-large-result-set-test
   (testing "reducible-query streams large result sets via a server-side cursor (autoCommit=false)"
     (mt/test-driver :postgres
@@ -2725,36 +2620,12 @@
         (testing "only the first rows are pulled, not all ~2 billion"
           (is (= [1 2 3] (into [] (comp (take 3) (map :i)) result))))))))
 
-(deftest ^:parallel value-clause-collection-guard-test
-  (testing "the :postgres [driver :value] override must not compile a collection into SQL"
-    ;; these base types build a CAST from the value itself instead of recursing through ->honeysql, so they never hit
-    ;; the guard on the base [:sql :value] method. The value slot is schema-typed `any?`, so a hand-written clause
-    ;; carries a Honey SQL form like `[{:raw "..."}]` past query validation. :redshift inherits this method.
-    (doseq [base-type     [:type/PostgresBitString :type/IPAddress :type/PostgresEnum]
-            [label value] {"map inside a vector"   [{:raw "1) UNION SELECT 1 -- "}]
-                           "sub-select in vector"  [{:select [:password] :from [:core_user]}]
-                           "honeysql op in vector" [[:raw "1) UNION SELECT 1 -- "]]
-                           "bare map"              {:raw "1) UNION SELECT 1 -- "}
-                           "a set"                 #{"a" "b"}}]
-      (testing (str base-type " -- " label)
-        (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo
-             #"\QUnexpected collection in a :value clause\E"
-             (sql.qp/->honeysql :postgres [:value {:base-type base-type, :database-type "my_enum"} value]))))))
-  (testing "ordinary literals still compile"
-    (is (= (h2x/cast :inet "1.2.3.4")
-           (sql.qp/->honeysql :postgres [:value {:base-type :type/IPAddress} "1.2.3.4"])))))
-
-(deftest ^:parallel regex-match-first-pattern-raw-guard-test
-  (testing "the :postgres [:regex-match-first] pattern must be compiled through ->honeysql, not spliced raw"
-    ;; a stored source card can carry a Honey SQL [:raw ...] form in the pattern slot past whole-query validation;
-    ;; routing it through ->honeysql makes multimethod dispatch reject it before any SQL text is produced.
-    (doseq [pattern [[:raw "'x') AS x, (SELECT string_agg(email, ',') FROM public.users"]
-                     [:raw "anything"]]]
-      (testing (pr-str pattern)
-        (is (thrown?
-             clojure.lang.ExceptionInfo
-             (sql.qp/->honeysql :postgres [:regex-match-first {} 1 pattern]))))))
-  (testing "ordinary string patterns still compile"
-    (is (= [::postgres/regex-match-first [:inline 1] "^Taylor's"]
-           (sql.qp/->honeysql :postgres [:regex-match-first {} 1 "^Taylor's"])))))
+(deftest ^:parallel url-building-details-reject-separators-test
+  (doseq [details [{:host "localhost" :port 5432 :user "u" :db "a?b"}
+                   {:host "localhost:5432/d?b" :port 5432 :user "u" :db "d"}]]
+    (testing (pr-str details)
+      (is (=? {:status-code 400}
+              (try (driver.u/validate-connection-parameters! :postgres details)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e
+                     (ex-data e))))))))

@@ -952,7 +952,7 @@
                     (lib/display-info query col)))))))))
 
 (deftest ^:parallel join-condition-rhs-columns-join-card-non-suggested-test
-  (testing "non-suggested join conditions should be correctly formed, using correct ID- or name-based refs"
+  (testing "non-suggested join conditions should be correctly formed, using correct ID- or name-based refs (QUE2-383)"
     (let [card     (:categories (lib.tu/mock-cards))
           mp       (lib.tu/metadata-provider-with-mock-cards)
           base     (lib/query mp (meta/table-metadata :venues))
@@ -1500,7 +1500,17 @@
                                query
                                -1
                                join-condition
-                               :year)))))))
+                               :year)))))
+    (testing ":default (explicit 'Don't bin') propagates to both sides"
+      (is (=? [:= {}
+               [:field {:temporal-unit :default} (meta/id :orders :created-at)]
+               [:field {:temporal-unit :default} (meta/id :products :created-at)]]
+              (lib/join-condition-update-temporal-bucketing
+               query
+               -1
+               (lib/= orders-created-at
+                      products-created-at)
+               :default))))))
 
 (deftest ^:parallel default-join-alias-test
   (testing "default join-alias set without overwriting other aliases (#32897)"
@@ -1700,7 +1710,7 @@
                    has-fields?))))))
 
 (deftest ^:parallel joined-card-columns-use-name-refs-test
-  (testing "a joined card's columns should use name-based refs"
+  (testing "a joined card's columns should use name-based refs (QUE2-383)"
     (let [card     (:products (lib.tu/mock-cards))
           base     (-> (lib/query (lib.tu/metadata-provider-with-mock-cards) (meta/table-metadata :orders))
                        (lib/join (lib/join-clause card)))
