@@ -46,14 +46,20 @@
 ;;; -------------------------------------------------- Open Redirect Guard --------------------------------------------------
 
 (defn- safe-relative-path?
-  "Whether `url` stays on this site once a browser follows it: one leading slash, then no second slash and no
-  backslash, including after percent-decoding, because browsers read a run of slashes or backslashes as `//host`."
+  "Whether `url` stays on this site once a browser follows it. Its path needs one leading slash and then no second
+  slash, backslash or control character, at every level of percent-decoding, because browsers read a run of slashes
+  or backslashes as `//host`. The query string and fragment cannot change the host, so they are not decoded."
   [^String url]
-  (let [decoded (try
-                  (nth (iterate #(java.net.URLDecoder/decode ^String % "UTF-8") url) 3)
-                  (catch IllegalArgumentException _ nil))]
-    (and decoded
-         (every? #(re-find #"^/(?![/\\])[^\\\p{Cntrl}]*$" %) [url decoded]))))
+  (let [path (first (str/split url #"[?#]" 2))]
+    (loop [value path, levels 3]
+      (and (re-find #"^/(?![/\\])[^\\\p{Cntrl}]*$" value)
+           (let [decoded (try
+                           (java.net.URLDecoder/decode ^String value "UTF-8")
+                           ;; a stray % cannot decode into a slash, so this is as far as it goes
+                           (catch IllegalArgumentException _ value))]
+             (if (or (zero? levels) (= decoded value))
+               true
+               (recur decoded (dec levels))))))))
 
 (defn check-sso-redirect
   "Check if open redirect is being exploited in SSO. If so, or if the redirect-url is

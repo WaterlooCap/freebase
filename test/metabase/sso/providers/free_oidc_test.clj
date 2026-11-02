@@ -38,6 +38,8 @@
                    "%2F%2Fevil.example.com"
                    "/%5Cevil.example.com"
                    "/%255Cevil.example.com"
+                   "/%252F%252Fevil.example.com"
+                   "/%2F/evil.example.com?q=100%25"
                    "/%09/evil.example.com"
                    "evil.example.com"
                    "javascript:alert(1)"
@@ -46,7 +48,8 @@
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid redirect URL"
                                 (free-oidc/check-sso-redirect url))))))
     (testing "paths on this site and this site's own URL still pass"
-      (doseq [url ["/" "/dashboard/1" "/question/2?a=b%20c#x" "https://analytics.example.com/dashboard/1"]]
+      (doseq [url ["/" "/dashboard/1" "/question/2?a=b%20c#x" "/question/5?q=100%25" "/question/5?q=%2F%2Fok"
+                   "/report/100%25" "https://analytics.example.com/dashboard/1"]]
         (testing url
           (is (= url (free-oidc/check-sso-redirect url))))))))
 
