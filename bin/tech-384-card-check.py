@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-LIVE_HOSTS = ("waterloocap.com", "ondigitalocean.app")
+LIVE_HOSTS = ("analytics.waterloocap.com", "metabase-jj7kf.ondigitalocean.app")
 TIMEOUT_SECONDS = 60
 SAMPLE_VALUES = {
     "number": 1,
@@ -64,7 +64,7 @@ def is_loopback(host):
 
 
 def is_live(host):
-    return any(host == live or host.endswith("." + live) for live in LIVE_HOSTS)
+    return host in LIVE_HOSTS
 
 
 class Client:
