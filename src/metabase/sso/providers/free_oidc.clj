@@ -12,6 +12,7 @@
    [clojure.string :as str]
    [metabase.auth-identity.core :as auth-identity]
    [metabase.sso.settings :as sso-settings]
+   [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [methodical.core :as methodical]))
 
@@ -44,25 +45,37 @@
 
 ;;; -------------------------------------------------- Open Redirect Guard --------------------------------------------------
 
+(defn- safe-relative-path?
+  "Whether `url` stays on this site once a browser follows it: one leading slash, then no second slash and no
+  backslash, including after percent-decoding, because browsers read a run of slashes or backslashes as `//host`."
+  [^String url]
+  (let [decoded (try
+                  (nth (iterate #(java.net.URLDecoder/decode ^String % "UTF-8") url) 3)
+                  (catch IllegalArgumentException _ nil))]
+    (and decoded
+         (every? #(re-find #"^/(?![/\\])[^\\\p{Cntrl}]*$" %) [url decoded]))))
+
 (defn check-sso-redirect
   "Check if open redirect is being exploited in SSO. If so, or if the redirect-url is
   invalid, throw a 400."
   [redirect-url]
-  (try
-    (let [redirect (some-> redirect-url (java.net.URI.))
-          our-host (some-> ((requiring-resolve 'metabase.system.core/site-url)) (java.net.URI.) (.getHost))]
-      (when-not (or (nil? redirect-url)
-                    (and (nil? (.getHost redirect))
-                         (nil? (.getScheme redirect)))
-                    (= (.getHost redirect) our-host))
-        (throw (ex-info (tru "Invalid redirect URL")
-                        {:status-code  400
-                         :redirect-url redirect-url})))
-      redirect-url)
-    (catch java.net.URISyntaxException _
-      (throw (ex-info (tru "Invalid redirect URL")
-                      {:status-code  400
-                       :redirect-url redirect-url})))))
+  (let [invalid (fn []
+                  (throw (ex-info (tru "Invalid redirect URL")
+                                  {:status-code  400
+                                   :redirect-url redirect-url})))]
+    (try
+      (let [redirect (some-> redirect-url (java.net.URI.))
+            our-host (some-> ((requiring-resolve 'metabase.system.core/site-url)) (java.net.URI.) (.getHost))]
+        (when-not (or (nil? redirect-url)
+                      (if (.getScheme redirect)
+                        (and (#{"http" "https"} (u/lower-case-en (.getScheme redirect)))
+                             our-host
+                             (= (.getHost redirect) our-host))
+                        (safe-relative-path? redirect-url)))
+          (invalid))
+        redirect-url)
+      (catch java.net.URISyntaxException _
+        (invalid)))))
 
 ;;; -------------------------------------------------- Authentication --------------------------------------------------
 

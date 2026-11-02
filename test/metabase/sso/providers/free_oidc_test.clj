@@ -25,6 +25,31 @@
       (let [result (auth-identity/authenticate :provider/free-oidc {})]
         (is (false? (:success? result)))))))
 
+(deftest check-sso-redirect-rejects-host-smuggling-test
+  (mt/with-temporary-setting-values [site-url "https://analytics.example.com"]
+    (testing "forms a browser reads as another host are rejected"
+      (doseq [url ["//evil.example.com"
+                   "///evil.example.com"
+                   "////evil.example.com"
+                   "/\\evil.example.com"
+                   "\\\\evil.example.com"
+                   "/%2F/evil.example.com"
+                   "/%2f%2fevil.example.com"
+                   "%2F%2Fevil.example.com"
+                   "/%5Cevil.example.com"
+                   "/%255Cevil.example.com"
+                   "/%09/evil.example.com"
+                   "evil.example.com"
+                   "javascript:alert(1)"
+                   "https://evil.example.com"]]
+        (testing url
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid redirect URL"
+                                (free-oidc/check-sso-redirect url))))))
+    (testing "paths on this site and this site's own URL still pass"
+      (doseq [url ["/" "/dashboard/1" "/question/2?a=b%20c#x" "https://analytics.example.com/dashboard/1"]]
+        (testing url
+          (is (= url (free-oidc/check-sso-redirect url))))))))
+
 (deftest check-sso-redirect-blocks-open-redirect-test
   (testing "relative redirects are allowed"
     (is (= "/dashboard/1" (free-oidc/check-sso-redirect "/dashboard/1"))))
