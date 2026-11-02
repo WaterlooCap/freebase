@@ -57,7 +57,7 @@ class Client:
     def __init__(self, base_url, api_key):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.opener = urllib.request.build_opener(RefuseRedirects)
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RefuseRedirects)
 
     def call(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
