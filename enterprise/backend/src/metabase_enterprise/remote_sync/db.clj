@@ -7,7 +7,6 @@
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
-   [metabase.warehouse-schema-overlay.core :as warehouse-schema-overlay]
    [toucan2.core :as t2]))
 
 (def ^:private ConditionKey
@@ -167,15 +166,12 @@
   (t2/select-one model :id id))
 
 (mu/defn instance-with-columns
-  "The `columns` of the instance of `model` with `id`, or nil; a Table is read through the overlay."
+  "The `columns` of the instance of `model` with `id`, or nil."
   [model   :- :keyword
    columns :- [:sequential :keyword]
    id      :- ms/PositiveInt]
   (t2/select-one (into [model] columns)
-                 :id id
-                 (if (= model :model/Table)
-                   {:from [(warehouse-schema-overlay/table-query)]}
-                   {})))
+                 :id id))
 
 (mu/defn instance-names
   "The `:id` and `:name` of the instances of `model` with `ids`."
@@ -226,15 +222,15 @@
     :model/Field   {:alias  "f"
                     :select [:f.name :f.table_id [:t.collection_id :collection_id] [:t.name :table_name]]
                     :from   [[:metabase_field :f]]
-                    :join   [(warehouse-schema-overlay/table-query {:alias :t}) [:= :f.table_id :t.id]]}
+                    :join   [[(t2/table-name :model/Table) :t] [:= :f.table_id :t.id]]}
     :model/Segment {:alias  "s"
                     :select [:s.name :s.table_id [:t.collection_id :collection_id] [:t.name :table_name]]
                     :from   [[:segment :s]]
-                    :join   [(warehouse-schema-overlay/table-query {:alias :t}) [:= :s.table_id :t.id]]}
+                    :join   [[(t2/table-name :model/Table) :t] [:= :s.table_id :t.id]]}
     :model/Measure {:alias  "s"
                     :select [:s.name :s.table_id [:t.collection_id :collection_id] [:t.name :table_name]]
                     :from   [[:measure :s]]
-                    :join   [(warehouse-schema-overlay/table-query {:alias :t}) [:= :s.table_id :t.id]]}))
+                    :join   [[(t2/table-name :model/Table) :t] [:= :s.table_id :t.id]]}))
 
 (mu/defn tracking-details-by-id
   "The name, table id, collection id, and table name of the `model-key` (Field, Segment, Measure, or Action) instance
@@ -323,7 +319,7 @@
   (or (t2/exists? :model/TableUserSettings :table_id table-id)
       (t2/exists? :model/FieldUserSettings
                   {:from  [[(t2/table-name :model/FieldUserSettings) :u]]
-                   :join  [(warehouse-schema-overlay/field-query {:alias :f :user-settings? false})
+                   :join  [[(t2/table-name :model/Field) :f]
                            [:= :f.id :u.field_id]]
                    :where [:= :f.table_id table-id]})))
 
@@ -442,8 +438,7 @@
        (t2/exists? :model/Dashboard :collection_id [:in collection-ids])
        (t2/exists? :model/Document :collection_id [:in collection-ids])
        (t2/exists? :model/Timeline :collection_id [:in collection-ids])
-       (t2/exists? :model/Table {:from  [(warehouse-schema-overlay/table-query)]
-                                 :where [:and [:= :is_published true] [:in :collection_id collection-ids]]}))))
+       (t2/exists? :model/Table {:where [:and [:= :is_published true] [:in :collection_id collection-ids]]}))))
 
 (mu/defn remote-synced-subtree-collection-ids
   "The IDs of the remote-synced Collections among `collections` and their descendants."
@@ -654,7 +649,7 @@
   "Apply `changes` to the RemoteSyncObject with `rso-id`."
   [rso-id  :- ms/PositiveInt
    changes :- ::remote-sync.schema/remote-sync-object.update]
-  (t2/update! :model/RemoteSyncObject rso-id changes))
+  (t2/update! :model/RemoteSyncObject :id rso-id changes))
 
 (mu/defn set-rsos-status!
   "Set the status of the RemoteSyncObjects with `rso-ids` to `status` as of `timestamp`."
@@ -698,7 +693,7 @@
 (mu/defn delete-rso!
   "Delete the RemoteSyncObject with `rso-id`."
   [rso-id :- ms/PositiveInt]
-  (t2/delete! :model/RemoteSyncObject rso-id))
+  (t2/delete! :model/RemoteSyncObject :id rso-id))
 
 (mu/defn delete-rsos!
   "Delete the RemoteSyncObjects with `rso-ids`."
@@ -735,7 +730,7 @@
 (mu/defn task
   "The RemoteSyncTask with `task-id`, or nil."
   [task-id :- ms/PositiveInt]
-  (t2/select-one :model/RemoteSyncTask task-id))
+  (t2/select-one :model/RemoteSyncTask :id task-id))
 
 (mu/defn lock-task
   "The RemoteSyncTask with `task-id`, locked for update, or nil."
@@ -770,13 +765,17 @@
                              [:id :desc]]}))
 
 (mu/defn last-successful-task
-  "The newest finished RemoteSyncTask that was neither cancelled nor failed and recorded a version, or nil."
+  "The newest finished RemoteSyncTask that was neither cancelled, failed, nor ended in conflict and recorded a
+  version, or nil."
   []
   (t2/select-one :model/RemoteSyncTask
                  {:where    [:and
                              [:<> nil :ended_at]
                              [:= false :cancelled]
                              [:= nil :error_message]
+                             ;; a conflict task records the version it conflicted against; counting it as the base
+                             ;; would hide the remote's changes from a retry, merge included
+                             [:= nil :conflicts]
                              [:<> nil :version]]
                   :limit    1
                   :order-by [[:started_at :desc]
@@ -791,19 +790,19 @@
   "Apply `changes` to the RemoteSyncTask with `task-id`."
   [task-id :- ms/PositiveInt
    changes :- ::remote-sync.schema/remote-sync-task.update]
-  (t2/update! :model/RemoteSyncTask task-id changes))
+  (t2/update! :model/RemoteSyncTask :id task-id changes))
 
 (mu/defn end-task!
   "Apply `changes` to the RemoteSyncTask with `task-id` and mark it ended now."
   [task-id :- ms/PositiveInt
    changes :- ::remote-sync.schema/remote-sync-task.update]
-  (t2/update! :model/RemoteSyncTask task-id (assoc changes :ended_at :%now)))
+  (t2/update! :model/RemoteSyncTask :id task-id (assoc changes :ended_at :%now)))
 
 (mu/defn report-task-progress!
   "Record `progress` for the RemoteSyncTask with `task-id`, stamping the progress report time."
   [task-id  :- ms/PositiveInt
    progress :- number?]
-  (t2/update! :model/RemoteSyncTask task-id {:progress progress, :last_progress_report_at :%now}))
+  (t2/update! :model/RemoteSyncTask :id task-id {:progress progress, :last_progress_report_at :%now}))
 
 (mu/defn supersede-stale-tasks!
   "Cancel and end now the started, unfinished RemoteSyncTasks that last reported progress before `cutoff`."

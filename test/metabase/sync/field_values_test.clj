@@ -13,6 +13,7 @@
    [metabase.test.data :as data]
    [metabase.test.data.one-off-dbs :as one-off-dbs]
    [metabase.warehouse-schema.field-values.distinct-batch :as distinct-batch]
+   [metabase.warehouse-schema.models.field-user-settings :as field-user-settings]
    [metabase.warehouse-schema.models.field-values :as field-values]
    [toucan2.core :as t2]))
 
@@ -39,7 +40,7 @@
   (testing "Test that when we delete FieldValues syncing the Table again will cause them to be re-created"
     (testing "Check that we have expected field values to start with"
       ;; Manually activate Field values since they are not created during sync (#53387)
-      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :venues :price)))
+      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :venues :price)))
       ;; Reset them to values that should get updated during sync
       (t2/update! :model/FieldValues :field_id (mt/id :venues :price) {:values [10 20 30 40]})
       ;; sync to make sure the field values are filled
@@ -55,7 +56,7 @@
              (sync-database-counts! "update-field-values" (data/db)))))
     (testing "Now re-sync the table and make sure they're back"
       ;; Manually activate Field values since they are not created during sync (#53387)
-      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :venues :price)))
+      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :venues :price)))
       ;; Reset them to values that should get updated during sync
       (t2/update! :model/FieldValues :field_id (mt/id :venues :price) {:values [10 20 30 40]})
       (sync/sync-table! (t2/select-one :model/Table :id (mt/id :venues)))
@@ -70,7 +71,7 @@
       (is (= [1 2 3 4]
              (venues-price-field-values))))
     (testing "Update the FieldValues, remove one of the values that should be there"
-      (t2/update! :model/FieldValues (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full) {:values [1 2 3]})
+      (t2/update! :model/FieldValues :id (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full) {:values [1 2 3]})
       (is (= [1 2 3]
              (venues-price-field-values))))
     (testing "Now re-sync the table and validate the field values updated"
@@ -84,7 +85,7 @@
   (testing "sync refreshes a table's FieldValues until a user hides it through PUT /api/table/:id"
     (data/with-temp-copy-of-db
       (letfn [(field-values-after-sync! []
-                (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :venues :price)))
+                (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :venues :price)))
                 (t2/update! :model/FieldValues :field_id (mt/id :venues :price) :type :full {:values [10 20 30 40]})
                 (sync/update-field-values! (data/db))
                 (venues-price-field-values))]
@@ -97,7 +98,7 @@
     (testing "Test that syncing will skip updating inactive FieldValues"
       (mt/with-full-data-perms-for-all-users!
         (t2/update! :model/FieldValues
-                    (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
+                    :id (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
                     {:last_used_at (t/minus (t/offset-date-time) (t/days 20))
                      :values       [1 2 3]})
         (is (= (repeat 2 {:errors 0, :created 0, :updated 0, :deleted 0})
@@ -110,7 +111,7 @@
                         (t/minus (t/offset-date-time) (t/hours 2))))
           (testing "Field is syncing after usage"
             (t2/update! :model/FieldValues
-                        (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
+                        :id (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
                         {:values [1 2 3]})
             (is (= (repeat 2 {:errors 0, :created 0, :updated 1, :deleted 0})
                    (sync-database-counts! "update-field-values" (data/db))))
@@ -118,7 +119,7 @@
                           (mt/user-http-request :rasta :get 200 (format "field/%d/values" (mt/id :venues :price)))))))
         (testing "If only advanced fields have been used recently, still sync"
           (t2/update! :model/FieldValues
-                      (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
+                      :id (t2/select-one-pk :model/FieldValues :field_id (mt/id :venues :price) :type :full)
                       {:last_used_at (t/minus (t/offset-date-time) (t/days 20))
                        :values       [1 2 3]})
           (t2/insert! :model/FieldValues {:field_id     (mt/id :venues :price)
@@ -193,7 +194,7 @@
     ;; insert 50 rows & sync
     (one-off-dbs/insert-rows-and-sync! (one-off-dbs/range-str 50))
     ;; Manually activate Field values since they are not created during sync (#53387)
-    (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :blueberries_consumed :str)))
+    (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :blueberries_consumed :str)))
     (testing "has_field_values should be auto-list"
       (is (= :auto-list
              (t2/select-one-fn :has_field_values :model/Field :id (mt/id :blueberries_consumed :str)))))
@@ -224,7 +225,7 @@
     ;; insert 50 rows & sync
     (one-off-dbs/insert-rows-and-sync! [(str/join (repeat 50 "A"))])
     ;; Manually activate Field values since they are not created during sync (#53387)
-    (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :blueberries_consumed :str)))
+    (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :blueberries_consumed :str)))
     (testing "has_field_values should be auto-list"
       (is (= :auto-list
              (t2/select-one-fn :has_field_values :model/Field :id (mt/id :blueberries_consumed :str)))))
@@ -254,8 +255,8 @@
       (one-off-dbs/insert-rows-and-sync! (one-off-dbs/range-str 50))
       ;; change has_field_values to list
       ;; Manually activate Field values since they are not created during sync (#53387)
-      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :blueberries_consumed :str)))
-      (t2/update! :model/Field (mt/id :blueberries_consumed :str) {:has_field_values "list"})
+      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :blueberries_consumed :str)))
+      (t2/update! :model/Field :id (mt/id :blueberries_consumed :str) {:has_field_values "list"})
       (testing "has_more_values should initially be false"
         (is (= false
                (t2/select-one-fn :has_more_values :model/FieldValues :field_id (mt/id :blueberries_consumed :str)))))
@@ -286,9 +287,9 @@
       ;; insert a row with values contain 50 chars
       (one-off-dbs/insert-rows-and-sync! [(str/join (repeat 50 "A"))])
       ;; Manually activate Field values since they are not created during sync (#53387)
-      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :blueberries_consumed :str)))
+      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :blueberries_consumed :str)))
       ;; change has_field_values to list
-      (t2/update! :model/Field (mt/id :blueberries_consumed :str) {:has_field_values "list"})
+      (t2/update! :model/Field :id (mt/id :blueberries_consumed :str) {:has_field_values "list"})
       (testing "has_more_values should initially be false"
         (is (= false
                (t2/select-one-fn :has_more_values :model/FieldValues :field_id (mt/id :blueberries_consumed :str)))))
@@ -311,7 +312,7 @@
       ;; insert 50 rows & sync
       (one-off-dbs/insert-rows-and-sync! [(str/join (repeat 50 "A"))])
       ;; Manually activate Field values since they are not created during sync (#53387)
-      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field (mt/id :blueberries_consumed :str)))
+      (field-values/get-or-create-full-field-values! (t2/select-one :model/Field :id (mt/id :blueberries_consumed :str)))
       ;; we throw ConnectException, which is a non-recoverable exception. Mock the SQL-path fetcher
       ;; (run-distinct-batch) since that's what the H2 sync path will call.
       (mt/with-dynamic-fn-redefs [distinct-batch/run-distinct-batch (fn [& _] (throw (java.net.ConnectException.)))]
@@ -341,9 +342,9 @@
       (testing "sanity check: the sync values show by default"
         (is (=? {:has_field_values nil, :visibility_type :normal}
                 (first (sync.db/fields-for-field-values [field-id])))))
-      (mt/with-temp [:model/FieldUserSettings _ {:field_id field-id, :has_field_values :none, :visibility_type :sensitive}]
-        (is (=? {:has_field_values :none, :visibility_type :sensitive}
-                (first (sync.db/fields-for-field-values [field-id]))))))))
+      (field-user-settings/upsert-field-user-settings! {:id field-id} {:has_field_values :none, :visibility_type :sensitive})
+      (is (=? {:has_field_values :none, :visibility_type :sensitive}
+              (first (sync.db/fields-for-field-values [field-id])))))))
 
 (deftest can-batch-distinct?-test
   (testing "SQL driver with :nested-queries and no required filter → batch path"

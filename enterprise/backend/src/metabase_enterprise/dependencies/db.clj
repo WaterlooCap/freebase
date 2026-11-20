@@ -16,7 +16,6 @@
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
-   [metabase.warehouse-schema-overlay.core :as warehouse-schema-overlay]
    [toucan2.core :as t2]))
 
 (def ^:private VisibleOpts
@@ -278,7 +277,7 @@
                            nil))]
     {:table-name (case entity-type
                    :card :report_card
-                   :table (first (warehouse-schema-overlay/table-query))
+                   :table (t2/table-name :model/Table)
                    :transform :transform
                    :snippet :native_query_snippet
                    :dashboard :report_dashboard
@@ -428,7 +427,7 @@
     (:collection joins) (conj :collection [:= :entity.collection_id :collection.id])
     (:dashboard joins) (conj [:report_dashboard :dashboard] [:= :entity.dashboard_id :dashboard.id])
     (:document joins) (conj :document [:= :entity.document_id :document.id])
-    (:table joins) (conj (warehouse-schema-overlay/table-query {:alias :table}) [:= :entity.table_id :table.id])))
+    (:table joins) (conj [(t2/table-name :model/Table) :table] [:= :entity.table_id :table.id])))
 
 (defn- dependency-item-select
   "The per-entity-type SELECT that [[dependency-item-ids]] and [[dependency-item-count]] union together, matching
@@ -550,20 +549,13 @@
    ids         :- [:set ::deps.dependency-types/entity-id]]
   (t2/select (deps.dependency-types/dependency-type->model entity-type) :id [:in ids]))
 
-(defn- entity-source
-  "What a read of `entity-type` selects from: the overlay for a Table, else the model's own table."
-  [entity-type]
-  (if (= entity-type :table)
-    {:from [(warehouse-schema-overlay/table-query)]}
-    {}))
-
 (mu/defn instances-with-columns
   "The `columns` of the instances of the entity type `entity-type` with `ids`."
   [entity-type :- ::deps.dependency-types/dependency-types
    columns     :- [:sequential :keyword]
    ids         :- [:sequential ::deps.dependency-types/entity-id]]
   (t2/select (into [(deps.dependency-types/dependency-type->model entity-type)] columns)
-             :id [:in ids] (entity-source entity-type)))
+             :id [:in ids]))
 
 (mu/defn instance-with-columns
   "The `columns` of the instance of the entity type `entity-type` with `id`, or nil."
@@ -571,7 +563,7 @@
    columns     :- [:sequential :keyword]
    id          :- ::deps.dependency-types/entity-id]
   (t2/select-one (into [(deps.dependency-types/dependency-type->model entity-type)] columns)
-                 :id id (entity-source entity-type)))
+                 :id id))
 
 (mu/defn card
   "The Card with `card-id`, or nil."
@@ -592,34 +584,29 @@
   "Set the result metadata of the Card with `card-id`, returning the number updated."
   [card-id         :- ::lib.schema.id/card
    result-metadata :- [:maybe ::queries.schema/card.result-metadata]]
-  (t2/update! :model/Card card-id {:result_metadata result-metadata}))
+  (t2/update! :model/Card :id card-id {:result_metadata result-metadata}))
 
 (mu/defn tables
   "The Tables with `table-ids`."
   [table-ids :- [:set ::lib.schema.id/table]]
-  (t2/select :model/Table :id [:in table-ids] {:from [(warehouse-schema-overlay/table-query)]}))
+  (t2/select :model/Table :id [:in table-ids]))
 
 (mu/defn table-database-ids
   "The `:id` and `:db_id` of the Tables with `table-ids`."
   [table-ids :- [:sequential ::lib.schema.id/table]]
-  (t2/select [:model/Table :id :db_id] :id [:in table-ids] {:from [(warehouse-schema-overlay/table-query {:user-settings? false})]}))
+  (t2/select [:model/Table :id :db_id] :id [:in table-ids]))
 
 (mu/defn table-id-by-name
   "The ID of the Table named `table-name` in `schema` of the Database with `db-id`, or nil."
   [db-id      :- ::lib.schema.id/database
    schema     :- [:maybe :string]
    table-name :- :string]
-  (t2/select-one-fn :id :model/Table :db_id db-id :schema schema :name table-name {:from [(warehouse-schema-overlay/table-query {:user-settings? false})]}))
+  (t2/select-one-fn :id :model/Table :db_id db-id :schema schema :name table-name))
 
 (mu/defn transform-sources
   "The `:id` and `:source` of the Transforms with `transform-ids`."
   [transform-ids :- [:sequential ::lib.schema.id/transform]]
   (t2/select [:model/Transform :id :source] :id [:in transform-ids]))
-
-(mu/defn transform-ids-of-source-database
-  "The IDs of the Transforms reading from the Database with `db-id`."
-  [db-id :- ::lib.schema.id/database]
-  (t2/select-pks-set :model/Transform :source_database_id db-id))
 
 ;;; -------------------------------------------------- Dependencies --------------------------------------------------
 
@@ -820,7 +807,7 @@
   "Apply `changes` to the AnalysisFinding with `finding-id`, returning the number updated."
   [finding-id :- ms/PositiveInt
    changes    :- (mut/select-keys ::dependencies.schema/analysis-finding.update [:analyzed_at :analysis_version :result :stale])]
-  (t2/update! :model/AnalysisFinding finding-id changes))
+  (t2/update! :model/AnalysisFinding :id finding-id changes))
 
 (mu/defn mark-findings-stale!
   "Mark the AnalysisFindings of the entities `entity-type` `entity-ids` as stale, returning the number updated."
@@ -880,8 +867,8 @@
                                                                          :field/updated_at
                                                                          :else :field_settings/updated_at]]
                                                                   :last_field_update]]
-                                                     :from      [(warehouse-schema-overlay/table-query {:alias :table})]
-                                                     :left-join [(warehouse-schema-overlay/field-query {:alias :field})
+                                                     :from      [[(t2/table-name :model/Table) :table]]
+                                                     :left-join [[(t2/table-name :model/Field) :field]
                                                                  [:= :field/table_id :table/id]
                                                                  [(t2/table-name :model/FieldUserSettings) :field_settings]
                                                                  [:= :field_settings/field_id :field/id]]
