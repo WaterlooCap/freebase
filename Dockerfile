@@ -43,7 +43,8 @@ RUN INTERACTIVE=false CI=true MB_EDITION=$MB_EDITION bin/build.sh :version ${VER
 ## Remember that this runner image needs to be the same as bin/docker/Dockerfile with the exception that this one grabs the
 ## jar from the previous stage rather than the local build
 
-FROM eclipse-temurin:25-jre-alpine AS runner
+# Pinned to the Nov 2026 OpenJDK CPU build (CVE-2026-114938 Java4Shell and the CPU fixes); bump with each JRE CPU.
+FROM eclipse-temurin:25.0.5.1_2-jre-alpine AS runner
 
 ENV FC_LANG=en-US LC_CTYPE=en_US.UTF-8
 

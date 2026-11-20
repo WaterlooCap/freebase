@@ -30,7 +30,7 @@
    [metabase.util.quick-task :as quick-task]
    [metabase.warehouses.db :as warehouses.db]
    [metabase.warehouses.provider-detection :as provider-detection]
-   [metabase.warehouses.schema]
+   [metabase.warehouses.schema :as warehouses.schema]
    [metabase.warehouses.settings :as warehouses.settings]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
@@ -163,16 +163,6 @@
   metabase-enterprise.advanced-permissions.common
   [_db-id]
   (mi/superuser?))
-
-(defenterprise mark-transforms-stale-on-database-delete!
-  "Hook called from the `:model/Database` before-delete. Transforms whose `source_database_id`
-   is about to be SET NULL by the FK action survive the delete (so the analyst can read the
-   SQL/Python and rebuild against a new DB), but their dependency-analysis findings need to
-   be re-run so they surface on `/monitor/dependency-diagnostics/broken`. OSS is a no-op
-   (no dependencies module)."
-  metabase-enterprise.dependencies.events
-  [_db-id]
-  nil)
 
 (defn- can-write?
   [db-id]
@@ -432,14 +422,10 @@
 
 (t2/define-before-delete :model/Database
   [{id :id, driver :engine, :as database}]
-  ;; Mark transforms with this DB as source as stale so dependency-diagnostics re-analyzes
-  ;; them after the row's gone. Must run BEFORE the FK SET NULL fires (which happens when
-  ;; the database row is deleted below) so we can still resolve the affected transforms by
-  ;; source_database_id.
-  (mark-transforms-stale-on-database-delete! id)
   (unschedule-tasks! database)
   (secret/delete-orphaned-secrets! database)
   (delete-database-fields! id)
+  (warehouses.db/delete-transforms-for-database! id)
   (->> (eduction
         (map t2.realize/realize)
         (partition-all 1000)
@@ -696,7 +682,8 @@
   ;; Connection details are never exported. Import is unconditional.
   (let [details-transform {:export-with-context (fn [_current _ _details] ::serdes/skip)
                            :import              identity}]
-    {:copy      [:auto_run_queries :cache_field_values_schedule :caveats :dbms_version
+    {:schema    ::warehouses.schema/external-database
+     :copy      [:auto_run_queries :cache_field_values_schedule :caveats :dbms_version
                  :description :engine :is_audit :is_attached_dwh :is_full_sync :is_on_demand :is_stub
                  :metadata_sync_schedule :name :points_of_interest :provider_name :refingerprint :settings :timezone :uploads_enabled
                  :uploads_schema_name :uploads_table_prefix]

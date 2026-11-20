@@ -51,7 +51,7 @@
 (def ^:private EntityType
   "Schema for a valid table entity type, as either a keyword or a string."
   (mu/with-api-error-message
-   [:fn #(isa? types/entity-hierarchy (keyword %) :entity/*)]
+   [:fn {:json-schema {:type "string"}} #(isa? types/entity-hierarchy (keyword %) :entity/*)]
    (deferred-tru "value must be a valid entity type (keyword or string).")))
 
 (mr/def ::data-authority-write
@@ -178,10 +178,9 @@
                                (fn [response]
                                  (dissoc response :json_query :context :cached :average_execution_time))))))))))
 
-(def ^:private TableUpdateBodySingle
-  "Body of `PUT /api/table/:id`."
-  [:map {:closed true}
-   [:display_name            {:optional true} [:maybe ms/NonBlankString]]
+(def ^:private table-update-entries
+  "User-settable Table columns, as optional `:map` entries."
+  [[:display_name            {:optional true} [:maybe ms/NonBlankString]]
    [:entity_type             {:optional true} [:maybe EntityType]]
    [:visibility_type         {:optional true} [:maybe TableVisibilityType]]
    [:description             {:optional true} [:maybe :string]]
@@ -189,29 +188,22 @@
    [:points_of_interest      {:optional true} [:maybe :string]]
    [:show_in_getting_started {:optional true} [:maybe :boolean]]
    [:field_order             {:optional true} [:maybe FieldOrder]]
-   [:data_authority          {:optional true} [:maybe ::data-authority-write]]
+   [:data_authority          {:optional true} ::data-authority-write]
    [:data_source             {:optional true} [:maybe :string]]
    [:data_layer              {:optional true} [:maybe :string]]
    [:owner_email             {:optional true} [:maybe :string]]
    [:owner_user_id           {:optional true} [:maybe :int]]
    [:collection_id           {:optional true} [:maybe ms/PositiveInt]]])
 
+(def ^:private TableUpdateBodySingle
+  "Body of `PUT /api/table/:id`."
+  (into [:map {:closed true}] table-update-entries))
+
 (def ^:private TableUpdateBodyBulk
   "Body of the deprecated `PUT /api/table/`."
-  [:map {:closed true}
-   [:ids                                      [:sequential ms/PositiveInt]]
-   [:display_name            {:optional true} [:maybe ms/NonBlankString]]
-   [:entity_type             {:optional true} [:maybe EntityType]]
-   [:visibility_type         {:optional true} [:maybe TableVisibilityType]]
-   [:description             {:optional true} [:maybe :string]]
-   [:caveats                 {:optional true} [:maybe :string]]
-   [:points_of_interest      {:optional true} [:maybe :string]]
-   [:show_in_getting_started {:optional true} [:maybe :boolean]]
-   [:data_authority          {:optional true} [:maybe ::data-authority-write]]
-   [:data_source             {:optional true} [:maybe :string]]
-   [:data_layer              {:optional true} [:maybe :string]]
-   [:owner_email             {:optional true} [:maybe :string]]
-   [:owner_user_id           {:optional true} [:maybe :int]]])
+  (into [:map {:closed true}
+         [:ids [:sequential ms/PositiveInt]]]
+        table-update-entries))
 
 (mu/defn ^:private update-table!*
   "Takes an existing table and the changes, updates in the database and optionally calls `table/update-field-positions!`
@@ -226,7 +218,7 @@
                          (u/update-some :data_layer keyword)
                          (u/update-some :data_source keyword)
                          not-empty)]
-    (schema.table-user-settings/upsert-user-settings existing-table changes))
+    (schema.table-user-settings/upsert-table-user-settings! existing-table changes))
   (let [updated-table        (warehouse-schema-rest.db/table id)
         changed-field-order? (not= (:field_order updated-table) (:field_order existing-table))]
     (if changed-field-order?
@@ -299,7 +291,7 @@
 (api.macros/defendpoint :put "/"
   "Update all `Table` in `ids`.
 
-  Deprecated, should use PUT /table/edit from now on."
+  Deprecated: use `POST /api/data-studio/table/edit`."
   [_route-params
    _query-params
    {:keys [ids], :as body} :- TableUpdateBodyBulk]

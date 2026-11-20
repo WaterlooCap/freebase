@@ -72,7 +72,7 @@
                  (into #{} (map #(dissoc % :id)
                                 (t2/select :model/Dependency :from_entity_id dashboard-id :from_entity_type :dashboard)))))
          (t2/delete! :model/DashboardCard :id basic-dashcard-id)
-         (t2/update! :model/Dashboard dashboard-id {:parameters []})
+         (t2/update! :model/Dashboard :id dashboard-id {:parameters []})
          (mt/with-temp [:model/Card {scalar-card-id :id} {:dataset_query (-> (lib/query mp products)
                                                                              (lib/aggregate (lib/count)))
                                                           :display :scalar}
@@ -148,7 +148,7 @@
                         :to_entity_id column-click-target-dashboard-id}}
                      (into #{} (map #(dissoc % :id)
                                     (t2/select :model/Dependency :from_entity_id dashboard-id :from_entity_type :dashboard)))))
-             (t2/delete! :model/Dashboard dashboard-id)
+             (t2/delete! :model/Dashboard :id dashboard-id)
              (events/publish-event! :event/dashboard-delete {:object updated-dashboard :user-id api/*current-user-id*})
              (is (empty? (t2/select :model/Dependency :from_entity_id dashboard-id :from_entity_type :dashboard))))))))))
 
@@ -190,7 +190,7 @@
                                                                              {:type "smartLink"
                                                                               :attrs {"entityId" products-id
                                                                                       "model" "table"}}]}]})]
-             (t2/update! :model/Document document-id updated-doc)
+             (t2/update! :model/Document :id document-id updated-doc)
              (events/publish-event! :event/document-update {:object updated-doc :user-id api/*current-user-id*})
              (deps.test/synchronously-run-backfill!)
              (is (=? #{{:from_entity_type :document
@@ -203,7 +203,7 @@
                         :to_entity_id products-id}}
                      (into #{} (map #(dissoc % :id)
                                     (t2/select :model/Dependency :from_entity_id document-id :from_entity_type :document)))))
-             (t2/delete! :model/Document document-id)
+             (t2/delete! :model/Document :id document-id)
              (events/publish-event! :event/document-delete {:object document :user-id api/*current-user-id*})
              (is (empty? (t2/select :model/Dependency :from_entity_id document-id :from_entity_type :document))))))))))
 
@@ -226,7 +226,7 @@
                     :to_entity_id card1-id}}
                  (into #{} (map #(dissoc % :id)
                                 (t2/select :model/Dependency :from_entity_id sandbox-id :from_entity_type :sandbox)))))
-         (t2/update! :model/Sandbox sandbox-id (assoc sandbox :card_id card2-id))
+         (t2/update! :model/Sandbox :id sandbox-id (assoc sandbox :card_id card2-id))
          (let [updated-sandbox (t2/select-one :model/Sandbox :id sandbox-id)]
            (events/publish-event! :event/sandbox-update {:object updated-sandbox :user-id api/*current-user-id*})
            (deps.test/synchronously-run-backfill!)
@@ -236,7 +236,7 @@
                       :to_entity_id card2-id}}
                    (into #{} (map #(dissoc % :id)
                                   (t2/select :model/Dependency :from_entity_id sandbox-id :from_entity_type :sandbox)))))
-           (t2/delete! :model/Sandbox sandbox-id)
+           (t2/delete! :model/Sandbox :id sandbox-id)
            (events/publish-event! :event/sandbox-delete {:object sandbox :user-id api/*current-user-id*})
            (is (empty? (t2/select :model/Dependency :from_entity_id sandbox-id :from_entity_type :sandbox)))))))))
 
@@ -268,7 +268,7 @@
            ;; The dimension endpoints announce their writes as card updates; see
            ;; [[metabase.metrics.api/notify-dimensions-changed!]].
            (let [before (t2/select-one :model/Card :id card-id)]
-             (t2/update! :model/Card card-id
+             (t2/update! :model/Card :id card-id
                          {:dimension_mappings [{:type         :table
                                                 :dimension-id "550e8400-e29b-41d4-a716-446655440000"
                                                 :table-id     (mt/id :categories)
@@ -366,49 +366,6 @@
                      :to_entity_id (mt/id :orders)}]
                    (t2/select :model/Dependency :from_entity_id transform-id :from_entity_type :transform)))))))))
 
-(deftest ^:synchronized database-delete-marks-source-transforms-stale-test
-  (testing "deleting a database marks its source transforms' analysis findings stale so they surface on /dependency-diagnostics/broken (GDGT-2447)"
-    (run-with-dependencies-setup!
-     (fn [_mp]
-       (mt/with-temp [:model/Database {db-id :id} {}
-                      :model/Transform {transform-id :id}
-                      {:source {:type :query
-                                :query {:database db-id
-                                        :type :native
-                                        :native {:query "SELECT 1"}}}
-                       :target {:schema "public" :name "out" :type :table}}
-                      :model/AnalysisFinding _ {:analyzed_entity_type :transform
-                                                :analyzed_entity_id transform-id
-                                                :result true
-                                                :stale false
-                                                :analysis_version models.analysis-finding/*current-analysis-finding-version*
-                                                :analyzed_at :%now}]
-         (is (false? (t2/select-one-fn :stale :model/AnalysisFinding
-                                       :analyzed_entity_type :transform
-                                       :analyzed_entity_id transform-id))
-             "baseline: existing finding is fresh")
-         (t2/delete! :model/Database db-id)
-         (is (nil? (t2/select-one :model/Database db-id))
-             "the Database row is actually gone")
-         (is (true? (t2/select-one-fn :stale :model/AnalysisFinding
-                                      :analyzed_entity_type :transform
-                                      :analyzed_entity_id transform-id))
-             "after db-delete the transform's finding is marked stale")
-         (testing "and re-running the entity-check job flips :result false so the transform shows on broken-diagnostics"
-           (#'task.entity-check/check-entities!)
-           (let [{:keys [stale result]} (t2/select-one :model/AnalysisFinding
-                                                       :analyzed_entity_type :transform
-                                                       :analyzed_entity_id transform-id)]
-             (is (false? stale))
-             (is (false? result)))
-           (testing "an analysis_finding_error row points the transform at itself so the diagnostics page (`/graph/breaking`) surfaces it"
-             (is (=? {:source_entity_type :transform
-                      :source_entity_id   transform-id
-                      :error_type         :validation-exception-error}
-                     (t2/select-one :model/AnalysisFindingError
-                                    :analyzed_entity_type :transform
-                                    :analyzed_entity_id transform-id))))))))))
-
 (deftest ^:synchronized transform-run-updates-dependencies-test
   (testing "transform run events trigger dependency calculations"
     (run-with-dependencies-setup!
@@ -469,7 +426,7 @@
                        :to_entity_id transform-id}]
                      (t2/select :model/Dependency :to_entity_id transform-id :to_entity_type :transform))))
            (testing "changing target update"
-             (t2/update! :model/Transform transform-id {:target (assoc target :name "test_table2")})
+             (t2/update! :model/Transform :id transform-id {:target (assoc target :name "test_table2")})
              (let [updated (t2/select-one :model/Transform :id transform-id)]
                (events/publish-event! :event/update-transform
                                       {:object updated
@@ -511,7 +468,7 @@
                        :to_entity_id transform-id}]
                      (t2/select :model/Dependency :to_entity_id transform-id :to_entity_type :transform))))
            (testing "changing target update"
-             (t2/update! :model/Transform transform-id {:target (assoc target :name "test_table2")})
+             (t2/update! :model/Transform :id transform-id {:target (assoc target :name "test_table2")})
              (let [updated (t2/select-one :model/Transform :id transform-id)]
                (events/publish-event! :event/update-transform
                                       {:object updated
@@ -539,7 +496,7 @@
                   (into #{} (map #(dissoc % :id)
                                  (t2/select :model/Dependency :from_entity_id segment-id :from_entity_type :segment))))))
          (testing "updating segment definition recalculates dependencies"
-           (t2/update! :model/Segment segment-id {:definition {:filter [:= [:field category-field-id nil] "Widget"]}})
+           (t2/update! :model/Segment :id segment-id {:definition {:filter [:= [:field category-field-id nil] "Widget"]}})
            (let [updated-segment (t2/select-one :model/Segment :id segment-id)]
              (events/publish-event! :event/segment-update {:object updated-segment :user-id api/*current-user-id*})
              (deps.test/synchronously-run-backfill!)
@@ -550,7 +507,7 @@
                     (into #{} (map #(dissoc % :id)
                                    (t2/select :model/Dependency :from_entity_id segment-id :from_entity_type :segment)))))))
          (testing "deleting segment removes all dependencies"
-           (t2/delete! :model/Segment segment-id)
+           (t2/delete! :model/Segment :id segment-id)
            (events/publish-event! :event/segment-delete {:object segment :user-id api/*current-user-id*})
            (is (empty? (t2/select :model/Dependency :from_entity_id segment-id :from_entity_type :segment)))))))))
 
@@ -603,8 +560,8 @@
                     (into #{} (map #(dissoc % :id)
                                    (t2/select :model/Dependency :from_entity_id measure-id :from_entity_type :measure))))))
            (testing "updating measure definition recalculates dependencies"
-             (t2/update! :model/Measure measure-id {:definition (-> (lib/query mp orders)
-                                                                    (lib/aggregate (lib/sum subtotal)))})
+             (t2/update! :model/Measure :id measure-id {:definition (-> (lib/query mp orders)
+                                                                        (lib/aggregate (lib/sum subtotal)))})
              (let [updated-measure (t2/select-one :model/Measure :id measure-id)]
                (events/publish-event! :event/measure-update {:object updated-measure :user-id api/*current-user-id*})
                (deps.test/synchronously-run-backfill!)
@@ -615,7 +572,7 @@
                       (into #{} (map #(dissoc % :id)
                                      (t2/select :model/Dependency :from_entity_id measure-id :from_entity_type :measure)))))))
            (testing "deleting measure removes all dependencies"
-             (t2/delete! :model/Measure measure-id)
+             (t2/delete! :model/Measure :id measure-id)
              (events/publish-event! :event/measure-delete {:object measure :user-id api/*current-user-id*})
              (is (empty? (t2/select :model/Dependency :from_entity_id measure-id :from_entity_type :measure))))))))))
 
